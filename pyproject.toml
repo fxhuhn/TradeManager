@@ -1,0 +1,49 @@
+# pyproject.toml
+# Konfiguration für Ruff Linter & Formatter
+
+[tool.ruff]
+# Zielversion von Python
+target-version = "py312"
+
+# Maximale Zeilenlänge
+line-length = 88
+
+# Ein- und Ausschlusskriterien
+exclude = [
+    ".git",
+    ".venv",
+    ".pytest_cache",
+    ".ruff_cache",
+    "__pycache__",
+    "build",
+    "dist"
+]
+
+[tool.ruff.lint]
+# Aktivierte Regelsätze:
+# E/W: pycodestyle
+# F: Pyflakes
+# I: isort (Import-Sortierung)
+# N: pep8-naming
+# UP: pyupgrade (Upgrade auf moderne Python-Syntax)
+# B: flake8-bugbear (Fehlererkennung)
+# A: flake8-builtins
+# C4: flake8-comprehensions
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4"]
+
+# Ignorierte Regeln
+# E501: Zeilenlänge (durch Formatter oder für lange SQL-Queries/Kommentare toleriert)
+# N802/N803: camelCase für TWS-Callback-Methoden/Argumente (z.B. orderStatus)
+ignore = ["E501", "N802", "N803"]
+
+[tool.ruff.lint.isort]
+# Festlegen der Sektionen für die Import-Sortierung
+section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]
+known-first-party = ["app"]
+
+[tool.ruff.format]
+# Standard-Formatierungseinstellungen
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
