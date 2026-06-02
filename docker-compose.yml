@@ -1,0 +1,29 @@
+# docker-compose.yml
+# Orchestriert die Trading-App und Dozzle zur Logüberwachung
+
+services:
+  trading-app:
+    build: .
+    container_name: trading-app
+    restart: unless-stopped
+    extra_hosts:
+      - 'host.docker.internal:host-gateway' # Linux: Erlaubt den Zugriff auf TWS auf dem Host
+    volumes:
+      - ./data:/app/data                     # Persistenter Speicher für SQLite DB und CSV-Datei
+      - ./config.toml:/app/config.toml:ro    # Read-only Konfiguration
+    env_file:
+      - .env                                 # Secrets (Telegram API-Keys)
+    logging:
+      driver: json-file
+      options:
+        max-size: '50m'                      # Begrenzung der Logdatei-Größe
+        max-file: '5'                        # Rotiert und behält maximal 5 Log-Dateien
+
+  dozzle:
+    image: amir20/dozzle:latest
+    container_name: dozzle-logs
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro  # Zugriff auf Docker socket zum Lesen der Logs
+    ports:
+      - '8080:8080'                          # Dozzle Web-Oberfläche auf Port 8080
