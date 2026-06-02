@@ -29,12 +29,20 @@ exclude = [
 # B: flake8-bugbear (Fehlererkennung)
 # A: flake8-builtins
 # C4: flake8-comprehensions
-select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4"]
+# PL: Pylint (Code-Qualität und Warnungen)
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "PL"]
 
 # Ignorierte Regeln
 # E501: Zeilenlänge (durch Formatter oder für lange SQL-Queries/Kommentare toleriert)
 # N802/N803: camelCase für TWS-Callback-Methoden/Argumente (z.B. orderStatus)
-ignore = ["E501", "N802", "N803"]
+# PLR2004: Magische Zahlen im Vergleich (toleriert für HTTP-Statuscodes und Test-Assertions)
+# PLR0911: Zu viele return-Statements (erlaubt für komplexe Validierungsfunktionen)
+# PLR0912/PLR0913/PLR0915: Komplexitätsprüfungen (Argumente, Verzweigungen und Anweisungen)
+# PLC0415: Lokale Imports (erlaubt zur Vermeidung zirkulärer Abhängigkeiten)
+ignore = [
+    "E501", "N802", "N803",
+    "PLR2004", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLC0415"
+]
 
 [tool.ruff.lint.isort]
 # Festlegen der Sektionen für die Import-Sortierung

@@ -72,8 +72,8 @@ def load_env(environment_path: Path) -> dict[str, str]:
     environment_variables: dict[str, str] = {}
     if environment_path.exists():
         with open(environment_path, encoding="utf-8") as file_handle:
-            for line in file_handle:
-                line = line.strip()
+            for raw_line in file_handle:
+                line = raw_line.strip()
                 if not line or line.startswith("#"):
                     continue
                 if "=" in line:

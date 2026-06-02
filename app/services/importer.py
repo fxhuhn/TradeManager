@@ -125,9 +125,9 @@ async def run_csv_import(
         logger.info("Keine Trade-Gruppen zum Importieren gefunden")
         return
 
-    for trade_group_id, legs in grouped_legs.items():
+    for trade_group_id, raw_legs in grouped_legs.items():
         # 3. Gruppe validieren
-        is_valid, err_msg = validate_group(trade_group_id, legs)
+        is_valid, err_msg = validate_group(trade_group_id, raw_legs)
         if not is_valid:
             logger.error(
                 "Validierungsfehler in Gruppe. Überspringe Gruppe.",
@@ -139,7 +139,7 @@ async def run_csv_import(
             )
             continue
 
-        entry_leg = next(leg for leg in legs if leg.bracket_role == "ENTRY")
+        entry_leg = next(leg for leg in raw_legs if leg.bracket_role == "ENTRY")
         account_id = entry_leg.account_id
 
         # 4. TotalCashValue abfragen (hochpräzise als Decimal)
@@ -191,7 +191,7 @@ async def run_csv_import(
         # Da LegRow frozen=True ist, rekonstruieren wir die Dataclasses mit der neuen Menge:
         import dataclasses
 
-        legs = [dataclasses.replace(leg, quantity=target_quantity) for leg in legs]
+        legs = [dataclasses.replace(leg, quantity=target_quantity) for leg in raw_legs]
         # Now legs is a list of reconstructed LegRows with updated quantities! That is extremely elegant!
 
         # 7. Atomarer UPSERT in die DB
