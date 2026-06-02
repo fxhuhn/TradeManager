@@ -1,14 +1,9 @@
 import os
-import sys
-from dataclasses import dataclass, field
-from pathlib import Path
 
 # Da tomllib ab Python 3.11 in der Standardbibliothek ist
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    # Fallback fuer ältere Versionen
-    import tomli as tomllib
+import tomllib
+from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -76,7 +71,7 @@ def load_env(environment_path: Path) -> dict[str, str]:
     """Lädt Schlüssel-Wert-Paare aus einer .env-Datei."""
     environment_variables: dict[str, str] = {}
     if environment_path.exists():
-        with open(environment_path, "r", encoding="utf-8") as file_handle:
+        with open(environment_path, encoding="utf-8") as file_handle:
             for line in file_handle:
                 line = line.strip()
                 if not line or line.startswith("#"):

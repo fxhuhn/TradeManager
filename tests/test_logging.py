@@ -1,6 +1,8 @@
 from pathlib import Path
+
 import pytest
 import structlog
+
 from app.core.logging_setup import configure_logging
 
 

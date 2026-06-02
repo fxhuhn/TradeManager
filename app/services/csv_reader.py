@@ -1,7 +1,9 @@
 import csv
 from decimal import Decimal
 from pathlib import Path
+
 import structlog
+
 from app.core.models import LegRow
 
 logger = structlog.get_logger()
@@ -88,7 +90,7 @@ def load_csv(csv_path: Path) -> dict[str, list[LegRow]]:
         return grouped_legs
 
     try:
-        with open(csv_path, mode="r", encoding="utf-8-sig") as file_handle:
+        with open(csv_path, encoding="utf-8-sig") as file_handle:
             reader = csv.DictReader(file_handle)
             reader.fieldnames = (
                 [name.strip() for name in reader.fieldnames]

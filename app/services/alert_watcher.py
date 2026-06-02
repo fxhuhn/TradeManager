@@ -1,9 +1,10 @@
 import asyncio
-from datetime import datetime, timedelta, timezone
-from typing import Set
-import structlog
+from datetime import UTC, datetime, timedelta
+
 import aiosqlite
+import structlog
 from ib_async import IB
+
 from app.core.config import Config
 from app.services.notifier import TelegramNotifier
 from app.trading.recovery import run_recovery
@@ -18,8 +19,8 @@ class AlertState:
     """
 
     def __init__(self):
-        self.reported_order_ids: Set[int] = set()
-        self.reported_trade_groups: Set[str] = set()
+        self.reported_order_ids: set[int] = set()
+        self.reported_trade_groups: set[str] = set()
 
     def is_order_reported(self, order_id: int) -> bool:
         return order_id in self.reported_order_ids
@@ -45,12 +46,12 @@ async def check_dead_orders(
     länger als `threshold_minutes` zurückliegt.
     """
     # UTC-Zeit bestimmen
-    cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=threshold_minutes)
+    cutoff_time = datetime.now(UTC) - timedelta(minutes=threshold_minutes)
     cutoff_str = cutoff_time.strftime("%Y-%m-%d %H:%M:%S")
 
     query = """
-        SELECT order_id, trade_group_id, symbol, transmitted_at 
-        FROM orders 
+        SELECT order_id, trade_group_id, symbol, transmitted_at
+        FROM orders
         WHERE status = 'Submitted' AND transmitted_at < ?
     """
     try:

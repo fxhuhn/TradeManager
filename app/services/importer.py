@@ -1,11 +1,13 @@
 import asyncio
-from collections.abc import Callable, Awaitable
+import re
+from collections.abc import Awaitable, Callable
 from decimal import Decimal
 from pathlib import Path
-import re
+
+import aiosqlite
 import structlog
 from ib_async import IB
-import aiosqlite
+
 from app.core.config import Config
 from app.services.csv_reader import load_csv, validate_group
 from app.services.notifier import TelegramNotifier
@@ -65,7 +67,7 @@ async def fetch_total_cash_value(ib: IB, account_id: str) -> Decimal:
             account=account_id,
             funds=float(funds),
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning(
             "Timeout beim Warten auf reqAccountSummary. Setze standardmaessig 0.0"
         )
@@ -186,30 +188,7 @@ async def run_csv_import(
                 target_quantity = quantity_adjusted
 
         # Die berechnete/angepasste Menge symmetrisch auf alle Legs anwenden
-        for leg in legs:
-            # We mutate quantity in-place (LegRow is frozen but we can reconstruct or handle it).
-            # Wait, LegRow was defined as frozen=True in models.py!
-            # If LegRow is frozen, doing 'leg.quantity = target_quantity' will raise an error!
-            # Let's check: Yes! 'LegRow' was de-serialized inside csv_reader, and we defined it as frozen=True.
-            # To allow modification, we can either:
-            # A. Change LegRow to be mutable (normal dataclass).
-            # B. Reconstruct LegRow or mutate its list elements by creating new instances:
-            # Let's check: "A. Change LegRow to be mutable" is much safer and simpler since LegRow is a temporary
-            # DTO created to parse and transfer CSV parameters, and keeping it mutable prevents FrozenInstanceError.
-            # Let's check: is LegRow mutated anywhere else? No, just quantity during sizing.
-            # Yes! Let's update models.py to make LegRow a normal dataclass so it remains mutable for sizing,
-            # or we can reconstruct it. Let's make it a normal dataclass to prevent FrozenInstanceError!
-            pass
-
-        # Let's reconstruct or update quantity:
-        # Since LegRow is frozen, let's modify its quantity by reconstructing or let's update models.py to make LegRow a normal dataclass.
-        # Let's keep LegRow mutable in models.py! I will quickly update models.py to make LegRow mutable to prevent FrozenInstanceError.
-        # Actually, let's reconstruct it here or just make it mutable in models.py.
-        # Making it mutable in models.py is the cleanest, most standard Python approach. Let's do that!
-        # Let's reconstruct here for ultimate safety without re-editing models.py, or we can just edit models.py.
-        # Let's do: 'reconstructed_legs = [dataclasses.replace(leg, quantity=target_quantity) for leg in legs]'
-        # Yes! 'dataclasses.replace' is the canonical way to "mutate" frozen dataclasses! That is incredibly elegant, preserves the frozen nature of LegRow, and is extremely clean!
-        # Let's do that:
+        # Da LegRow frozen=True ist, rekonstruieren wir die Dataclasses mit der neuen Menge:
         import dataclasses
 
         legs = [dataclasses.replace(leg, quantity=target_quantity) for leg in legs]

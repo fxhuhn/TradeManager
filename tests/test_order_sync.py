@@ -1,7 +1,9 @@
 import asyncio
-from unittest.mock import MagicMock, AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
-from app.core.config import Config, TwsConfig, AppConfig, AccountConfig, TelegramConfig
+
+from app.core.config import AccountConfig, AppConfig, Config, TelegramConfig, TwsConfig
 from app.services.alert_watcher import order_status_sync_loop
 from app.trading.recovery import run_recovery
 

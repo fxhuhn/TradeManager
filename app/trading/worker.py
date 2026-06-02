@@ -1,13 +1,15 @@
 import asyncio
-from collections.abc import Callable, Awaitable
+from collections.abc import Awaitable, Callable
 from typing import Final
+
+import aiosqlite
 import structlog
 from ib_async import IB
-import aiosqlite
+
 from app.core.config import Config
 from app.core.models import OrderRow
 from app.services.notifier import TelegramNotifier
-from app.trading.order_builder import make_stock_contract, build_order
+from app.trading.order_builder import build_order, make_stock_contract
 
 logger = structlog.get_logger()
 
@@ -35,7 +37,7 @@ async def process_trade_group(
         SELECT order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role,
                symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name,
                status, retry_count, transmitted_at
-        FROM orders 
+        FROM orders
         WHERE trade_group_id = ?
         """,
         (trade_group_id,),

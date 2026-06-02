@@ -7,17 +7,18 @@ from unittest.mock import MagicMock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import structlog
-from ib_async import Stock, Order, Trade, Fill, CommissionReport
+from ib_async import CommissionReport, Fill, Order, Stock, Trade
+
 from app.core.config import load_config
-from app.core.db import get_db, verify_db_integrity, run_migrations
-from app.services.notifier import TelegramNotifier
-from app.services.importer import run_csv_import
+from app.core.db import get_db, run_migrations, verify_db_integrity
 from app.services.alert_watcher import alert_watcher
+from app.services.importer import run_csv_import
+from app.services.notifier import TelegramNotifier
 from app.trading.callbacks import TwsCallbacksManager
-from app.trading.worker import execution_worker
 from app.trading.recovery import run_recovery
-from app.trading.settlement import trigger_settlement
 from app.trading.retry import handle_retriable_error
+from app.trading.settlement import trigger_settlement
+from app.trading.worker import execution_worker
 
 logger = structlog.get_logger()
 

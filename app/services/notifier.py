@@ -1,7 +1,9 @@
 import asyncio
 import time
+
 import aiohttp
 import structlog
+
 from app.core.config import Config
 
 logger = structlog.get_logger()

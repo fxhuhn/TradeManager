@@ -9,19 +9,20 @@ root_dir = str(Path(__file__).resolve().parent.parent)
 if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
-from ib_async import IB
 import structlog
-from app.core.logging_setup import configure_logging
+from ib_async import IB
+
 from app.core.config import Config, load_config
-from app.core.db import get_db, verify_db_integrity, run_migrations
-from app.services.notifier import TelegramNotifier
-from app.services.importer import csv_directory_watcher
+from app.core.db import get_db, run_migrations, verify_db_integrity
+from app.core.logging_setup import configure_logging
 from app.services.alert_watcher import alert_watcher, order_status_sync_loop
+from app.services.importer import csv_directory_watcher
+from app.services.notifier import TelegramNotifier
+from app.trading.callbacks import TwsCallbacksManager
 from app.trading.recovery import run_recovery
-from app.trading.worker import execution_worker
 from app.trading.retry import handle_retriable_error
 from app.trading.settlement import trigger_settlement
-from app.trading.callbacks import TwsCallbacksManager
+from app.trading.worker import execution_worker
 
 # Logger konfigurieren vor jeglichem anderen Import
 configure_logging()
@@ -258,7 +259,7 @@ async def main() -> None:
     try:
         await asyncio.wait_for(queue.join(), timeout=config.app.shutdown_join_timeout_s)
         logger.info("Queue erfolgreich geleert")
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning("Timeout beim Warten auf das Leeren der Queue. Fahre fort.")
 
     # A3. TWS Verbindung trennen

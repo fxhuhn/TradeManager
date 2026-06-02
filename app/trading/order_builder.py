@@ -1,5 +1,6 @@
 import structlog
-from ib_async import Stock, Order
+from ib_async import Order, Stock
+
 from app.core.models import OrderRow
 
 logger = structlog.get_logger()

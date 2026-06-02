@@ -1,7 +1,9 @@
 import asyncio
-from collections.abc import Callable, Awaitable
-import structlog
+from collections.abc import Awaitable, Callable
+
 import aiosqlite
+import structlog
+
 from app.core.config import Config
 from app.services.notifier import TelegramNotifier
 

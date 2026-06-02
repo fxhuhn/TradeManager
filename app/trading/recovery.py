@@ -1,8 +1,10 @@
 import asyncio
-from collections.abc import Callable, Awaitable
+from collections.abc import Awaitable, Callable
+
+import aiosqlite
 import structlog
 from ib_async import IB
-import aiosqlite
+
 from app.core.config import Config
 from app.core.models import OrderRow
 from app.services.notifier import TelegramNotifier
@@ -16,7 +18,7 @@ async def fetch_completed_orders(ib: IB, timeout_seconds: float) -> None:
         await asyncio.wait_for(
             ib.reqCompletedOrdersAsync(apiOnly=False), timeout=timeout_seconds
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning("Timeout beim Abrufen der completed orders von TWS")
 
 
@@ -24,7 +26,7 @@ async def fetch_active_orders(ib: IB, timeout_seconds: float) -> None:
     """Ruft aktive Orders von TWS ab."""
     try:
         await asyncio.wait_for(ib.reqOpenOrdersAsync(), timeout=timeout_seconds)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning("Timeout beim Warten auf active orders von TWS")
 
 
@@ -61,8 +63,8 @@ async def run_recovery(
         """
         SELECT order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role,
                symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name,
-               status, retry_count, transmitted_at 
-        FROM orders 
+               status, retry_count, transmitted_at
+        FROM orders
         WHERE status IN ('Created', 'PreSubmitted', 'Submitted')
         """
     ) as cursor:

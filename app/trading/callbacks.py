@@ -1,10 +1,12 @@
 import asyncio
 from decimal import Decimal
+
 import structlog
-from ib_async import IB, Trade, Fill, CommissionReport
+from ib_async import IB, CommissionReport, Fill, Trade
+
 from app.core.config import Config
 from app.services.notifier import TelegramNotifier
-from app.trading.error_codes import classify_error_code, ErrorClass
+from app.trading.error_codes import ErrorClass, classify_error_code
 
 logger = structlog.get_logger()
 

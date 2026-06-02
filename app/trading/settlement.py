@@ -1,8 +1,10 @@
 import asyncio
-from collections.abc import Callable, Awaitable
+from collections.abc import Awaitable, Callable
 from decimal import Decimal
-import structlog
+
 import aiosqlite
+import structlog
+
 from app.services.notifier import TelegramNotifier
 
 logger = structlog.get_logger()
@@ -57,7 +59,7 @@ async def trigger_settlement(
 
             # 3. Alle Executions für diese Trade-Gruppe abfragen
             query = """
-                SELECT e.qty, e.price, COALESCE(e.commission, 0.0) as commission, 
+                SELECT e.qty, e.price, COALESCE(e.commission, 0.0) as commission,
                        o.bracket_role, o.action, o.target_price
                 FROM executions e
                 JOIN orders o ON e.order_id = o.order_id
@@ -164,7 +166,7 @@ async def trigger_settlement(
                 await db.execute(
                     """
                     INSERT INTO trades_settlement (
-                        account_id, trade_group_id, avg_entry_price, avg_exit_price, 
+                        account_id, trade_group_id, avg_entry_price, avg_exit_price,
                         price_diff_slippage, total_commissions, net_pnl
                     ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
