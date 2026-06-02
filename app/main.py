@@ -1,5 +1,5 @@
+# ruff: noqa: E402
 import asyncio
-import os
 import signal
 import sys
 from pathlib import Path
@@ -15,7 +15,7 @@ from app.core.logging_setup import configure_logging
 from app.core.config import Config, load_config
 from app.core.db import get_db, verify_db_integrity, run_migrations
 from app.services.notifier import TelegramNotifier
-from app.services.importer import run_csv_import, csv_directory_watcher
+from app.services.importer import csv_directory_watcher
 from app.services.alert_watcher import alert_watcher, order_status_sync_loop
 from app.trading.recovery import run_recovery
 from app.trading.worker import execution_worker
@@ -26,6 +26,7 @@ from app.trading.callbacks import TwsCallbacksManager
 # Logger konfigurieren vor jeglichem anderen Import
 configure_logging()
 logger = structlog.get_logger()
+
 
 async def connect_to_tws(ib: IB, config: Config) -> bool:
     """
@@ -38,33 +39,29 @@ async def connect_to_tws(ib: IB, config: Config) -> bool:
 
     while attempt <= max_attempts:
         logger.info(
-            "Verbindungsaufbau zu TWS gestartet", 
-            attempt=attempt, 
-            host=config.tws.host, 
+            "Verbindungsaufbau zu TWS gestartet",
+            attempt=attempt,
+            host=config.tws.host,
             port=config.tws.port,
-            client_id=config.tws.client_id
+            client_id=config.tws.client_id,
         )
         try:
             # Verbindung mit konfiguriertem Connection-Timeout absichern
             await asyncio.wait_for(
                 ib.connectAsync(
-                    config.tws.host, 
-                    config.tws.port, 
-                    clientId=config.tws.client_id
+                    config.tws.host, config.tws.port, clientId=config.tws.client_id
                 ),
-                timeout=config.tws.connection_timeout_s
+                timeout=config.tws.connection_timeout_s,
             )
             logger.info("Erfolgreich mit TWS-Plattform verbunden")
             return True
         except Exception as exception:
             logger.warning(
-                "Verbindung fehlgeschlagen", 
-                attempt=attempt, 
-                error=str(exception)
+                "Verbindung fehlgeschlagen", attempt=attempt, error=str(exception)
             )
             if attempt == max_attempts:
                 break
-            
+
             logger.info("Warte vor erneutem Verbindungsversuch", delay_s=delay)
             await asyncio.sleep(delay)
             delay = min(delay * 2.0, config.tws.reconnect_max_delay_s)
@@ -75,10 +72,11 @@ async def connect_to_tws(ib: IB, config: Config) -> bool:
     )
     return False
 
+
 async def main() -> None:
     """Zentraler Orchestrierungs- und Lebenszyklus-Einstiegspunkt des Systems."""
     logger.info("Starte IBKR Equities Trading System (Release 1)")
-    
+
     # 1. Konfiguration laden
     root_dir = Path(__file__).resolve().parent.parent
     try:
@@ -86,13 +84,12 @@ async def main() -> None:
         # 1b. Logger mit Pfad und Rotationsanzahl aus Config re-konfigurieren
         configure_logging(
             log_file_path=root_dir / config.app.log_file_path,
-            backup_count=config.app.log_rotation_backup_count
+            backup_count=config.app.log_rotation_backup_count,
         )
         logger.info("Konfiguration erfolgreich geladen und Logging re-konfiguriert")
     except Exception as exception:
         logger.critical(
-            "Schwerer Fehler beim Laden der Konfiguration", 
-            error=str(exception)
+            "Schwerer Fehler beim Laden der Konfiguration", error=str(exception)
         )
         sys.exit(1)
 
@@ -129,8 +126,7 @@ async def main() -> None:
         await run_migrations(database_connection, migrations_dir)
     except Exception as exception:
         logger.critical(
-            "Fehler beim Ausführen der DB-Migrationen", 
-            error=str(exception)
+            "Fehler beim Ausführen der DB-Migrationen", error=str(exception)
         )
         await ib.disconnect()
         await database_connection.close()
@@ -156,12 +152,7 @@ async def main() -> None:
         database_conn = await db_factory()
         try:
             await run_recovery(
-                database_conn, 
-                ib, 
-                queue, 
-                notifier, 
-                trigger_settlement_cb, 
-                config
+                database_conn, ib, queue, notifier, trigger_settlement_cb, config
             )
         finally:
             await database_conn.close()
@@ -174,7 +165,7 @@ async def main() -> None:
         config=config,
         trigger_settlement_cb=trigger_settlement_cb,
         handle_retriable_error_cb=handle_retriable_error_cb,
-        run_recovery_cb=run_recovery_cb
+        run_recovery_cb=run_recovery_cb,
     )
     callbacks_mgr.register_all()
 
@@ -182,12 +173,7 @@ async def main() -> None:
     database_conn = await db_factory()
     try:
         await run_recovery(
-            database_conn, 
-            ib, 
-            queue, 
-            notifier, 
-            trigger_settlement_cb, 
-            config
+            database_conn, ib, queue, notifier, trigger_settlement_cb, config
         )
     finally:
         await database_conn.close()
@@ -201,7 +187,7 @@ async def main() -> None:
             queue=queue,
             notifier=notifier,
             config=config,
-            interval_seconds=config.app.csv_watcher_interval_s
+            interval_seconds=config.app.csv_watcher_interval_s,
         )
     )
 
@@ -216,7 +202,7 @@ async def main() -> None:
             config=config,
             interval_seconds=config.app.alert_watcher_interval_s,
             dead_order_threshold_min=config.app.dead_order_threshold_min,
-            max_slippage_pct=config.account.default_limit_pct
+            max_slippage_pct=config.account.default_limit_pct,
         )
     )
     sync_task = asyncio.create_task(
@@ -227,7 +213,7 @@ async def main() -> None:
             notifier=notifier,
             trigger_settlement_cb=trigger_settlement_cb,
             config=config,
-            interval_seconds=config.app.order_sync_interval_s
+            interval_seconds=config.app.order_sync_interval_s,
         )
     )
 
@@ -259,14 +245,10 @@ async def main() -> None:
     worker_task.cancel()
     watcher_task.cancel()
     sync_task.cancel()
-    
+
     try:
         await asyncio.gather(
-            importer_task, 
-            worker_task, 
-            watcher_task, 
-            sync_task,
-            return_exceptions=True
+            importer_task, worker_task, watcher_task, sync_task, return_exceptions=True
         )
     except Exception as exception:
         logger.debug("Fehler beim Abbrechen der Tasks", error=str(exception))
@@ -274,15 +256,10 @@ async def main() -> None:
     # A2. Queue vollständig leeren (blockiert bis alle task_done() Aufrufe abgeschlossen sind)
     logger.info("Warte bis alle Queue-Tasks abgeschlossen sind (queue.join)...")
     try:
-        await asyncio.wait_for(
-            queue.join(), 
-            timeout=config.app.shutdown_join_timeout_s
-        )
+        await asyncio.wait_for(queue.join(), timeout=config.app.shutdown_join_timeout_s)
         logger.info("Queue erfolgreich geleert")
     except asyncio.TimeoutError:
-        logger.warning(
-            "Timeout beim Warten auf das Leeren der Queue. Fahre fort."
-        )
+        logger.warning("Timeout beim Warten auf das Leeren der Queue. Fahre fort.")
 
     # A3. TWS Verbindung trennen
     if ib.isConnected():
@@ -292,6 +269,7 @@ async def main() -> None:
 
     logger.info("Shutdown-Sequenz erfolgreich abgeschlossen. Auf Wiedersehen!")
     await notifier.send_message("🛑 Trading System geordnet heruntergefahren.")
+
 
 if __name__ == "__main__":
     try:

@@ -1,27 +1,26 @@
 import asyncio
 import sys
-import os
 from pathlib import Path
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import MagicMock
 
 # PYTHONPATH auf aktuellen Ordner setzen
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import structlog
-from ib_async import IB, Stock, Order, Trade, Fill, CommissionReport
-from app.core.logging_setup import configure_logging
+from ib_async import Stock, Order, Trade, Fill, CommissionReport
 from app.core.config import load_config
 from app.core.db import get_db, verify_db_integrity, run_migrations
 from app.services.notifier import TelegramNotifier
 from app.services.importer import run_csv_import
 from app.services.alert_watcher import alert_watcher
 from app.trading.callbacks import TwsCallbacksManager
-from app.trading.worker import execution_worker, ORDER_ID_LOCK
+from app.trading.worker import execution_worker
 from app.trading.recovery import run_recovery
 from app.trading.settlement import trigger_settlement
 from app.trading.retry import handle_retriable_error
 
 logger = structlog.get_logger()
+
 
 class MockTwsClient:
     def __init__(self):
@@ -68,10 +67,10 @@ class MockIB:
         self.commissionReportEvent = MockEvent()
         self.errorEvent = MockEvent()
         self.disconnectedEvent = MockEvent()
-        
+
         self.completedOrderEvent = MockEvent()
         self.openOrderEndEvent = MockEvent()
-        
+
         self.accountSummaryEvent = MockEvent()
 
         self._isConnected = False
@@ -83,7 +82,12 @@ class MockIB:
 
     async def connectAsync(self, host: str, port: int, clientId: int) -> None:
         self._isConnected = True
-        logger.info("MOCK TWS: Verbindung asynchron hergestellt", host=host, port=port, clientId=clientId)
+        logger.info(
+            "MOCK TWS: Verbindung asynchron hergestellt",
+            host=host,
+            port=port,
+            clientId=clientId,
+        )
 
     def reqAutoOpenOrders(self, autoBind: bool) -> None:
         logger.info("MOCK TWS: reqAutoOpenOrders aufgerufen", autoBind=autoBind)
@@ -96,14 +100,18 @@ class MockIB:
         # 100.000 USD verfügbares Kapital simulieren
         return [
             MockAccountValue("AvailableFunds", "100000.0", "DU12345"),
-            MockAccountValue("AvailableFunds", "100000.0", "U19605236")
+            MockAccountValue("AvailableFunds", "100000.0", "U19605236"),
         ]
 
     def reqAccountSummary(self, *args) -> None:
         logger.info("MOCK TWS: reqAccountSummary aufgerufen")
         # Sofort Callback auslösen
-        self.accountSummaryEvent.trigger(1, "DU12345", "AvailableFunds", "100000.0", "USD")
-        self.accountSummaryEvent.trigger(2, "U19605236", "AvailableFunds", "100000.0", "USD")
+        self.accountSummaryEvent.trigger(
+            1, "DU12345", "AvailableFunds", "100000.0", "USD"
+        )
+        self.accountSummaryEvent.trigger(
+            2, "U19605236", "AvailableFunds", "100000.0", "USD"
+        )
 
     def cancelAccountSummary(self, *args) -> None:
         pass
@@ -141,15 +149,15 @@ class MockIB:
 
     def placeOrder(self, contract: Stock, order: Order) -> Trade:
         logger.info(
-            "MOCK TWS: placeOrder aufgerufen", 
-            orderId=order.orderId, 
+            "MOCK TWS: placeOrder aufgerufen",
+            orderId=order.orderId,
             symbol=contract.symbol,
             action=order.action,
             qty=order.totalQuantity,
             type=order.orderType,
-            price=getattr(order, 'lmtPrice', getattr(order, 'auxPrice', None)),
-            orderRef=getattr(order, 'orderRef', None),
-            transmit=order.transmit
+            price=getattr(order, "lmtPrice", getattr(order, "auxPrice", None)),
+            orderRef=getattr(order, "orderRef", None),
+            transmit=order.transmit,
         )
 
         trade = MagicMock(spec=Trade)
@@ -181,10 +189,12 @@ class MockIB:
         fill.execution = MagicMock()
         fill.execution.execId = f"EXEC_{order.orderId}_1"
         fill.execution.orderId = order.orderId
-        fill.execution.price = getattr(order, 'lmtPrice', getattr(order, 'auxPrice', 180.0))
+        fill.execution.price = getattr(
+            order, "lmtPrice", getattr(order, "auxPrice", 180.0)
+        )
         fill.execution.shares = order.totalQuantity
         fill.execution.time = "2026-05-31 12:00:00"
-        
+
         self.execDetailsEvent.trigger(trade, fill)
 
         # 3. Gebühren (Commission Report) melden
@@ -203,7 +213,7 @@ async def run_detailed_test():
 
     root_dir = Path(__file__).resolve().parent.parent
     db_path = root_dir / "data" / "simulation_trading.db"
-    
+
     # Alte Simulations-DB löschen falls vorhanden für frischen Durchlauf
     if db_path.exists():
         db_path.unlink()
@@ -237,7 +247,9 @@ async def run_detailed_test():
     async def run_recovery_cb():
         db_conn = await db_factory()
         try:
-            await run_recovery(db_conn, ib, queue, notifier, trigger_settlement_cb, config)
+            await run_recovery(
+                db_conn, ib, queue, notifier, trigger_settlement_cb, config
+            )
         finally:
             await db_conn.close()
 
@@ -249,7 +261,7 @@ async def run_detailed_test():
         config=config,
         trigger_settlement_cb=trigger_settlement_cb,
         handle_retriable_error_cb=handle_retriable_error_cb,
-        run_recovery_cb=run_recovery_cb
+        run_recovery_cb=run_recovery_cb,
     )
     callbacks_mgr.register_all()
 
@@ -257,7 +269,7 @@ async def run_detailed_test():
     logger.info("3. Phase 1: Preflight & Verbindung simulieren")
     is_db_ok = await verify_db_integrity(db_path)
     logger.info("DB Integritaet verifiziert", is_ok=is_db_ok)
-    
+
     await ib.connectAsync(config.tws.host, config.tws.port, config.tws.client_id)
     ib.reqAutoOpenOrders(True)
 
@@ -291,7 +303,7 @@ async def run_detailed_test():
             config=config,
             interval_seconds=2,  # Beschleunigt für die Simulation
             dead_order_threshold_min=1,
-            max_slippage_pct=0.01
+            max_slippage_pct=0.01,
         )
     )
 
@@ -309,7 +321,7 @@ async def run_detailed_test():
         await asyncio.gather(worker_task, watcher_task, return_exceptions=True)
     except Exception:
         pass
-    
+
     ib.disconnect()
 
     # 9. Testergebnisse aus DB auswerten und validieren
@@ -318,10 +330,12 @@ async def run_detailed_test():
     logger.info("====================================================")
 
     db_conn = await db_factory()
-    
+
     # 9a. Orders auswerten
     logger.info("--- Tabelle: orders ---")
-    async with db_conn.execute("SELECT order_id, trade_group_id, bracket_role, symbol, quantity, target_price, status FROM orders") as cursor:
+    async with db_conn.execute(
+        "SELECT order_id, trade_group_id, bracket_role, symbol, quantity, target_price, status FROM orders"
+    ) as cursor:
         async for r in cursor:
             logger.info(
                 f"Order ID: {r['order_id']} | Gruppe: {r['trade_group_id']} | "
@@ -332,7 +346,9 @@ async def run_detailed_test():
 
     # 9b. Executions auswerten
     logger.info("--- Tabelle: executions ---")
-    async with db_conn.execute("SELECT exec_id, order_id, price, qty, commission, currency FROM executions") as cursor:
+    async with db_conn.execute(
+        "SELECT exec_id, order_id, price, qty, commission, currency FROM executions"
+    ) as cursor:
         async for r in cursor:
             logger.info(
                 f"Exec ID: {r['exec_id']} | Order ID: {r['order_id']} | "
@@ -342,7 +358,9 @@ async def run_detailed_test():
 
     # 9c. Settlement auswerten
     logger.info("--- Tabelle: trades_settlement ---")
-    async with db_conn.execute("SELECT trade_group_id, avg_entry_price, avg_exit_price, price_diff_slippage, total_commissions, net_pnl FROM trades_settlement") as cursor:
+    async with db_conn.execute(
+        "SELECT trade_group_id, avg_entry_price, avg_exit_price, price_diff_slippage, total_commissions, net_pnl FROM trades_settlement"
+    ) as cursor:
         rows = await cursor.fetchall()
         for r in rows:
             logger.info(
@@ -352,7 +370,9 @@ async def run_detailed_test():
                 f"Netto-PnL: {r['net_pnl']:.2f} USD"
             )
         # Nur wenn auch mindestens eine Exit-Order vorhanden ist, erwarten wir ein Settlement
-        async with db_conn.execute("SELECT count(*) as cnt FROM orders WHERE bracket_role IN ('SL', 'TP', 'EXIT')") as c:
+        async with db_conn.execute(
+            "SELECT count(*) as cnt FROM orders WHERE bracket_role IN ('SL', 'TP', 'EXIT')"
+        ) as c:
             has_exits = (await c.fetchone())["cnt"] > 0
 
         if has_exits:
@@ -361,7 +381,7 @@ async def run_detailed_test():
             logger.info("Keine Exit-Orders vorhanden, daher kein Settlement erwartet.")
 
     await db_conn.close()
-    
+
     # Aufräumen der Simulations-DB
     if db_path.exists():
         db_path.unlink()
@@ -369,6 +389,7 @@ async def run_detailed_test():
     logger.info("====================================================")
     logger.info("MOCK-SYSTEMTEST ERFOLGREICH BEENDET (100% SUCCESS)")
     logger.info("====================================================")
+
 
 if __name__ == "__main__":
     asyncio.run(run_detailed_test())

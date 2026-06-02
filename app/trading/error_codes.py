@@ -1,11 +1,13 @@
 from enum import Enum, auto
 
+
 class ErrorClass(Enum):
-    INFO = auto()       # Rein informativ, keine Aktion nötig
+    INFO = auto()  # Rein informativ, keine Aktion nötig
     RECONNECT = auto()  # Verbindungsabbruch/Reconnect-Events
     RETRIABLE = auto()  # Transiente Netzwerkfehler, automatischer Retry
-    CANCEL = auto()     # Stornierung der Order
-    FATAL = auto()      # Schwerer Fehler, Order fehlgeschlagen
+    CANCEL = auto()  # Stornierung der Order
+    FATAL = auto()  # Schwerer Fehler, Order fehlgeschlagen
+
 
 def classify_error_code(code: int) -> ErrorClass:
     """

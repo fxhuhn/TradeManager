@@ -2,12 +2,12 @@ import asyncio
 from decimal import Decimal
 import structlog
 from ib_async import IB, Trade, Fill, CommissionReport
-import aiosqlite
 from app.core.config import Config
 from app.services.notifier import TelegramNotifier
 from app.trading.error_codes import classify_error_code, ErrorClass
 
 logger = structlog.get_logger()
+
 
 # We pass trigger_settlement_cb, handle_retriable_error_cb, and run_recovery_cb to avoid circular imports.
 class TwsCallbacksManager:
@@ -15,6 +15,7 @@ class TwsCallbacksManager:
     Registriert und verwaltet alle asynchronen TWS-Callbacks (Events)
     für die Abwicklung von Order-Status-Updates, Fills, Provisionen und Fehlern.
     """
+
     def __init__(
         self,
         db_factory,
@@ -23,7 +24,7 @@ class TwsCallbacksManager:
         config: Config,
         trigger_settlement_cb,
         handle_retriable_error_cb,
-        run_recovery_cb
+        run_recovery_cb,
     ):
         self.db_factory = db_factory
         self.ib = ib
@@ -42,20 +43,28 @@ class TwsCallbacksManager:
         self.ib.disconnectedEvent.connect(self.on_disconnected)
         logger.info("Alle asynchronen TWS-Callbacks erfolgreich registriert")
 
-    async def _update_order_status_db(self, order_id: int, status: str, perm_id: int) -> None:
+    async def _update_order_status_db(
+        self, order_id: int, status: str, perm_id: int
+    ) -> None:
         """Schreibt das Status-Update atomar in die Datenbank."""
         db = await self.db_factory()
         await db.execute("BEGIN IMMEDIATE")
         try:
             await db.execute(
                 "UPDATE orders SET status = ?, perm_id = ? WHERE order_id = ?",
-                (status, perm_id, order_id)
+                (status, perm_id, order_id),
             )
             await db.execute("COMMIT")
-            logger.debug("Order-Zustand in DB aktualisiert", order_id=order_id, status=status)
+            logger.debug(
+                "Order-Zustand in DB aktualisiert", order_id=order_id, status=status
+            )
         except Exception as e:
             await db.execute("ROLLBACK")
-            logger.error("Fehler beim DB-Update des Order-Status", order_id=order_id, error=str(e))
+            logger.error(
+                "Fehler beim DB-Update des Order-Status",
+                order_id=order_id,
+                error=str(e),
+            )
         finally:
             await db.close()
 
@@ -80,10 +89,10 @@ class TwsCallbacksManager:
             mapped_status = "Error"
 
         logger.info(
-            "orderStatusEvent empfangen", 
-            order_id=order_id, 
-            tws_status=status, 
-            mapped_status=mapped_status
+            "orderStatusEvent empfangen",
+            order_id=order_id,
+            tws_status=status,
+            mapped_status=mapped_status,
         )
 
         # DB asynchron updaten, um den Callback nicht zu blockieren
@@ -96,7 +105,7 @@ class TwsCallbacksManager:
                 try:
                     async with db.execute(
                         "SELECT trade_group_id, account_id, bracket_role FROM orders WHERE order_id = ?",
-                        (order_id,)
+                        (order_id,),
                     ) as cursor:
                         row = await cursor.fetchone()
                         if row:
@@ -108,12 +117,18 @@ class TwsCallbacksManager:
                                 logger.info(
                                     "Exit-Order gefüllt! Settlement wird ausgelöst.",
                                     order_id=order_id,
-                                    trade_group_id=trade_group_id
+                                    trade_group_id=trade_group_id,
                                 )
                                 # Settlement als asynchrone Hintergrund-Task ausführen (behebt blockierende Heartbeats)
-                                asyncio.create_task(self.trigger_settlement_cb(trade_group_id, account_id))
+                                asyncio.create_task(
+                                    self.trigger_settlement_cb(
+                                        trade_group_id, account_id
+                                    )
+                                )
                 except Exception as e:
-                    logger.error("Fehler bei Exit-Pruefung im Status-Callback", error=str(e))
+                    logger.error(
+                        "Fehler bei Exit-Pruefung im Status-Callback", error=str(e)
+                    )
                 finally:
                     await db.close()
 
@@ -132,11 +147,11 @@ class TwsCallbacksManager:
         executed_at = fill.execution.time
 
         logger.info(
-            "execDetailsEvent empfangen (Teilausfuehrung)", 
-            exec_id=exec_id, 
-            order_id=order_id, 
-            price=price, 
-            qty=qty
+            "execDetailsEvent empfangen (Teilausfuehrung)",
+            exec_id=exec_id,
+            order_id=order_id,
+            price=price,
+            qty=qty,
         )
 
         async def save_execution():
@@ -149,19 +164,34 @@ class TwsCallbacksManager:
                     INSERT OR IGNORE INTO executions (exec_id, order_id, price, qty, currency, executed_at)
                     VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (exec_id, order_id, float(price), float(qty), currency, executed_at)
+                    (
+                        exec_id,
+                        order_id,
+                        float(price),
+                        float(qty),
+                        currency,
+                        executed_at,
+                    ),
                 )
                 await db.execute("COMMIT")
-                logger.debug("Teilausfuehrung idempotent in DB verbucht", exec_id=exec_id)
+                logger.debug(
+                    "Teilausfuehrung idempotent in DB verbucht", exec_id=exec_id
+                )
             except Exception as e:
                 await db.execute("ROLLBACK")
-                logger.error("Fehler beim Speichern der Teilausfuehrung", exec_id=exec_id, error=str(e))
+                logger.error(
+                    "Fehler beim Speichern der Teilausfuehrung",
+                    exec_id=exec_id,
+                    error=str(e),
+                )
             finally:
                 await db.close()
 
         asyncio.create_task(save_execution())
 
-    def on_commission_report(self, trade: Trade, fill: Fill, commission_report: CommissionReport) -> None:
+    def on_commission_report(
+        self, trade: Trade, fill: Fill, commission_report: CommissionReport
+    ) -> None:
         """
         Empfängt Kommissionsabrechnungen (oft leicht verzögert nach der Ausführung).
         Aktualisiert die Spalten 'commission' und 'currency' in der executions-Tabelle.
@@ -171,10 +201,10 @@ class TwsCallbacksManager:
         currency = commission_report.currency
 
         logger.info(
-            "commissionReportEvent empfangen", 
-            exec_id=exec_id, 
-            commission=commission, 
-            currency=currency
+            "commissionReportEvent empfangen",
+            exec_id=exec_id,
+            commission=commission,
+            currency=currency,
         )
 
         async def update_commission():
@@ -183,13 +213,19 @@ class TwsCallbacksManager:
             try:
                 await db.execute(
                     "UPDATE executions SET commission = ?, currency = ? WHERE exec_id = ?",
-                    (float(commission), currency, exec_id)
+                    (float(commission), currency, exec_id),
                 )
                 await db.execute("COMMIT")
-                logger.debug("Kommission fuer Teilausfuehrung aktualisiert", exec_id=exec_id)
+                logger.debug(
+                    "Kommission fuer Teilausfuehrung aktualisiert", exec_id=exec_id
+                )
             except Exception as e:
                 await db.execute("ROLLBACK")
-                logger.error("Fehler beim Aktualisieren der Kommission", exec_id=exec_id, error=str(e))
+                logger.error(
+                    "Fehler beim Aktualisieren der Kommission",
+                    exec_id=exec_id,
+                    error=str(e),
+                )
             finally:
                 await db.close()
 
@@ -208,11 +244,11 @@ class TwsCallbacksManager:
 
         error_class = classify_error_code(errorCode)
         logger.warning(
-            "TWS-Fehlermeldung empfangen", 
-            reqId=reqId, 
-            code=errorCode, 
-            msg=errorString, 
-            klassifizierung=error_class.name
+            "TWS-Fehlermeldung empfangen",
+            reqId=reqId,
+            code=errorCode,
+            msg=errorString,
+            klassifizierung=error_class.name,
         )
 
         async def handle_error():
@@ -234,7 +270,10 @@ class TwsCallbacksManager:
                     # Manuelle oder automatische Stornierung
                     await db.execute("BEGIN IMMEDIATE")
                     try:
-                        await db.execute("UPDATE orders SET status = 'Cancelled' WHERE order_id = ?", (reqId,))
+                        await db.execute(
+                            "UPDATE orders SET status = 'Cancelled' WHERE order_id = ?",
+                            (reqId,),
+                        )
                         await db.execute("COMMIT")
                     except Exception:
                         await db.execute("ROLLBACK")
@@ -247,7 +286,10 @@ class TwsCallbacksManager:
                     # Schwerer Systemfehler. Setze Order auf Error und sende Telegram-Alarm.
                     await db.execute("BEGIN IMMEDIATE")
                     try:
-                        await db.execute("UPDATE orders SET status = 'Error' WHERE order_id = ?", (reqId,))
+                        await db.execute(
+                            "UPDATE orders SET status = 'Error' WHERE order_id = ?",
+                            (reqId,),
+                        )
                         await db.execute("COMMIT")
                     except Exception:
                         await db.execute("ROLLBACK")
@@ -257,7 +299,9 @@ class TwsCallbacksManager:
                     )
 
             except Exception as e:
-                logger.error("Fehler bei der API-Error-Verarbeitung", reqId=reqId, error=str(e))
+                logger.error(
+                    "Fehler bei der API-Error-Verarbeitung", reqId=reqId, error=str(e)
+                )
             finally:
                 await db.close()
 

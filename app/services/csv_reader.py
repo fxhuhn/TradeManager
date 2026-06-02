@@ -6,6 +6,7 @@ from app.core.models import LegRow
 
 logger = structlog.get_logger()
 
+
 def validate_group(group_id: str, legs: list[LegRow]) -> tuple[bool, str]:
     """
     Validiert eine Gruppe von Order-Legs (Bracket-Gruppe).
@@ -14,24 +15,39 @@ def validate_group(group_id: str, legs: list[LegRow]) -> tuple[bool, str]:
     if not legs:
         return False, "Gruppe enthält keine Legs"
 
-    entries = [leg for leg in legs if leg.bracket_role == 'ENTRY']
+    entries = [leg for leg in legs if leg.bracket_role == "ENTRY"]
     if len(entries) != 1:
-        return False, f"Gruppe muss genau eine ENTRY-Order enthalten (gefunden: {len(entries)})"
-    
+        return (
+            False,
+            f"Gruppe muss genau eine ENTRY-Order enthalten (gefunden: {len(entries)})",
+        )
+
     entry = entries[0]
     symbol = entry.symbol
     account_id = entry.account_id
 
     for leg in legs:
         if leg.symbol != symbol:
-            return False, f"Legs haben unterschiedliche Symbole: {leg.symbol} vs {symbol}"
+            return (
+                False,
+                f"Legs haben unterschiedliche Symbole: {leg.symbol} vs {symbol}",
+            )
         if leg.account_id != account_id:
-            return False, f"Legs haben unterschiedliche Account-IDs: {leg.account_id} vs {account_id}"
+            return (
+                False,
+                f"Legs haben unterschiedliche Account-IDs: {leg.account_id} vs {account_id}",
+            )
 
         if leg.sec_type != "STK":
-            return False, f"Ausschliesslich sec_type='STK' ist erlaubt (gefunden: {leg.sec_type})"
+            return (
+                False,
+                f"Ausschliesslich sec_type='STK' ist erlaubt (gefunden: {leg.sec_type})",
+            )
         if leg.exchange != "SMART":
-            return False, f"Ausschliesslich exchange='SMART' ist erlaubt (gefunden: {leg.exchange})"
+            return (
+                False,
+                f"Ausschliesslich exchange='SMART' ist erlaubt (gefunden: {leg.exchange})",
+            )
 
         if leg.action not in ("BUY", "SELL"):
             return False, f"Ungueltige Aktion: {leg.action}"
@@ -44,15 +60,22 @@ def validate_group(group_id: str, legs: list[LegRow]) -> tuple[bool, str]:
 
         if leg.order_type in ("LMT", "STP"):
             if leg.target_price is None or leg.target_price <= Decimal("0.0"):
-                return False, f"target_price ist fuer order_type='{leg.order_type}' zwingend erforderlich"
+                return (
+                    False,
+                    f"target_price ist fuer order_type='{leg.order_type}' zwingend erforderlich",
+                )
 
     entry_action = entry.action
     exit_action = "SELL" if entry_action == "BUY" else "BUY"
     for leg in legs:
         if leg.bracket_role in ("SL", "TP", "EXIT") and leg.action != exit_action:
-            return False, f"Exit-Leg {leg.bracket_role} muss Gegenrichtung ({exit_action}) zu ENTRY ({entry_action}) sein"
+            return (
+                False,
+                f"Exit-Leg {leg.bracket_role} muss Gegenrichtung ({exit_action}) zu ENTRY ({entry_action}) sein",
+            )
 
     return True, ""
+
 
 def load_csv(csv_path: Path) -> dict[str, list[LegRow]]:
     """
@@ -67,12 +90,18 @@ def load_csv(csv_path: Path) -> dict[str, list[LegRow]]:
     try:
         with open(csv_path, mode="r", encoding="utf-8-sig") as file_handle:
             reader = csv.DictReader(file_handle)
-            reader.fieldnames = [name.strip() for name in reader.fieldnames] if reader.fieldnames else []
+            reader.fieldnames = (
+                [name.strip() for name in reader.fieldnames]
+                if reader.fieldnames
+                else []
+            )
 
             for row_num, row in enumerate(reader, start=2):
                 try:
                     price_str = row.get("target_price") or ""
-                    target_price = Decimal(price_str.strip()) if price_str.strip() else None
+                    target_price = (
+                        Decimal(price_str.strip()) if price_str.strip() else None
+                    )
 
                     leg = LegRow(
                         trade_group_id=row["trade_group_id"].strip(),
@@ -86,15 +115,23 @@ def load_csv(csv_path: Path) -> dict[str, list[LegRow]]:
                         order_type=row["order_type"].strip().upper(),
                         target_price=target_price,
                         tif=row.get("tif", "GTC").strip().upper(),
-                        strategy_name=row.get("strategy_name", "").strip()
+                        strategy_name=row.get("strategy_name", "").strip(),
                     )
 
                     grouped_legs.setdefault(leg.trade_group_id, []).append(leg)
 
                 except KeyError as key_error:
-                    logger.error("Fehlende Spalte in CSV-Zeile", row_num=row_num, error=str(key_error))
+                    logger.error(
+                        "Fehlende Spalte in CSV-Zeile",
+                        row_num=row_num,
+                        error=str(key_error),
+                    )
                 except ValueError as value_error:
-                    logger.error("Falsches Datenformat in CSV-Zeile", row_num=row_num, error=str(value_error))
+                    logger.error(
+                        "Falsches Datenformat in CSV-Zeile",
+                        row_num=row_num,
+                        error=str(value_error),
+                    )
 
     except Exception as exception:
         logger.error("Fehler beim Lesen der CSV-Datei", error=str(exception))

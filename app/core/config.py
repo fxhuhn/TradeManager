@@ -10,9 +10,11 @@ else:
     # Fallback fuer ältere Versionen
     import tomli as tomllib
 
+
 @dataclass(frozen=True)
 class TwsConfig:
     """Konfiguration für die Verbindung zur Trader Workstation (TWS)."""
+
     host: str
     port: int
     client_id: int
@@ -23,9 +25,11 @@ class TwsConfig:
     request_timeout_s: float
     completed_orders_timeout_s: float
 
+
 @dataclass(frozen=True)
 class AppConfig:
     """Konfiguration der Kernanwendung und Ausführungsparameter."""
+
     max_retries: int
     order_rate_limit_s: float
     dead_order_threshold_min: int
@@ -39,27 +43,34 @@ class AppConfig:
     log_file_path: str
     log_rotation_backup_count: int
 
+
 @dataclass(frozen=True)
 class AccountConfig:
     """Konto- und Kapitalallokationseinstellungen."""
+
     default_limit_pct: float
+
 
 @dataclass(frozen=True)
 class TelegramConfig:
     """Konfiguration für Telegram-Benachrichtigungen."""
+
     bot_token: str
     chat_id: str
     rate_limit_delay_s: float
     request_timeout_s: float
 
+
 @dataclass(frozen=True)
 class Config:
     """Zentrale Konfigurationsklasse für das gesamte Trading-System."""
+
     tws: TwsConfig
     app: AppConfig
     account: AccountConfig
     telegram: TelegramConfig
     strategy_limits: dict[str, float] = field(default_factory=dict)
+
 
 def load_env(environment_path: Path) -> dict[str, str]:
     """Lädt Schlüssel-Wert-Paare aus einer .env-Datei."""
@@ -76,6 +87,7 @@ def load_env(environment_path: Path) -> dict[str, str]:
                     value = value.strip().strip('"').strip("'")
                     environment_variables[key] = value
     return environment_variables
+
 
 def load_config(root_path: Path = Path(".")) -> Config:
     """Lädt die Konfiguration aus config.toml und .env."""
@@ -106,7 +118,9 @@ def load_config(root_path: Path = Path(".")) -> Config:
         reconnect_max_attempts=int(tws_data.get("reconnect_max_attempts", 10)),
         reconnect_max_delay_s=float(tws_data.get("reconnect_max_delay_s", 120.0)),
         request_timeout_s=float(tws_data.get("request_timeout_s", 10.0)),
-        completed_orders_timeout_s=float(tws_data.get("completed_orders_timeout_s", 15.0))
+        completed_orders_timeout_s=float(
+            tws_data.get("completed_orders_timeout_s", 15.0)
+        ),
     )
 
     app_config = AppConfig(
@@ -121,7 +135,7 @@ def load_config(root_path: Path = Path(".")) -> Config:
         database_timeout_s=float(app_data.get("database_timeout_s", 30.0)),
         max_csv_size_bytes=int(app_data.get("max_csv_size_bytes", 5242880)),
         log_file_path=app_data.get("log_file_path", "data/app.log"),
-        log_rotation_backup_count=int(app_data.get("log_rotation_backup_count", 5))
+        log_rotation_backup_count=int(app_data.get("log_rotation_backup_count", 5)),
     )
 
     account_config = AccountConfig(
@@ -130,27 +144,25 @@ def load_config(root_path: Path = Path(".")) -> Config:
 
     # Laden der .env Variablen
     environment_variables = load_env(environment_path)
-    
+
     # Prämisse: Reale Umgebungsvariablen haben Vorrang vor der .env-Datei
-    telegram_bot_token = (
-        os.environ.get("TELEGRAM_BOT_TOKEN") 
-        or environment_variables.get("TELEGRAM_BOT_TOKEN", "")
-    )
-    telegram_chat_id = (
-        os.environ.get("TELEGRAM_CHAT_ID") 
-        or environment_variables.get("TELEGRAM_CHAT_ID", "")
+    telegram_bot_token = os.environ.get(
+        "TELEGRAM_BOT_TOKEN"
+    ) or environment_variables.get("TELEGRAM_BOT_TOKEN", "")
+    telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID") or environment_variables.get(
+        "TELEGRAM_CHAT_ID", ""
     )
 
     telegram_config = TelegramConfig(
         bot_token=telegram_bot_token,
         chat_id=telegram_chat_id,
         rate_limit_delay_s=float(telegram_data.get("rate_limit_delay_s", 1.5)),
-        request_timeout_s=float(telegram_data.get("request_timeout_s", 10.0))
+        request_timeout_s=float(telegram_data.get("request_timeout_s", 10.0)),
     )
 
     # Strategy limits dict keys must be typed float
     typed_strategy_limits = {
-        strategy_name: float(limit_value) 
+        strategy_name: float(limit_value)
         for strategy_name, limit_value in strategy_limits.items()
     }
 
@@ -159,5 +171,5 @@ def load_config(root_path: Path = Path(".")) -> Config:
         app=app_config,
         account=account_config,
         telegram=telegram_config,
-        strategy_limits=typed_strategy_limits
+        strategy_limits=typed_strategy_limits,
     )

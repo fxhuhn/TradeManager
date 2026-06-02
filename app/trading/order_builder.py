@@ -4,9 +4,11 @@ from app.core.models import OrderRow
 
 logger = structlog.get_logger()
 
+
 def make_stock_contract(symbol: str) -> Stock:
     """Erstellt ein TWS-konformes US-Aktien-Vertragsobjekt via SMART-Routing."""
     return Stock(symbol.upper(), "SMART", "USD")
+
 
 def build_order(order_row: OrderRow) -> Order:
     """
@@ -33,7 +35,10 @@ def build_order(order_row: OrderRow) -> Order:
     elif order.orderType in ("MKT", "MOC"):
         pass
     else:
-        logger.warning("Unbekannter Order-Typ. Keinen Preis zugewiesen.", order_type=order.orderType)
+        logger.warning(
+            "Unbekannter Order-Typ. Keinen Preis zugewiesen.",
+            order_type=order.orderType,
+        )
 
     # OCA (One-Cancels-All) Gruppe konfigurieren für SL und TP
     if order_row.bracket_role in ("SL", "TP"):

@@ -3,7 +3,6 @@ from collections.abc import Callable, Awaitable
 from decimal import Decimal
 import structlog
 import aiosqlite
-from app.core.config import Config
 from app.services.notifier import TelegramNotifier
 
 logger = structlog.get_logger()
@@ -12,12 +11,14 @@ logger = structlog.get_logger()
 SETTLEMENT_LOCKS: dict[str, asyncio.Lock] = {}
 SETTLEMENT_LOCKS_LOCK = asyncio.Lock()
 
+
 async def get_settlement_lock(trade_group_id: str) -> asyncio.Lock:
     """Holt oder erzeugt ein asyncio.Lock für eine bestimmte Trade-Gruppe."""
     async with SETTLEMENT_LOCKS_LOCK:
         if trade_group_id not in SETTLEMENT_LOCKS:
             SETTLEMENT_LOCKS[trade_group_id] = asyncio.Lock()
         return SETTLEMENT_LOCKS[trade_group_id]
+
 
 async def cleanup_settlement_lock(trade_group_id: str) -> None:
     """Entfernt das Lock aus dem Speicher zur Bereinigung."""
@@ -29,7 +30,7 @@ async def trigger_settlement(
     database_connection_factory: Callable[[], Awaitable[aiosqlite.Connection]],
     trade_group_id: str,
     account_id: str,
-    notifier: TelegramNotifier
+    notifier: TelegramNotifier,
 ) -> None:
     """
     Berechnet nach der Schließung eines Trades (Exit-Order auf 'Filled')
@@ -37,7 +38,7 @@ async def trigger_settlement(
     Nutzt das lock-basierte Pattern gegen Race Conditions.
     """
     lock = await get_settlement_lock(trade_group_id)
-    
+
     # 1. Lock erwerben
     async with lock:
         db = await database_connection_factory()
@@ -45,12 +46,12 @@ async def trigger_settlement(
             # 2. Prüfen, ob bereits ein Settlement-Eintrag existiert
             async with db.execute(
                 "SELECT trade_group_id FROM trades_settlement WHERE account_id = ? AND trade_group_id = ?",
-                (account_id, trade_group_id)
+                (account_id, trade_group_id),
             ) as cursor:
                 if await cursor.fetchone():
                     logger.info(
-                        "Settlement fuer Trade-Gruppe bereits vorhanden. Abbrechen.", 
-                        trade_group_id=trade_group_id
+                        "Settlement fuer Trade-Gruppe bereits vorhanden. Abbrechen.",
+                        trade_group_id=trade_group_id,
                     )
                     return
 
@@ -62,7 +63,7 @@ async def trigger_settlement(
                 JOIN orders o ON e.order_id = o.order_id
                 WHERE o.trade_group_id = ?
             """
-            
+
             entry_executions: list[tuple[Decimal, Decimal]] = []
             exit_executions: list[tuple[Decimal, Decimal]] = []
             total_commissions = Decimal("0.0")
@@ -74,39 +75,59 @@ async def trigger_settlement(
                     role = row["bracket_role"]
                     quantity = Decimal(str(row["qty"]))
                     price = Decimal(str(row["price"]))
-                    commission = Decimal(str(row["commission"])) if row["commission"] is not None else Decimal("0.0")
-                    
+                    commission = (
+                        Decimal(str(row["commission"]))
+                        if row["commission"] is not None
+                        else Decimal("0.0")
+                    )
+
                     total_commissions += commission
 
                     if role == "ENTRY":
                         entry_executions.append((quantity, price))
-                        entry_target_price = Decimal(str(row["target_price"])) if row["target_price"] is not None else Decimal("0.0")
+                        entry_target_price = (
+                            Decimal(str(row["target_price"]))
+                            if row["target_price"] is not None
+                            else Decimal("0.0")
+                        )
                         entry_action = row["action"]
                     elif role in ("SL", "TP", "EXIT"):
                         exit_executions.append((quantity, price))
 
             if not entry_executions:
                 logger.warning(
-                    "Keine ENTRY-Executions fuer Settlement gefunden", 
-                    trade_group_id=trade_group_id
+                    "Keine ENTRY-Executions fuer Settlement gefunden",
+                    trade_group_id=trade_group_id,
                 )
                 return
             if not exit_executions:
                 logger.warning(
-                    "Keine EXIT-Executions fuer Settlement gefunden (Trade eventuell noch offen)", 
-                    trade_group_id=trade_group_id
+                    "Keine EXIT-Executions fuer Settlement gefunden (Trade eventuell noch offen)",
+                    trade_group_id=trade_group_id,
                 )
                 return
 
             # 4. VWAP-Berechnungen durchführen (hochpräzise mit Decimal)
             # VWAP = Summe(Menge_i * Preis_i) / Summe(Menge_i)
             entry_sum_quantity = sum(quantity for quantity, _ in entry_executions)
-            entry_sum_value = sum(quantity * price for quantity, price in entry_executions)
-            avg_entry_price = entry_sum_value / entry_sum_quantity if entry_sum_quantity > Decimal("0.0") else Decimal("0.0")
+            entry_sum_value = sum(
+                quantity * price for quantity, price in entry_executions
+            )
+            avg_entry_price = (
+                entry_sum_value / entry_sum_quantity
+                if entry_sum_quantity > Decimal("0.0")
+                else Decimal("0.0")
+            )
 
             exit_sum_quantity = sum(quantity for quantity, _ in exit_executions)
-            exit_sum_value = sum(quantity * price for quantity, price in exit_executions)
-            avg_exit_price = exit_sum_value / exit_sum_quantity if exit_sum_quantity > Decimal("0.0") else Decimal("0.0")
+            exit_sum_value = sum(
+                quantity * price for quantity, price in exit_executions
+            )
+            avg_exit_price = (
+                exit_sum_value / exit_sum_quantity
+                if exit_sum_quantity > Decimal("0.0")
+                else Decimal("0.0")
+            )
 
             # 5. Slippage berechnen
             # (positiv = günstiger gefüllt als geplant)
@@ -118,9 +139,13 @@ async def trigger_settlement(
             # 6. PnL-Berechnung
             # net_pnl = (direction * (avg_exit - avg_entry) * total_qty) - total_commissions
             direction = Decimal("1") if entry_action == "BUY" else Decimal("-1")
-            total_quantity = entry_sum_quantity  # Wir nehmen die gefüllte Entry-Menge als Basis
-            
-            gross_profit_loss = direction * (avg_exit_price - avg_entry_price) * total_quantity
+            total_quantity = (
+                entry_sum_quantity  # Wir nehmen die gefüllte Entry-Menge als Basis
+            )
+
+            gross_profit_loss = (
+                direction * (avg_exit_price - avg_entry_price) * total_quantity
+            )
             net_profit_loss = gross_profit_loss - total_commissions
 
             logger.info(
@@ -130,7 +155,7 @@ async def trigger_settlement(
                 exit_vwap=float(avg_exit_price),
                 slippage=float(price_diff_slippage),
                 commissions=float(total_commissions),
-                net_pnl=float(net_profit_loss)
+                net_pnl=float(net_profit_loss),
             )
 
             # 7. Ergebnisse atomar in trades_settlement schreiben
@@ -143,22 +168,33 @@ async def trigger_settlement(
                         price_diff_slippage, total_commissions, net_pnl
                     ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (account_id, trade_group_id, float(avg_entry_price), float(avg_exit_price),
-                     float(price_diff_slippage), float(total_commissions), float(net_profit_loss))
+                    (
+                        account_id,
+                        trade_group_id,
+                        float(avg_entry_price),
+                        float(avg_exit_price),
+                        float(price_diff_slippage),
+                        float(total_commissions),
+                        float(net_profit_loss),
+                    ),
                 )
                 await db.execute("COMMIT")
-                logger.info("Settlement erfolgreich verbucht", trade_group_id=trade_group_id)
+                logger.info(
+                    "Settlement erfolgreich verbucht", trade_group_id=trade_group_id
+                )
             except Exception as exception:
                 await db.execute("ROLLBACK")
                 logger.error(
-                    "Fehler beim DB-Eintrag des Settlements", 
-                    trade_group_id=trade_group_id, 
-                    error=str(exception)
+                    "Fehler beim DB-Eintrag des Settlements",
+                    trade_group_id=trade_group_id,
+                    error=str(exception),
                 )
                 raise exception
 
             # Telegram-Meldung über erfolgreichen Trade-Abschluss senden
-            profit_loss_emoji = "🟢 Profit" if net_profit_loss >= Decimal("0.0") else "🔴 Verlust"
+            profit_loss_emoji = (
+                "🟢 Profit" if net_profit_loss >= Decimal("0.0") else "🔴 Verlust"
+            )
             await notifier.send_message(
                 f"✅ TRADE SETTLEMENT ({trade_group_id})\n"
                 f"• Symbol: {entry_action} Position\n"
@@ -171,9 +207,9 @@ async def trigger_settlement(
 
         except Exception as exception:
             logger.error(
-                "Schwerer Fehler im Settlement-Prozess", 
-                trade_group_id=trade_group_id, 
-                error=str(exception)
+                "Schwerer Fehler im Settlement-Prozess",
+                trade_group_id=trade_group_id,
+                error=str(exception),
             )
         finally:
             await db.close()

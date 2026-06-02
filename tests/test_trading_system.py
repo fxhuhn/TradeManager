@@ -1,16 +1,12 @@
 import pytest
-import asyncio
 from decimal import Decimal
 from unittest.mock import MagicMock, AsyncMock
-from pathlib import Path
-import aiosqlite
-from app.core.config import Config, TwsConfig, AppConfig, AccountConfig
 from app.core.models import LegRow, OrderRow
 from app.services.csv_reader import validate_group
-from app.services.importer import run_csv_import
 from app.trading.settlement import trigger_settlement
 from app.trading.error_codes import classify_error_code, ErrorClass
-from app.services.alert_watcher import check_dead_orders, check_high_slippage, AlertState
+from app.services.alert_watcher import check_dead_orders, AlertState
+
 
 @pytest.mark.asyncio
 async def test_csv_validation_fut_rejected():
@@ -20,7 +16,7 @@ async def test_csv_validation_fut_rejected():
             trade_group_id="20260530_Invalid",
             bracket_role="ENTRY",
             symbol="ES",
-            sec_type="FUT", # Ungültig
+            sec_type="FUT",  # Ungültig
             exchange="SMART",
             account_id="DU12345",
             action="BUY",
@@ -28,7 +24,7 @@ async def test_csv_validation_fut_rejected():
             order_type="LMT",
             target_price=Decimal("5100.0"),
             tif="GTC",
-            strategy_name="FuturesStrategy"
+            strategy_name="FuturesStrategy",
         )
     ]
     is_valid, err_msg = validate_group("20260530_Invalid", invalid_legs)
@@ -52,7 +48,7 @@ async def test_csv_validation_valid_bracket():
             order_type="LMT",
             target_price=Decimal("180.0"),
             tif="GTC",
-            strategy_name="Momentum"
+            strategy_name="Momentum",
         ),
         LegRow(
             trade_group_id="20260530_Valid",
@@ -66,8 +62,8 @@ async def test_csv_validation_valid_bracket():
             order_type="LMT",
             target_price=Decimal("190.0"),
             tif="GTC",
-            strategy_name="Momentum"
-        )
+            strategy_name="Momentum",
+        ),
     ]
     is_valid, err_msg = validate_group("20260530_Valid", valid_legs)
     assert is_valid
@@ -103,7 +99,9 @@ async def test_upsert_idempotency(db):
     await db.commit()
 
     # Prüfen, dass nur ein Eintrag existiert mit neuen Werten
-    async with db.execute("SELECT quantity, target_price FROM orders WHERE trade_group_id = 'G1'") as cursor:
+    async with db.execute(
+        "SELECT quantity, target_price FROM orders WHERE trade_group_id = 'G1'"
+    ) as cursor:
         rows = await cursor.fetchall()
         assert len(rows) == 1
         assert rows[0]["quantity"] == 200
@@ -139,7 +137,9 @@ async def test_upsert_protects_submitted(db):
     await db.commit()
 
     # Prüfen, dass Werte unberührt blieben da Status 'Submitted' war
-    async with db.execute("SELECT quantity, target_price FROM orders WHERE trade_group_id = 'G1'") as cursor:
+    async with db.execute(
+        "SELECT quantity, target_price FROM orders WHERE trade_group_id = 'G1'"
+    ) as cursor:
         row = await cursor.fetchone()
         assert row["quantity"] == 100
         assert row["target_price"] == 180.0
@@ -169,11 +169,17 @@ async def test_settlement_vwap_calculation(db):
 
     # 2. Teilausführungen eintragen
     # Entry: 60 Shares zu $150.10 und 40 Shares zu $149.80 (VWAP = 149.98)
-    await db.execute("INSERT INTO executions (exec_id, order_id, price, qty, commission) VALUES ('E1', 1, 150.10, 60, 1.0)")
-    await db.execute("INSERT INTO executions (exec_id, order_id, price, qty, commission) VALUES ('E2', 1, 149.80, 40, 1.0)")
-    
+    await db.execute(
+        "INSERT INTO executions (exec_id, order_id, price, qty, commission) VALUES ('E1', 1, 150.10, 60, 1.0)"
+    )
+    await db.execute(
+        "INSERT INTO executions (exec_id, order_id, price, qty, commission) VALUES ('E2', 1, 149.80, 40, 1.0)"
+    )
+
     # Exit: 100 Shares zu $155.05 (VWAP = 155.05)
-    await db.execute("INSERT INTO executions (exec_id, order_id, price, qty, commission) VALUES ('E3', 2, 155.05, 100, 2.0)")
+    await db.execute(
+        "INSERT INTO executions (exec_id, order_id, price, qty, commission) VALUES ('E3', 2, 155.05, 100, 2.0)"
+    )
     await db.commit()
 
     # 3. Settlement ausführen
@@ -183,7 +189,7 @@ async def test_settlement_vwap_calculation(db):
 
     async def db_factory():
         return db
-    
+
     mock_notifier = MagicMock()
     mock_notifier.send_message = AsyncMock(return_value=True)
 
@@ -194,7 +200,9 @@ async def test_settlement_vwap_calculation(db):
         db.close = original_close
 
     # 4. Prüfen der Ergebnisse in trades_settlement
-    async with db.execute("SELECT * FROM trades_settlement WHERE trade_group_id = 'G1'") as cursor:
+    async with db.execute(
+        "SELECT * FROM trades_settlement WHERE trade_group_id = 'G1'"
+    ) as cursor:
         row = await cursor.fetchone()
         assert row is not None
         assert abs(row["avg_entry_price"] - 149.98) < 0.001
@@ -237,7 +245,7 @@ async def test_alert_watcher_dead_orders(db):
 
     # Check ausführen (Schwellenwert 15 Minuten)
     await check_dead_orders(db, mock_notifier, state, threshold_minutes=15)
-    
+
     # Verifizieren, dass der Alarm gesendet wurde
     mock_notifier.send_message.assert_called_once()
     assert state.is_order_reported(1)
@@ -247,6 +255,7 @@ async def test_alert_watcher_dead_orders(db):
 async def test_order_builder_order_ref():
     """Verify that build_order() correctly sets the TWS orderRef field to the strategy name."""
     from app.trading.order_builder import build_order
+
     order_row = OrderRow(
         order_id=42,
         perm_id=None,
@@ -263,8 +272,7 @@ async def test_order_builder_order_ref():
         target_price=Decimal("180.0"),
         tif="GTC",
         strategy_name="NDXMomentum",
-        status="Created"
+        status="Created",
     )
     tws_order = build_order(order_row)
     assert tws_order.orderRef == "NDXMomentum"
-

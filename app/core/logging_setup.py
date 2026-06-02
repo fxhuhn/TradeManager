@@ -4,13 +4,13 @@ import sys
 from pathlib import Path
 import structlog
 
+
 def configure_logging(
-    log_file_path: Path = Path("data/app.log"), 
-    backup_count: int = 5
+    log_file_path: Path = Path("data/app.log"), backup_count: int = 5
 ) -> None:
     """
     Konfiguriert structlog in Kombination mit dem Python-Standard-logging-Modul.
-    
+
     Schreibt Logs formatiert auf stdout (Konsole) und in eine rotierende Datei
     (täglicher Wechsel, 5 Backups werden aufbewahrt).
     """
@@ -25,7 +25,7 @@ def configure_logging(
     # 4. Root-Logger des Standard-logging konfigurieren
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
-    
+
     # Vorherige Handler entfernen (um Duplikate bei Reconnects/Imports zu verhindern)
     root_logger.handlers.clear()
     root_logger.addHandler(console_handler)
@@ -38,7 +38,7 @@ def configure_logging(
             when="midnight",
             interval=1,
             backupCount=backup_count,
-            encoding="utf-8"
+            encoding="utf-8",
         )
         file_handler.setLevel(logging.INFO)
         root_logger.addHandler(file_handler)

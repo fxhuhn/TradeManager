@@ -1,5 +1,3 @@
-import sqlite3
-from decimal import Decimal
 from pathlib import Path
 import aiosqlite
 import structlog
@@ -9,9 +7,9 @@ logger = structlog.get_logger()
 # Globaler DB-Pfad. Kann fuer Tests auf ":memory:" überschrieben werden
 DB_PATH: Path = Path("data/trading.db")
 
+
 async def get_db(
-    db_path: Path = DB_PATH, 
-    timeout_seconds: float = 30.0
+    db_path: Path = DB_PATH, timeout_seconds: float = 30.0
 ) -> aiosqlite.Connection:
     """
     Erstellt eine aiosqlite-Verbindung mit isolation_level=None
@@ -23,9 +21,7 @@ async def get_db(
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
     db = await aiosqlite.connect(
-        str(db_path), 
-        timeout=timeout_seconds, 
-        isolation_level=None
+        str(db_path), timeout=timeout_seconds, isolation_level=None
     )
     db.row_factory = aiosqlite.Row
 
@@ -34,6 +30,7 @@ async def get_db(
     await db.execute("PRAGMA journal_mode = WAL;")
     await db.execute("PRAGMA synchronous = NORMAL;")
     return db
+
 
 async def verify_db_integrity(db_path: Path = DB_PATH) -> bool:
     """Prüft die Datenbank auf strukturelle Fehler mit sicherem Timeout."""
@@ -49,20 +46,17 @@ async def verify_db_integrity(db_path: Path = DB_PATH) -> bool:
                     return True
                 else:
                     logger.error(
-                        "DB-Integritaetspruefung fehlgeschlagen", 
-                        result=dict(row) if row else None
+                        "DB-Integritaetspruefung fehlgeschlagen",
+                        result=dict(row) if row else None,
                     )
                     return False
     except Exception as exception:
-        logger.error(
-            "Integritaetspruefung verunglueckt", 
-            error=str(exception)
-        )
+        logger.error("Integritaetspruefung verunglueckt", error=str(exception))
         return False
 
+
 async def run_migrations(
-    db: aiosqlite.Connection, 
-    migrations_dir: Path = Path("migrations")
+    db: aiosqlite.Connection, migrations_dir: Path = Path("migrations")
 ) -> None:
     """
     Führt alle .sql-Dateien im migrations/-Verzeichnis lexikografisch aus.
@@ -85,8 +79,7 @@ async def run_migrations(
 
     if not migrations_dir.exists():
         logger.warning(
-            "Migrationsverzeichnis existiert nicht", 
-            path=str(migrations_dir)
+            "Migrationsverzeichnis existiert nicht", path=str(migrations_dir)
         )
         return
 
@@ -97,15 +90,11 @@ async def run_migrations(
             version_str = sql_file.name.split("_", 1)[0]
             version = int(version_str)
         except ValueError:
-            logger.error(
-                "Ungueltiges Migrationsdateiformat", 
-                file=sql_file.name
-            )
+            logger.error("Ungueltiges Migrationsdateiformat", file=sql_file.name)
             continue
 
         async with db.execute(
-            "SELECT version FROM schema_version WHERE version = ?", 
-            (version,)
+            "SELECT version FROM schema_version WHERE version = ?", (version,)
         ) as cursor:
             if await cursor.fetchone():
                 continue
@@ -119,29 +108,23 @@ async def run_migrations(
                 statement_clean = statement.strip()
                 if statement_clean:
                     await db.execute(statement_clean)
-            
+
             await db.execute(
-                "INSERT INTO schema_version (version) VALUES (?)", 
-                (version,)
+                "INSERT INTO schema_version (version) VALUES (?)", (version,)
             )
             await db.execute("COMMIT")
             logger.info("Migration erfolgreich angewendet", version=version)
         except Exception as exception:
             await db.execute("ROLLBACK")
-            logger.error(
-                "Fehler bei Migration", 
-                version=version, 
-                error=str(exception)
-            )
+            logger.error("Fehler bei Migration", version=version, error=str(exception))
             raise exception
 
+
 async def safe_execute_transaction(
-    db: aiosqlite.Connection, 
-    sql: str, 
-    params: tuple = ()
+    db: aiosqlite.Connection, sql: str, params: tuple = ()
 ) -> None:
     """
-    Hilfsfunktion zur sicheren Ausführung einer einzelnen manipulierenden Anweisung 
+    Hilfsfunktion zur sicheren Ausführung einer einzelnen manipulierenden Anweisung
     im BEGIN IMMEDIATE Block (erwirbt sofort Write-Lock).
     """
     await db.execute("BEGIN IMMEDIATE")
