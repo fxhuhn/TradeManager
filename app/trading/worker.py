@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Awaitable, Callable
+from decimal import Decimal
 from typing import Final
 
 import aiosqlite
@@ -15,6 +16,17 @@ logger = structlog.get_logger()
 
 # Globales Lock zur Sicherung der Atomarität von getReqId() + DB-Write
 ORDER_ID_LOCK = asyncio.Lock()
+
+
+def _get_live_position_quantity(ib: IB, account_id: str, symbol: str) -> Decimal:
+    """Ermittelt den aktuellen Depotbestand für ein bestimmtes Symbol und Account."""
+    for position in ib.positions():
+        if (
+            position.account == account_id
+            and position.contract.symbol == symbol.upper()
+        ):
+            return Decimal(str(position.position))
+    return Decimal("0.0")
 
 
 async def process_trade_group(
@@ -152,6 +164,78 @@ async def process_trade_group(
                 bracket_role=child.bracket_role,
                 trade_group_id=trade_group_id,
             )
+
+            # Vorkehrung A: Live-Depotabgleich bei Post-Fill Child-Orders (Exits)
+            if is_post_fill and child.bracket_role in ("SL", "TP", "EXIT"):
+                live_position = _get_live_position_quantity(ib, child.account_id, child.symbol)
+
+                # Bestimme die Richtung (SELL benötigt Long-Bestand, BUY benötigt Short-Bestand)
+                if child.action == "SELL":
+                    available_quantity = max(Decimal("0.0"), live_position)
+                else:  # BUY
+                    available_quantity = max(Decimal("0.0"), -live_position)
+
+                if available_quantity <= Decimal("0.0"):
+                    logger.warning(
+                        "Keine offene Gegenposition im Depot gefunden. Exit-Order wird storniert.",
+                        trade_group_id=trade_group_id,
+                        symbol=child.symbol,
+                        bracket_role=child.bracket_role,
+                        live_position=float(live_position),
+                    )
+
+                    # Update in DB auf Cancelled setzen
+                    await db.execute("BEGIN IMMEDIATE")
+                    try:
+                        await db.execute(
+                            "UPDATE orders SET status = 'Cancelled' WHERE order_id = ?",
+                            (child.order_id,),
+                        )
+                        await db.execute("COMMIT")
+                    except Exception as exception:
+                        await db.execute("ROLLBACK")
+                        logger.error(
+                            "Fehler beim Stornieren der Child-Order in DB",
+                            order_id=child.order_id,
+                            error=str(exception),
+                        )
+
+                    await notifier.send_message(
+                        f"⚠️ EXIT ABGEBROCHEN ({trade_group_id}): Keine offene Position für {child.symbol} "
+                        f"vorhanden (Depotbestand: {float(live_position)}). Order wurde storniert."
+                    )
+                    continue
+
+                intended_quantity = Decimal(str(child.quantity))
+                if available_quantity < intended_quantity:
+                    logger.info(
+                        "Exit-Order Menge an realen Depotbestand angepasst",
+                        trade_group_id=trade_group_id,
+                        old_qty=float(intended_quantity),
+                        new_qty=float(available_quantity),
+                    )
+                    child.quantity = int(available_quantity)
+
+                    # Menge in der DB aktualisieren
+                    await db.execute("BEGIN IMMEDIATE")
+                    try:
+                        await db.execute(
+                            "UPDATE orders SET quantity = ? WHERE order_id = ?",
+                            (child.quantity, child.order_id),
+                        )
+                        await db.execute("COMMIT")
+                    except Exception as exception:
+                        await db.execute("ROLLBACK")
+                        logger.error(
+                            "Fehler beim Aktualisieren der Child-Order Menge in DB",
+                            order_id=child.order_id,
+                            error=str(exception),
+                        )
+
+                    await notifier.send_message(
+                        f"⚠️ EXIT MENGE ANGEPASST ({trade_group_id}): Stückzahl für {child.symbol} von "
+                        f"{float(intended_quantity)} auf {float(available_quantity)} reduziert, um dem realen Depotbestand zu entsprechen."
+                    )
 
             # Atomares Reservieren und Schreiben der TWS-OrderId
             async with ORDER_ID_LOCK:

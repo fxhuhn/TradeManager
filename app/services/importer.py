@@ -139,60 +139,63 @@ async def run_csv_import(
             )
             continue
 
-        entry_leg = next(leg for leg in raw_legs if leg.bracket_role == "ENTRY")
-        account_id = entry_leg.account_id
+        entry_leg = next((leg for leg in raw_legs if leg.bracket_role == "ENTRY"), None)
+        first_leg = raw_legs[0]
+        account_id = entry_leg.account_id if entry_leg else first_leg.account_id
 
-        # 4. TotalCashValue abfragen (hochpräzise als Decimal)
-        total_cash_value = await fetch_total_cash_value(ib, account_id)
-        if total_cash_value <= Decimal("0.0"):
-            logger.warning(
-                "Kein verfügbares Cash-Kapital vorhanden. Überspringe Gruppe.",
-                trade_group_id=trade_group_id,
-            )
-            await notifier.send_message(
-                f"⚠️ KAPITAL-FEHLER ({trade_group_id}): Kein verfuegbares Cash-Kapital fuer Account {account_id}. "
-                f"Gruppe uebersprungen."
-            )
-            continue
 
-        # 5. Risk-Limit umgehen: 100% des TotalCashValue ist die Allokationsgrenze
-        max_allocation = total_cash_value
-
-        # 6. Positionsgröße berechnen und downscalen
-        target_quantity = entry_leg.quantity
-        if entry_leg.target_price and entry_leg.target_price > Decimal("0.0"):
-            entry_cost = Decimal(str(target_quantity)) * entry_leg.target_price
-            if entry_cost > max_allocation:
-                # Ganzzahl-Division auf Decimal zur mathematisch exakten Abrundung
-                quantity_adjusted = int(max_allocation // entry_leg.target_price)
-                if quantity_adjusted <= 0:
-                    logger.warning(
-                        "Sizing ergab Qty <= 0. Überspringe Gruppe.",
-                        trade_group_id=trade_group_id,
-                        max_allocation=float(max_allocation),
-                        target_price=float(entry_leg.target_price),
-                    )
-                    await notifier.send_message(
-                        f"⚠️ SIZING-FEHLER ({trade_group_id}): Erforderliches Kapital überschreitet Limit "
-                        f"({float(max_allocation):.2f}). Reduzierte Menge = 0. Gruppe uebersprungen."
-                    )
-                    continue
-
-                logger.info(
-                    "Downscaling angewendet",
+        if entry_leg:
+            # 4. TotalCashValue abfragen (hochpräzise als Decimal)
+            total_cash_value = await fetch_total_cash_value(ib, account_id)
+            if total_cash_value <= Decimal("0.0"):
+                logger.warning(
+                    "Kein verfügbares Cash-Kapital vorhanden. Überspringe Gruppe.",
                     trade_group_id=trade_group_id,
-                    old_qty=target_quantity,
-                    new_qty=quantity_adjusted,
-                    reason="Capital Limit ueberschritten",
                 )
-                target_quantity = quantity_adjusted
+                await notifier.send_message(
+                    f"⚠️ KAPITAL-FEHLER ({trade_group_id}): Kein verfuegbares Cash-Kapital fuer Account {account_id}. "
+                    f"Gruppe uebersprungen."
+                )
+                continue
 
-        # Die berechnete/angepasste Menge symmetrisch auf alle Legs anwenden
-        # Da LegRow frozen=True ist, rekonstruieren wir die Dataclasses mit der neuen Menge:
-        import dataclasses
+            # 5. Risk-Limit umgehen: 100% des TotalCashValue ist die Allokationsgrenze
+            max_allocation = total_cash_value
 
-        legs = [dataclasses.replace(leg, quantity=target_quantity) for leg in raw_legs]
-        # Now legs is a list of reconstructed LegRows with updated quantities! That is extremely elegant!
+            # 6. Positionsgröße berechnen und downscalen
+            target_quantity = entry_leg.quantity
+            if entry_leg.target_price and entry_leg.target_price > Decimal("0.0"):
+                entry_cost = Decimal(str(target_quantity)) * entry_leg.target_price
+                if entry_cost > max_allocation:
+                    # Ganzzahl-Division auf Decimal zur mathematisch exakten Abrundung
+                    quantity_adjusted = int(max_allocation // entry_leg.target_price)
+                    if quantity_adjusted <= 0:
+                        logger.warning(
+                            "Sizing ergab Qty <= 0. Überspringe Gruppe.",
+                            trade_group_id=trade_group_id,
+                            max_allocation=float(max_allocation),
+                            target_price=float(entry_leg.target_price),
+                        )
+                        await notifier.send_message(
+                            f"⚠️ SIZING-FEHLER ({trade_group_id}): Erforderliches Kapital überschreitet Limit "
+                            f"({float(max_allocation):.2f}). Reduzierte Menge = 0. Gruppe uebersprungen."
+                        )
+                        continue
+
+                    logger.info(
+                        "Downscaling angewendet",
+                        trade_group_id=trade_group_id,
+                        old_qty=target_quantity,
+                        new_qty=quantity_adjusted,
+                        reason="Capital Limit ueberschritten",
+                    )
+                    target_quantity = quantity_adjusted
+
+            # Die berechnete/angepasste Menge symmetrisch auf alle Legs anwenden
+            import dataclasses
+            legs = [dataclasses.replace(leg, quantity=target_quantity) for leg in raw_legs]
+        else:
+            legs = raw_legs
+            target_quantity = first_leg.quantity
 
         # 7. Atomarer UPSERT in die DB
         await db.execute("BEGIN IMMEDIATE")
@@ -210,56 +213,55 @@ async def run_csv_import(
                 entry_order_id = row["order_id"]
                 existing_status = row["status"]
                 if existing_status in ("Created", "Error"):
-                    await db.execute(
-                        """
-                        UPDATE orders SET
-                            symbol = ?, sec_type = ?, exchange = ?, action = ?,
-                            quantity = ?, order_type = ?, target_price = ?, tif = ?,
-                            strategy_name = ?
-                        WHERE order_id = ?
-                        """,
-                        (
-                            entry_leg.symbol,
-                            entry_leg.sec_type,
-                            entry_leg.exchange,
-                            entry_leg.action,
-                            target_quantity,
-                            entry_leg.order_type,
-                            float(entry_leg.target_price)
-                            if entry_leg.target_price is not None
-                            else None,
-                            entry_leg.tif,
-                            entry_leg.strategy_name,
-                            entry_order_id,
-                        ),
-                    )
-                    logger.debug(
-                        "ENTRY-Order aktualisiert",
-                        order_id=entry_order_id,
-                        trade_group_id=trade_group_id,
-                    )
+                    if entry_leg:
+                        await db.execute(
+                            """
+                            UPDATE orders SET
+                                symbol = ?, sec_type = ?, exchange = ?, action = ?,
+                                quantity = ?, order_type = ?, target_price = ?, tif = ?,
+                                strategy_name = ?
+                            WHERE order_id = ?
+                            """,
+                            (
+                                entry_leg.symbol,
+                                entry_leg.sec_type,
+                                entry_leg.exchange,
+                                entry_leg.action,
+                                target_quantity,
+                                entry_leg.order_type,
+                                float(entry_leg.target_price)
+                                if entry_leg.target_price is not None
+                                else None,
+                                entry_leg.tif,
+                                entry_leg.strategy_name,
+                                entry_order_id,
+                            ),
+                        )
+                        logger.debug(
+                            "ENTRY-Order aktualisiert",
+                            order_id=entry_order_id,
+                            trade_group_id=trade_group_id,
+                        )
                 else:
                     logger.info(
-                        "ENTRY-Order ist bereits aktiv/abgeschlossen. Überspringe DB-Write.",
+                        "ENTRY-Order ist bereits aktiv/abgeschlossen. Überspringe ENTRY-Schreiben/Update.",
                         order_id=entry_order_id,
                         status=existing_status,
                     )
-                    await db.execute("ROLLBACK")
-                    continue
-            else:
+            elif entry_leg:
                 entry_order_id = await get_next_temp_id(db)
                 await db.execute(
                     """
-                    INSERT INTO orders (
-                        order_id, parent_id, trade_group_id, account_id, bracket_role,
-                        symbol, sec_type, exchange, action, quantity, order_type,
-                        target_price, tif, strategy_name, status, retry_count
-                    ) VALUES (
-                        ?, NULL, ?, ?, 'ENTRY',
-                        ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, 'Created', 0
-                    )
-                    """,
+                        INSERT INTO orders (
+                            order_id, parent_id, trade_group_id, account_id, bracket_role,
+                            symbol, sec_type, exchange, action, quantity, order_type,
+                            target_price, tif, strategy_name, status, retry_count
+                        ) VALUES (
+                            ?, NULL, ?, ?, 'ENTRY',
+                            ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, 'Created', 0
+                        )
+                        """,
                     (
                         entry_order_id,
                         trade_group_id,
@@ -282,6 +284,16 @@ async def run_csv_import(
                     order_id=entry_order_id,
                     trade_group_id=trade_group_id,
                 )
+            else:
+                logger.error(
+                    "Reine Exit-Order importiert, aber kein ENTRY-Auftrag in der DB gefunden",
+                    trade_group_id=trade_group_id,
+                )
+                await db.execute("ROLLBACK")
+                await notifier.send_message(
+                    f"❌ IMPORT-FEHLER ({trade_group_id}): Exit-Order importiert, aber kein passender ENTRY-Auftrag in der DB gefunden."
+                )
+                continue
 
             # 7b. Jetzt alle anderen Legs (SL, TP, EXIT) mit parent_id = entry_order_id upserten
             for leg in legs:

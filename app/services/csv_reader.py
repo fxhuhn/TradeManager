@@ -18,15 +18,21 @@ def validate_group(group_id: str, legs: list[LegRow]) -> tuple[bool, str]:
         return False, "Gruppe enthält keine Legs"
 
     entries = [leg for leg in legs if leg.bracket_role == "ENTRY"]
-    if len(entries) != 1:
+    if len(entries) > 1:
         return (
             False,
-            f"Gruppe muss genau eine ENTRY-Order enthalten (gefunden: {len(entries)})",
+            f"Gruppe darf maximal eine ENTRY-Order enthalten (gefunden: {len(entries)})",
         )
+    if len(entries) == 0:
+        exit_legs = [leg for leg in legs if leg.bracket_role in ("SL", "TP", "EXIT")]
+        if not exit_legs:
+            return (
+                False,
+                "Gruppe muss entweder eine ENTRY-Order oder mindestens eine Exit-Order (SL, TP, EXIT) enthalten",
+            )
 
-    entry = entries[0]
-    symbol = entry.symbol
-    account_id = entry.account_id
+    symbol = legs[0].symbol
+    account_id = legs[0].account_id
 
     for leg in legs:
         if leg.symbol != symbol:
@@ -67,14 +73,16 @@ def validate_group(group_id: str, legs: list[LegRow]) -> tuple[bool, str]:
                     f"target_price ist fuer order_type='{leg.order_type}' zwingend erforderlich",
                 )
 
-    entry_action = entry.action
-    exit_action = "SELL" if entry_action == "BUY" else "BUY"
-    for leg in legs:
-        if leg.bracket_role in ("SL", "TP", "EXIT") and leg.action != exit_action:
-            return (
-                False,
-                f"Exit-Leg {leg.bracket_role} muss Gegenrichtung ({exit_action}) zu ENTRY ({entry_action}) sein",
-            )
+    if entries:
+        entry = entries[0]
+        entry_action = entry.action
+        exit_action = "SELL" if entry_action == "BUY" else "BUY"
+        for leg in legs:
+            if leg.bracket_role in ("SL", "TP", "EXIT") and leg.action != exit_action:
+                return (
+                    False,
+                    f"Exit-Leg {leg.bracket_role} muss Gegenrichtung ({exit_action}) zu ENTRY ({entry_action}) sein",
+                )
 
     return True, ""
 
