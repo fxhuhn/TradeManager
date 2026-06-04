@@ -246,7 +246,10 @@ async def test_alert_watcher_dead_orders(db):
     await db.commit()
 
     # Check ausführen (Schwellenwert 15 Minuten)
-    await check_dead_orders(db, mock_notifier, state, threshold_minutes=15)
+    from datetime import UTC, datetime
+    # 2026-06-04 14:00:00 UTC corresponds to Thursday, 10:00:00 AM NY time (active trading hours)
+    test_time = datetime(2026, 6, 4, 14, 0, 0, tzinfo=UTC)
+    await check_dead_orders(db, mock_notifier, state, threshold_minutes=15, current_time=test_time)
 
     # Verifizieren, dass der Alarm gesendet wurde
     mock_notifier.send_message.assert_called_once()

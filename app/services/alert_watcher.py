@@ -1,5 +1,6 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import aiosqlite
 import structlog
@@ -40,40 +41,131 @@ async def check_dead_orders(
     notifier: TelegramNotifier,
     state: AlertState,
     threshold_minutes: int = 15,
+    current_time: datetime | None = None,
 ) -> None:
     """
     Prüft, ob Orders im Status 'Submitted' hängen, deren Übermittlungszeitpunkt
-    länger als `threshold_minutes` zurückliegt.
+    länger als `threshold_minutes` zurückliegt, unter Berücksichtigung der US-Handelszeiten.
     """
-    # UTC-Zeit bestimmen
-    cutoff_time = datetime.now(UTC) - timedelta(minutes=threshold_minutes)
-    cutoff_str = cutoff_time.strftime("%Y-%m-%d %H:%M:%S")
+    new_york_timezone = ZoneInfo("America/New_York")
+    if current_time is None:
+        current_time_new_york = datetime.now(new_york_timezone)
+    else:
+        if current_time.tzinfo is None:
+            current_time_new_york = current_time.replace(tzinfo=UTC).astimezone(
+                new_york_timezone
+            )
+        else:
+            current_time_new_york = current_time.astimezone(new_york_timezone)
 
+    # 1. Keine Prüfung am Wochenende
+    if current_time_new_york.weekday() >= 5:
+        return
+
+    market_open_today = current_time_new_york.replace(
+        hour=9, minute=30, second=0, microsecond=0
+    )
+    market_close_today = current_time_new_york.replace(
+        hour=16, minute=0, second=0, microsecond=0
+    )
+
+    # 2. Keine Prüfung außerhalb der regulären US-Handelszeiten
+    if not (market_open_today <= current_time_new_york <= market_close_today):
+        return
+
+    try:
+        rows = await _fetch_submitted_orders(db)
+    except Exception as exception:
+        logger.error("Fehler beim Dead-Order-Check", error=str(exception))
+        return
+
+    for row in rows:
+        await _process_single_potential_dead_order(
+            order_row=row,
+            notifier=notifier,
+            alert_state=state,
+            current_time_new_york=current_time_new_york,
+            market_open_today=market_open_today,
+            new_york_timezone=new_york_timezone,
+            threshold_minutes=threshold_minutes,
+        )
+
+
+async def _fetch_submitted_orders(
+    db: aiosqlite.Connection,
+) -> list[aiosqlite.Row]:
+    """Ruft alle Orders mit dem Status 'Submitted' aus der Datenbank ab."""
     query = """
         SELECT order_id, trade_group_id, symbol, transmitted_at
         FROM orders
-        WHERE status = 'Submitted' AND transmitted_at < ?
+        WHERE status = 'Submitted'
     """
+    async with db.execute(query) as cursor:
+        return await cursor.fetchall()
+
+
+async def _process_single_potential_dead_order(
+    order_row: aiosqlite.Row,
+    notifier: TelegramNotifier,
+    alert_state: AlertState,
+    current_time_new_york: datetime,
+    market_open_today: datetime,
+    new_york_timezone: ZoneInfo,
+    threshold_minutes: int,
+) -> None:
+    """Überprüft eine einzelne Order auf Überschreiten des Timeouts und alarmiert ggf."""
+    order_id = order_row["order_id"]
+    trade_group_id = order_row["trade_group_id"]
+    symbol = order_row["symbol"]
+    transmitted_at_string = order_row["transmitted_at"]
+
+    if not transmitted_at_string:
+        return
+
     try:
-        async with db.execute(query, (cutoff_str,)) as cursor:
-            async for row in cursor:
-                order_id = row["order_id"]
-                trade_group_id = row["trade_group_id"]
-                symbol = row["symbol"]
-                transmitted_at = row["transmitted_at"]
+        transmitted_at_utc = datetime.strptime(
+            transmitted_at_string, "%Y-%m-%d %H:%M:%S"
+        ).replace(tzinfo=UTC)
+    except ValueError as exception:
+        logger.error(
+            "Fehler beim Parsen von transmitted_at",
+            order_id=order_id,
+            value=transmitted_at_string,
+            error=str(exception),
+        )
+        return
 
-                if not state.is_order_reported(order_id):
-                    msg = f"⚠️ DEAD ORDER: {trade_group_id} | {symbol} | seit {transmitted_at}"
-                    logger.warning(
-                        "Dead Order erkannt",
-                        order_id=order_id,
-                        trade_group_id=trade_group_id,
-                    )
+    transmitted_at_new_york = transmitted_at_utc.astimezone(new_york_timezone)
 
-                    if await notifier.send_message(msg):
-                        state.mark_order_reported(order_id)
-    except Exception as e:
-        logger.error("Fehler beim Dead-Order-Check", error=str(e))
+    if transmitted_at_new_york < market_open_today:
+        effective_activation_time = market_open_today
+    else:
+        effective_activation_time = transmitted_at_new_york
+
+    if current_time_new_york < effective_activation_time:
+        return
+
+    active_duration = current_time_new_york - effective_activation_time
+    threshold_duration = timedelta(minutes=threshold_minutes)
+
+    if active_duration <= threshold_duration:
+        return
+
+    if alert_state.is_order_reported(order_id):
+        return
+
+    message_content = (
+        f"⚠️ DEAD ORDER: {trade_group_id} | {symbol} | "
+        f"seit {transmitted_at_string}"
+    )
+    logger.warning(
+        "Dead Order erkannt",
+        order_id=order_id,
+        trade_group_id=trade_group_id,
+    )
+
+    if await notifier.send_message(message_content):
+        alert_state.mark_order_reported(order_id)
 
 
 async def check_high_slippage(
