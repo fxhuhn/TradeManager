@@ -143,7 +143,6 @@ async def run_csv_import(
         first_leg = raw_legs[0]
         account_id = entry_leg.account_id if entry_leg else first_leg.account_id
 
-
         if entry_leg:
             # 4. TotalCashValue abfragen (hochpräzise als Decimal)
             total_cash_value = await fetch_total_cash_value(ib, account_id)
@@ -192,7 +191,10 @@ async def run_csv_import(
 
             # Die berechnete/angepasste Menge symmetrisch auf alle Legs anwenden
             import dataclasses
-            legs = [dataclasses.replace(leg, quantity=target_quantity) for leg in raw_legs]
+
+            legs = [
+                dataclasses.replace(leg, quantity=target_quantity) for leg in raw_legs
+            ]
         else:
             legs = raw_legs
             target_quantity = first_leg.quantity

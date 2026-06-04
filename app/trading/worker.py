@@ -169,7 +169,11 @@ async def process_trade_group(
         )
         ib.placeOrder(contract, ib_entry_order)
 
-        price_str = f" @ {entry_order.target_price:.2f}" if entry_order.target_price and entry_order.target_price > 0 else ""
+        price_str = (
+            f" @ {entry_order.target_price:.2f}"
+            if entry_order.target_price and entry_order.target_price > 0
+            else ""
+        )
         await notifier.send_message(
             f"📤 ORDER GESENDET: {entry_order.symbol} | {entry_order.bracket_role} | "
             f"{entry_order.action} {entry_order.quantity}{price_str} ({entry_order.order_type}) | "
@@ -191,7 +195,9 @@ async def process_trade_group(
 
             # Vorkehrung A: Live-Depotabgleich bei Post-Fill Child-Orders (Exits)
             if is_post_fill and child.bracket_role in ("SL", "TP", "EXIT"):
-                live_position = _get_live_position_quantity(ib, child.account_id, child.symbol)
+                live_position = _get_live_position_quantity(
+                    ib, child.account_id, child.symbol
+                )
 
                 # Bestimme die Richtung (SELL benötigt Long-Bestand, BUY benötigt Short-Bestand)
                 if child.action == "SELL":
@@ -311,7 +317,11 @@ async def process_trade_group(
             )
             ib.placeOrder(contract, ib_child_order)
 
-            price_str = f" @ {child.target_price:.2f}" if child.target_price and child.target_price > 0 else ""
+            price_str = (
+                f" @ {child.target_price:.2f}"
+                if child.target_price and child.target_price > 0
+                else ""
+            )
             await notifier.send_message(
                 f"📤 ORDER GESENDET: {child.symbol} | {child.bracket_role} | "
                 f"{child.action} {child.quantity}{price_str} ({child.order_type}) | "
