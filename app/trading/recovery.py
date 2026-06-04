@@ -104,16 +104,19 @@ async def run_recovery(
         if order.status in ("PreSubmitted", "Submitted"):
             if tws_active:
                 perm_id = tws_active.order.permId
+                tws_status = tws_active.orderStatus.status
+                mapped_status = "PreSubmitted" if tws_status == "PreSubmitted" else "Submitted"
+                
                 logger.info(
-                    "Recovery Szenario 1: Order aktiv in TWS. Aktualisiere perm_id und Status auf Submitted.",
+                    f"Recovery Szenario 1: Order aktiv in TWS. Aktualisiere perm_id und Status auf {mapped_status}.",
                     order_id=order_id,
                     perm_id=perm_id,
                 )
                 await database_connection.execute("BEGIN IMMEDIATE")
                 try:
                     await database_connection.execute(
-                        "UPDATE orders SET perm_id = ?, status = 'Submitted' WHERE order_id = ?",
-                        (perm_id, order_id),
+                        "UPDATE orders SET perm_id = ?, status = ? WHERE order_id = ?",
+                        (perm_id, mapped_status, order_id),
                     )
                     await database_connection.execute("COMMIT")
                 except Exception:
@@ -152,16 +155,19 @@ async def run_recovery(
         elif order.status == "Created":
             if tws_active:
                 perm_id = tws_active.order.permId
+                tws_status = tws_active.orderStatus.status
+                mapped_status = "PreSubmitted" if tws_status == "PreSubmitted" else "Submitted"
+                
                 logger.info(
-                    "Recovery Szenario 4: Mid-Crash erkannt (Created in DB, aktiv in TWS). Setze auf Submitted.",
+                    f"Recovery Szenario 4: Mid-Crash erkannt (Created in DB, aktiv in TWS). Setze auf {mapped_status}.",
                     order_id=order_id,
                     perm_id=perm_id,
                 )
                 await database_connection.execute("BEGIN IMMEDIATE")
                 try:
                     await database_connection.execute(
-                        "UPDATE orders SET status = 'Submitted', perm_id = ? WHERE order_id = ?",
-                        (perm_id, order_id),
+                        "UPDATE orders SET status = ?, perm_id = ? WHERE order_id = ?",
+                        (mapped_status, perm_id, order_id),
                     )
                     await database_connection.execute("COMMIT")
                 except Exception:
