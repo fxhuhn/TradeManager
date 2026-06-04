@@ -79,7 +79,9 @@ async def test_validate_group_without_entry_allowed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_process_trade_group_exit_cancelled_if_no_position(db, test_config: Config) -> None:
+async def test_process_trade_group_exit_cancelled_if_no_position(
+    db, test_config: Config
+) -> None:
     """
     Prüft, dass eine Post-Fill Exit-Order storniert wird,
     wenn kein Depotbestand für das Symbol vorhanden ist.
@@ -122,7 +124,9 @@ async def test_process_trade_group_exit_cancelled_if_no_position(db, test_config
 
 
 @pytest.mark.asyncio
-async def test_process_trade_group_exit_quantity_reduced(db, test_config: Config) -> None:
+async def test_process_trade_group_exit_quantity_reduced(
+    db, test_config: Config
+) -> None:
     """
     Prüft, dass die Menge der Exit-Order reduziert wird,
     wenn der Depotbestand kleiner ist als die geplante Exit-Menge.
@@ -159,7 +163,9 @@ async def test_process_trade_group_exit_quantity_reduced(db, test_config: Config
     await process_trade_group(db, mock_ib, "TG_RED_POS", mock_notifier, test_config)
 
     # 4. Verifikation: Exit-Order in DB muss auf Qty=4 angepasst und Submitted sein
-    async with db.execute("SELECT status, quantity FROM orders WHERE order_id = 101") as cursor:
+    async with db.execute(
+        "SELECT status, quantity FROM orders WHERE order_id = 101"
+    ) as cursor:
         row = await cursor.fetchone()
         assert row is not None
         assert row["status"] == "Submitted"
@@ -170,13 +176,17 @@ async def test_process_trade_group_exit_quantity_reduced(db, test_config: Config
     called_order = mock_ib.placeOrder.call_args[0][1]
     assert called_order.totalQuantity == 4.0
     assert mock_notifier.send_message.call_count == 2
-    sent_messages = [call_args[0][0] for call_args in mock_notifier.send_message.call_args_list]
+    sent_messages = [
+        call_args[0][0] for call_args in mock_notifier.send_message.call_args_list
+    ]
     assert any("reduziert" in msg for msg in sent_messages)
     assert any("ORDER GESENDET" in msg for msg in sent_messages)
 
 
 @pytest.mark.asyncio
-async def test_run_csv_import_with_existing_filled_entry(db, test_config: Config) -> None:
+async def test_run_csv_import_with_existing_filled_entry(
+    db, test_config: Config, tmp_path: Path
+) -> None:
     """
     Prüft, dass der CSV-Importer eine nachträgliche EXIT-Order
     zu einer bereits ausgeführten ENTRY-Order hinzufügen kann, ohne die Gruppe abzubrechen.
@@ -191,11 +201,11 @@ async def test_run_csv_import_with_existing_filled_entry(db, test_config: Config
     await db.commit()
 
     # 2. Temp-CSV Datei erstellen, die reinen EXIT-Auftrag enthält
-    temp_csv = Path("data/temp_test_import.csv")
+    temp_csv = tmp_path / "temp_test_import.csv"
     temp_csv.write_text(
         "trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name\n"
         "TG_CROSS_DAY,EXIT,AAPL,STK,SMART,ACC_1,SELL,5,MKT,0.0,DAY,TurnoverTiming\n",
-        encoding="utf-8"
+        encoding="utf-8",
     )
 
     try:
