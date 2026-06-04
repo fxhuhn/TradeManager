@@ -1,7 +1,9 @@
 # ruff: noqa: E402
 import asyncio
 import signal
+import socket
 import sys
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 # Sicherstellen, dass das Root-Verzeichnis im PYTHONPATH ist, wenn das Skript direkt gestartet wird
@@ -55,6 +57,7 @@ async def connect_to_tws(ib: IB, config: Config) -> bool:
                 timeout=config.tws.connection_timeout_s,
             )
             logger.info("Erfolgreich mit TWS-Plattform verbunden")
+            _enable_socket_keepalive(ib)
             return True
         except Exception as exception:
             logger.warning(
@@ -143,20 +146,33 @@ async def main() -> None:
     queue: asyncio.Queue = asyncio.Queue()
 
     # Lokale Helfer-Funktionen zur Vermeidung zirkulärer Importe
-    async def trigger_settlement_cb(trade_group_id: str, account_id: str) -> None:
+    async def trigger_settlement_callback(trade_group_id: str, account_id: str) -> None:
         await trigger_settlement(db_factory, trade_group_id, account_id, notifier)
 
-    async def handle_retriable_error_cb(order_id: int) -> None:
+    async def handle_retriable_error_callback(order_id: int) -> None:
         await handle_retriable_error(db_factory, order_id, queue, notifier, config)
 
-    async def run_recovery_cb() -> None:
+    async def run_recovery_callback() -> None:
         database_conn = await db_factory()
         try:
             await run_recovery(
-                database_conn, ib, queue, notifier, trigger_settlement_cb, config
+                database_conn, ib, queue, notifier, trigger_settlement_callback, config
             )
         finally:
             await database_conn.close()
+
+    is_reconnecting = False
+
+    async def run_reconnect_callback() -> None:
+        nonlocal is_reconnecting
+        if is_reconnecting:
+            logger.warning("Reconnection loop is already running. Skipping trigger.")
+            return
+        is_reconnecting = True
+        try:
+            await _execute_reconnect_loop(ib, config, notifier, run_recovery_callback)
+        finally:
+            is_reconnecting = False
 
     # 7. Callbacks registrieren
     callbacks_mgr = TwsCallbacksManager(
@@ -164,9 +180,10 @@ async def main() -> None:
         ib=ib,
         notifier=notifier,
         config=config,
-        trigger_settlement_cb=trigger_settlement_cb,
-        handle_retriable_error_cb=handle_retriable_error_cb,
-        run_recovery_cb=run_recovery_cb,
+        trigger_settlement_callback=trigger_settlement_callback,
+        handle_retriable_error_callback=handle_retriable_error_callback,
+        run_recovery_callback=run_recovery_callback,
+        run_reconnect_callback=run_reconnect_callback,
     )
     callbacks_mgr.register_all()
 
@@ -174,7 +191,7 @@ async def main() -> None:
     database_conn = await db_factory()
     try:
         await run_recovery(
-            database_conn, ib, queue, notifier, trigger_settlement_cb, config
+            database_conn, ib, queue, notifier, trigger_settlement_callback, config
         )
     finally:
         await database_conn.close()
@@ -212,7 +229,7 @@ async def main() -> None:
             ib=ib,
             queue=queue,
             notifier=notifier,
-            trigger_settlement_cb=trigger_settlement_cb,
+            trigger_settlement_callback=trigger_settlement_callback,
             config=config,
             interval_seconds=config.app.order_sync_interval_s,
         )
@@ -270,6 +287,118 @@ async def main() -> None:
 
     logger.info("Shutdown-Sequenz erfolgreich abgeschlossen. Auf Wiedersehen!")
     await notifier.send_message("🛑 Trading System geordnet heruntergefahren.")
+
+
+async def _execute_reconnect_loop(
+    ib: IB,
+    config: Config,
+    notifier: TelegramNotifier,
+    recovery_callback: Callable[[], Awaitable[None]],
+) -> None:
+    """Führt die Wiederverbindungsschleife mit steigenden Intervallen aus."""
+    logger.info("Starte automatischen Wiederverbindungsaufbau...")
+    delays = [30.0, 60.0, 120.0, 240.0]
+    attempt = 1
+    max_attempts = config.tws.reconnect_max_attempts
+
+    while attempt <= max_attempts:
+        current_delay = delays[min(attempt - 1, len(delays) - 1)]
+        logger.info(
+            "Warte vor Wiederverbindungsversuch",
+            attempt=attempt,
+            delay_seconds=current_delay,
+        )
+        await asyncio.sleep(current_delay)
+
+        if ib.isConnected():
+            logger.info("Bereits verbunden. Beende Reconnect-Schleife.")
+            return
+
+        success = await _attempt_single_reconnect(ib, config, attempt)
+        if success:
+            logger.info("Wiederverbindung erfolgreich hergestellt!")
+            await notifier.send_message(
+                "✅ WIEDERVERBUNDEN: Die Verbindung zur Interactive Brokers TWS wurde erfolgreich wiederhergestellt."
+            )
+            ib.reqAutoOpenOrders(True)
+            logger.info("Trigger Recovery-Lauf nach Wiederverbindung...")
+            await recovery_callback()
+            return
+
+        attempt += 1
+
+    logger.critical(
+        f"Wiederverbindung nach {max_attempts} Versuchen fehlgeschlagen. Anwendung bleibt getrennt."
+    )
+    await notifier.send_message(
+        f"🚨 WIEDERVERBINDUNG FEHLGESCHLAGEN: Die Verbindung konnte nach {max_attempts} Versuchen nicht wiederhergestellt werden."
+    )
+
+
+async def _attempt_single_reconnect(ib: IB, config: Config, attempt: int) -> bool:
+    """Führt einen einzelnen Verbindungsversuch zur TWS durch."""
+    logger.info(
+        "Versuche Wiederverbindung",
+        attempt=attempt,
+        host=config.tws.host,
+        port=config.tws.port,
+    )
+    try:
+        await asyncio.wait_for(
+            ib.connectAsync(
+                config.tws.host,
+                config.tws.port,
+                clientId=config.tws.client_id
+            ),
+            timeout=config.tws.connection_timeout_s
+        )
+        _enable_socket_keepalive(ib)
+        return True
+    except Exception as exception:
+        logger.warning(
+            "Wiederverbindung-Verbindungsversuch fehlgeschlagen",
+            attempt=attempt,
+            error=str(exception)
+        )
+        return False
+
+
+def _enable_socket_keepalive(ib: IB) -> None:
+    """Aktiviert TCP-Keep-Alive auf dem TWS-Verbindungs-Socket zur Vermeidung von Timeouts."""
+    if not ib.isConnected():
+        return
+
+    try:
+        # Socket über den asyncio Transport abrufen
+        socket_object = ib.client.conn.transport.get_extra_info("socket")
+        if socket_object:
+            # 1. SO_KEEPALIVE aktivieren
+            socket_object.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+
+            # 2. Idle-Zeit einstellen (z. B. 60 Sekunden Inaktivität)
+            # macOS verwendet TCP_KEEPALIVE, Linux/Windows verwendet TCP_KEEPIDLE
+            tcp_keepidle = getattr(socket, "TCP_KEEPALIVE", None) or getattr(
+                socket, "TCP_KEEPIDLE", None
+            )
+            if tcp_keepidle is not None:
+                socket_object.setsockopt(socket.IPPROTO_TCP, tcp_keepidle, 60)
+
+            # 3. Intervall einstellen (z. B. 10 Sekunden zwischen Probes)
+            tcp_keepintvl = getattr(socket, "TCP_KEEPINTVL", None)
+            if tcp_keepintvl is not None:
+                socket_object.setsockopt(socket.IPPROTO_TCP, tcp_keepintvl, 10)
+
+            # 4. Maximale Anzahl der Fehlversuche einstellen (z. B. 5 Probes)
+            tcp_keepcnt = getattr(socket, "TCP_KEEPCNT", None)
+            if tcp_keepcnt is not None:
+                socket_object.setsockopt(socket.IPPROTO_TCP, tcp_keepcnt, 5)
+
+            logger.info("TCP-Keep-Alive-Einstellungen erfolgreich auf Socket angewendet")
+    except Exception as exception:
+        logger.warning(
+            "Fehler beim Aktivieren von TCP-Keep-Alive auf dem Socket",
+            error=str(exception),
+        )
 
 
 if __name__ == "__main__":

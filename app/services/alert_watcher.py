@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -50,13 +51,12 @@ async def check_dead_orders(
     new_york_timezone = ZoneInfo("America/New_York")
     if current_time is None:
         current_time_new_york = datetime.now(new_york_timezone)
+    elif current_time.tzinfo is None:
+        current_time_new_york = current_time.replace(tzinfo=UTC).astimezone(
+            new_york_timezone
+        )
     else:
-        if current_time.tzinfo is None:
-            current_time_new_york = current_time.replace(tzinfo=UTC).astimezone(
-                new_york_timezone
-            )
-        else:
-            current_time_new_york = current_time.astimezone(new_york_timezone)
+        current_time_new_york = current_time.astimezone(new_york_timezone)
 
     # 1. Keine Prüfung am Wochenende
     if current_time_new_york.weekday() >= 5:
@@ -210,7 +210,7 @@ async def check_high_slippage(
 
 
 async def alert_watcher(
-    db_factory,  # Funktion zur Erstellung einer DB-Verbindung (oder offene Connection)
+    db_factory: Callable[[], Awaitable[aiosqlite.Connection]],
     notifier: TelegramNotifier,
     config: Config,
     interval_seconds: int = 60,
@@ -242,11 +242,11 @@ async def alert_watcher(
 
 
 async def order_status_sync_loop(
-    db_factory,
+    db_factory: Callable[[], Awaitable[aiosqlite.Connection]],
     ib: IB,
     queue: asyncio.Queue,
     notifier: TelegramNotifier,
-    trigger_settlement_cb,
+    trigger_settlement_callback: Callable[[str, str], Awaitable[None]],
     config: Config,
     interval_seconds: int = 300,
 ) -> None:
@@ -259,6 +259,9 @@ async def order_status_sync_loop(
         interval=interval_seconds,
     )
 
+    # Erste Wartezeit einhalten, da Recovery bereits beim Systemstart ausgeführt wurde
+    await asyncio.sleep(interval_seconds)
+
     while True:
         try:
             db = await db_factory()
@@ -268,12 +271,15 @@ async def order_status_sync_loop(
                     interactive_brokers_session=ib,
                     queue=queue,
                     notifier=notifier,
-                    trigger_settlement_cb=trigger_settlement_cb,
+                    trigger_settlement_cb=trigger_settlement_callback,
                     config=config,
                 )
             finally:
                 await db.close()
-        except Exception as e:
-            logger.error("Unerwarteter Fehler im Order-Status-Sync Loop", error=str(e))
+        except Exception as exception:
+            logger.error(
+                "Unerwarteter Fehler im Order-Status-Sync Loop",
+                error=str(exception),
+            )
 
         await asyncio.sleep(interval_seconds)

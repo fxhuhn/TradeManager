@@ -75,7 +75,7 @@ async def test_order_status_sync_loop_calls_run_recovery(mock_config: Config) ->
                 ib=mock_ib,
                 queue=mock_queue,
                 notifier=mock_notifier,
-                trigger_settlement_cb=mock_trigger_settlement,
+                trigger_settlement_callback=mock_trigger_settlement,
                 config=mock_config,
                 interval_seconds=1,
             )

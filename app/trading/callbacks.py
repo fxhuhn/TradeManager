@@ -1,6 +1,8 @@
 import asyncio
+from collections.abc import Awaitable, Callable
 from decimal import Decimal
 
+import aiosqlite
 import structlog
 from ib_async import IB, CommissionReport, Fill, Trade
 
@@ -11,7 +13,7 @@ from app.trading.error_codes import ErrorClass, classify_error_code
 logger = structlog.get_logger()
 
 
-# We pass trigger_settlement_cb, handle_retriable_error_cb, and run_recovery_cb to avoid circular imports.
+# We pass callbacks to avoid circular imports.
 class TwsCallbacksManager:
     """
     Registriert und verwaltet alle asynchronen TWS-Callbacks (Events)
@@ -20,21 +22,23 @@ class TwsCallbacksManager:
 
     def __init__(
         self,
-        db_factory,
+        db_factory: Callable[[], Awaitable[aiosqlite.Connection]],
         ib: IB,
         notifier: TelegramNotifier,
         config: Config,
-        trigger_settlement_cb,
-        handle_retriable_error_cb,
-        run_recovery_cb,
+        trigger_settlement_callback: Callable[[str, str], Awaitable[None]],
+        handle_retriable_error_callback: Callable[[int], Awaitable[None]],
+        run_recovery_callback: Callable[[], Awaitable[None]],
+        run_reconnect_callback: Callable[[], Awaitable[None]],
     ):
         self.db_factory = db_factory
         self.ib = ib
         self.notifier = notifier
         self.config = config
-        self.trigger_settlement_cb = trigger_settlement_cb
-        self.handle_retriable_error_cb = handle_retriable_error_cb
-        self.run_recovery_cb = run_recovery_cb
+        self.trigger_settlement_callback = trigger_settlement_callback
+        self.handle_retriable_error_callback = handle_retriable_error_callback
+        self.run_recovery_callback = run_recovery_callback
+        self.run_reconnect_callback = run_reconnect_callback
 
     def register_all(self) -> None:
         """Verknüpft die Event-Methoden mit den ib_async Signalen."""
@@ -123,7 +127,7 @@ class TwsCallbacksManager:
                                 )
                                 # Settlement als asynchrone Hintergrund-Task ausführen (behebt blockierende Heartbeats)
                                 asyncio.create_task(
-                                    self.trigger_settlement_cb(
+                                    self.trigger_settlement_callback(
                                         trade_group_id, account_id
                                     )
                                 )
@@ -262,11 +266,11 @@ class TwsCallbacksManager:
                 elif error_class == ErrorClass.RECONNECT:
                     # TWS hat Verbindung verloren, trigger Recovery erneut
                     logger.info("Reconnect signalisiert. Trigger Recovery-Lauf.")
-                    asyncio.create_task(self.run_recovery_cb())
+                    asyncio.create_task(self.run_recovery_callback())
 
                 elif error_class == ErrorClass.RETRIABLE:
                     # Temporärer API-Fehler (z.B. Timeout, Rate-Limit). Starte Retry-Logik.
-                    asyncio.create_task(self.handle_retriable_error_cb(reqId))
+                    asyncio.create_task(self.handle_retriable_error_callback(reqId))
 
                 elif error_class == ErrorClass.CANCEL:
                     # Manuelle oder automatische Stornierung
@@ -317,3 +321,4 @@ class TwsCallbacksManager:
                 "🚨 VERBINDUNGSABBRUCH: Die TCP-Verbindung zur Interactive Brokers TWS ist abgebrochen! Es wird versucht, die Verbindung wiederherzustellen."
             )
         )
+        asyncio.create_task(self.run_reconnect_callback())
