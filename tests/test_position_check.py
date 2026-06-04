@@ -169,8 +169,10 @@ async def test_process_trade_group_exit_quantity_reduced(db, test_config: Config
     mock_ib.placeOrder.assert_called_once()
     called_order = mock_ib.placeOrder.call_args[0][1]
     assert called_order.totalQuantity == 4.0
-    mock_notifier.send_message.assert_called_once()
-    assert "reduziert" in mock_notifier.send_message.call_args[0][0]
+    assert mock_notifier.send_message.call_count == 2
+    sent_messages = [call_args[0][0] for call_args in mock_notifier.send_message.call_args_list]
+    assert any("reduziert" in msg for msg in sent_messages)
+    assert any("ORDER GESENDET" in msg for msg in sent_messages)
 
 
 @pytest.mark.asyncio
