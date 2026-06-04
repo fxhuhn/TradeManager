@@ -29,6 +29,23 @@ def _get_live_position_quantity(ib: IB, account_id: str, symbol: str) -> Decimal
     return Decimal("0.0")
 
 
+async def _get_next_non_colliding_order_id(db: aiosqlite.Connection, ib: IB) -> int:
+    """
+    Ermittelt die nächste gültige Order-ID von TWS und stellt sicher,
+    dass diese nicht mit bestehenden Order-IDs in der Datenbank kollidiert.
+    """
+    async with db.execute("SELECT MAX(order_id) FROM orders") as cursor:
+        row = await cursor.fetchone()
+        max_db_id = row[0] if (row and row[0] is not None) else 0
+
+    if max_db_id > 0:
+        current_sequence = getattr(ib.client, "_reqIdSeq", None)
+        if isinstance(current_sequence, int):
+            ib.client._reqIdSeq = max(current_sequence, max_db_id + 1)
+
+    return ib.client.getReqId()
+
+
 async def process_trade_group(
     db: aiosqlite.Connection,
     ib: IB,
@@ -108,7 +125,7 @@ async def process_trade_group(
 
         # Atomares Reservieren und Schreiben der TWS-OrderId
         async with ORDER_ID_LOCK:
-            tws_order_id = ib.client.getReqId()
+            tws_order_id = await _get_next_non_colliding_order_id(db, ib)
 
             await db.execute("BEGIN IMMEDIATE")
             try:
@@ -151,6 +168,13 @@ async def process_trade_group(
             "Sende ENTRY-Order an TWS", order_id=tws_order_id, symbol=entry_order.symbol
         )
         ib.placeOrder(contract, ib_entry_order)
+
+        price_str = f" @ {entry_order.target_price:.2f}" if entry_order.target_price and entry_order.target_price > 0 else ""
+        await notifier.send_message(
+            f"📤 ORDER GESENDET: {entry_order.symbol} | {entry_order.bracket_role} | "
+            f"{entry_order.action} {entry_order.quantity}{price_str} ({entry_order.order_type}) | "
+            f"ID: {tws_order_id} ({entry_order.strategy_name})"
+        )
 
         # Rate-Limit aus Konfiguration einhalten
         await asyncio.sleep(config.app.order_rate_limit_s)
@@ -239,7 +263,7 @@ async def process_trade_group(
 
             # Atomares Reservieren und Schreiben der TWS-OrderId
             async with ORDER_ID_LOCK:
-                tws_order_id = ib.client.getReqId()
+                tws_order_id = await _get_next_non_colliding_order_id(db, ib)
 
                 await db.execute("BEGIN IMMEDIATE")
                 try:
@@ -286,6 +310,13 @@ async def process_trade_group(
                 role=child.bracket_role,
             )
             ib.placeOrder(contract, ib_child_order)
+
+            price_str = f" @ {child.target_price:.2f}" if child.target_price and child.target_price > 0 else ""
+            await notifier.send_message(
+                f"📤 ORDER GESENDET: {child.symbol} | {child.bracket_role} | "
+                f"{child.action} {child.quantity}{price_str} ({child.order_type}) | "
+                f"ID: {tws_order_id} ({child.strategy_name})"
+            )
 
             # Rate-Limit aus Konfiguration einhalten
             await asyncio.sleep(config.app.order_rate_limit_s)
