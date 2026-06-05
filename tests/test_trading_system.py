@@ -281,3 +281,33 @@ async def test_order_builder_order_ref():
     )
     tws_order = build_order(order_row)
     assert tws_order.orderRef == "NDXMomentum"
+
+
+def test_calculate_settlement_pure():
+    """Verify that calculate_settlement accurately computes VWAP, slippage, and net PnL (pure core)."""
+    from app.trading.settlement import (
+        calculate_settlement,
+        ExecutionTuple,
+        SettlementInput,
+    )
+
+    inputs = SettlementInput(
+        entry_executions=[
+            ExecutionTuple(quantity=Decimal("60"), price=Decimal("150.10")),
+            ExecutionTuple(quantity=Decimal("40"), price=Decimal("149.80")),
+        ],
+        exit_executions=[
+            ExecutionTuple(quantity=Decimal("100"), price=Decimal("155.05")),
+        ],
+        entry_target_price=Decimal("150.00"),
+        entry_action="BUY",
+        total_commissions=Decimal("4.00"),
+    )
+
+    output = calculate_settlement(inputs)
+
+    assert abs(output.avg_entry_price - Decimal("149.98")) < Decimal("0.001")
+    assert abs(output.avg_exit_price - Decimal("155.05")) < Decimal("0.001")
+    assert abs(output.price_diff_slippage - Decimal("0.02")) < Decimal("0.001")
+    assert abs(output.net_profit_loss - Decimal("503.00")) < Decimal("0.01")
+

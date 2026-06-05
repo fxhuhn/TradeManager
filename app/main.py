@@ -1,10 +1,20 @@
 # ruff: noqa: E402
+"""
+Haupt-Einstiegspunkt des IBKR Equities Trading Systems.
+
+Initialisiert die Systemkomponenten (Konfiguration, Logging, Telegram-Notifier,
+Datenbank-Integrität und Migrationen), stellt die Verbindung zur Trader Workstation (TWS)
+von Interactive Brokers her, startet die Hintergrunddienste und steuert den graceful shutdown.
+"""
+
 import asyncio
 import signal
 import socket
 import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+
+import aiosqlite
 
 # Sicherstellen, dass das Root-Verzeichnis im PYTHONPATH ist, wenn das Skript direkt gestartet wird
 root_dir = str(Path(__file__).resolve().parent.parent)
@@ -31,87 +41,20 @@ configure_logging()
 logger = structlog.get_logger()
 
 
-async def connect_to_tws(ib: IB, config: Config) -> bool:
-    """
-    Verbindung zu TWS mit exponentiellem Backoff aufbauen.
-    Nutzt die zentral in der Konfiguration definierten Reconnect-Parameter.
-    """
-    attempt = 1
-    delay = config.tws.reconnect_initial_delay_s
-    max_attempts = config.tws.reconnect_max_attempts
-
-    while attempt <= max_attempts:
-        logger.info(
-            "Verbindungsaufbau zu TWS gestartet",
-            attempt=attempt,
-            host=config.tws.host,
-            port=config.tws.port,
-            client_id=config.tws.client_id,
-        )
-        try:
-            # Verbindung mit konfiguriertem Connection-Timeout absichern
-            await asyncio.wait_for(
-                ib.connectAsync(
-                    config.tws.host, config.tws.port, clientId=config.tws.client_id
-                ),
-                timeout=config.tws.connection_timeout_s,
-            )
-            logger.info("Erfolgreich mit TWS-Plattform verbunden")
-            _enable_socket_keepalive(ib)
-            return True
-        except Exception as exception:
-            logger.warning(
-                "Verbindung fehlgeschlagen", attempt=attempt, error=str(exception)
-            )
-            if attempt == max_attempts:
-                break
-
-            logger.info("Warte vor erneutem Verbindungsversuch", delay_s=delay)
-            await asyncio.sleep(delay)
-            delay = min(delay * 2.0, config.tws.reconnect_max_delay_s)
-            attempt += 1
-
-    logger.critical(
-        f"Verbindung zu TWS nach {max_attempts} Versuchen unmoeglich. Beende Anwendung."
-    )
-    return False
-
-
 async def main() -> None:
     """Zentraler Orchestrierungs- und Lebenszyklus-Einstiegspunkt des Systems."""
     logger.info("Starte IBKR Equities Trading System (Release 1)")
 
-    # 1. Konfiguration laden
-    root_dir = Path(__file__).resolve().parent.parent
-    try:
-        config = load_config(root_dir)
-        # 1b. Logger mit Pfad und Rotationsanzahl aus Config re-konfigurieren
-        configure_logging(
-            log_file_path=root_dir / config.app.log_file_path,
-            backup_count=config.app.log_rotation_backup_count,
-        )
-        logger.info("Konfiguration erfolgreich geladen und Logging re-konfiguriert")
-    except Exception as exception:
-        logger.critical(
-            "Schwerer Fehler beim Laden der Konfiguration", error=str(exception)
-        )
-        sys.exit(1)
+    # 1. Konfiguration laden & Logging konfigurieren
+    root_dir_path = Path(__file__).resolve().parent.parent
+    config = _initialize_config_and_logging(root_dir_path)
 
     # 2. Telegram Notifier initialisieren
     notifier = TelegramNotifier(config)
     await notifier.send_message("🚀 Trading System startet...")
 
     # 3. Datenbank-Integrity Check
-    db_path = root_dir / "data" / "trading.db"
-    is_db_ok = await verify_db_integrity(db_path)
-    if not is_db_ok:
-        logger.critical(
-            "DB-Integritaetspruefung fehlgeschlagen. Beende zur Sicherheit."
-        )
-        await notifier.send_message(
-            "🚨 KRITISCH: DB-Integritaetspruefung fehlgeschlagen! Anwendung beendet."
-        )
-        sys.exit(1)
+    db_path = await _verify_database_integrity(root_dir_path, notifier)
 
     # 4. Verbindung zu TWS aufbauen
     ib = IB()
@@ -119,33 +62,21 @@ async def main() -> None:
     if not is_connected:
         sys.exit(1)
 
-    # DB-Verbindungs-Hilfsfunktion (Factory)
-    async def db_factory() -> get_db:
+    # Hilfsfunktion für DB-Verbindungen (Factory)
+    async def db_factory() -> aiosqlite.Connection:
         return await get_db(db_path)
 
-    # 5. DB-Verbindung oeffnen und Migrationen ausfuehren
+    # 5. DB-Verbindung öffnen und Migrationen ausführen
     database_connection = await db_factory()
-    try:
-        migrations_dir = root_dir / "migrations"
-        await run_migrations(database_connection, migrations_dir)
-    except Exception as exception:
-        logger.critical(
-            "Fehler beim Ausführen der DB-Migrationen", error=str(exception)
-        )
-        await ib.disconnect()
-        await database_connection.close()
-        sys.exit(1)
-    finally:
-        await database_connection.close()
+    await _run_database_migrations(database_connection, root_dir_path, ib)
 
     # 6. reqAutoOpenOrders aktivieren
-    # Erfordert Client ID 0. Bindet manuell in TWS aufgegebene Orders
     ib.reqAutoOpenOrders(True)
 
     # Asynchrone Queue für Trade-Gruppen initialisieren
     queue: asyncio.Queue = asyncio.Queue()
 
-    # Lokale Helfer-Funktionen zur Vermeidung zirkulärer Importe
+    # Lokale Callback-Brücken zur Vermeidung zirkulärer Importe
     async def trigger_settlement_callback(trade_group_id: str, account_id: str) -> None:
         await trigger_settlement(db_factory, trade_group_id, account_id, notifier)
 
@@ -174,7 +105,7 @@ async def main() -> None:
         finally:
             is_reconnecting = False
 
-    # 7. Callbacks registrieren
+    # 7. Callbacks in TwsCallbacksManager registrieren
     callbacks_mgr = TwsCallbacksManager(
         db_factory=db_factory,
         ib=ib,
@@ -187,7 +118,7 @@ async def main() -> None:
     )
     callbacks_mgr.register_all()
 
-    # 8. Phase 2: Recovery-Phase ausführen (Zustandsabgleich)
+    # 8. Recovery-Phase beim Start ausführen (Zustandsabgleich)
     database_conn = await db_factory()
     try:
         await run_recovery(
@@ -196,12 +127,149 @@ async def main() -> None:
     finally:
         await database_conn.close()
 
-    # 9. Phase 3: CSV-Import Hintergrunddienst (Dauerbetrieb) starten
+    # 9 & 10. Hintergrunddienste starten
+    tasks = _start_background_tasks(
+        db_factory=db_factory,
+        ib=ib,
+        queue=queue,
+        notifier=notifier,
+        config=config,
+        root_dir=root_dir_path,
+        trigger_settlement_callback=trigger_settlement_callback,
+    )
+
+    # 11. Graceful Shutdown Event registrieren
+    shutdown_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def signal_handler() -> None:
+        logger.info("Signal empfangen. Starte geordneten Shutdown...")
+        shutdown_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, signal_handler)
+        except NotImplementedError:
+            pass
+
+    # Auf Beendigungssignal warten
+    await shutdown_event.wait()
+
+    # 12. Graceful Shutdown Sequenz ausführen
+    await _graceful_shutdown(notifier, tasks, queue, config, ib)
+
+
+async def connect_to_tws(ib: IB, config: Config) -> bool:
+    """
+    Verbindung zu TWS mit exponentiellem Backoff aufbauen.
+
+    Nutzt die reconnect_initial_delay_s Parameter aus der Config.
+    """
+    attempt = 1
+    delay = config.tws.reconnect_initial_delay_s
+    max_attempts = config.tws.reconnect_max_attempts
+
+    while attempt <= max_attempts:
+        logger.info(
+            "Verbindungsaufbau zu TWS gestartet",
+            attempt=attempt,
+            host=config.tws.host,
+            port=config.tws.port,
+            client_id=config.tws.client_id,
+        )
+        try:
+            await asyncio.wait_for(
+                ib.connectAsync(
+                    config.tws.host, config.tws.port, clientId=config.tws.client_id
+                ),
+                timeout=config.tws.connection_timeout_s,
+            )
+            logger.info("Erfolgreich mit TWS-Plattform verbunden")
+            _enable_socket_keepalive(ib)
+            return True
+        except Exception as exception:
+            logger.warning(
+                "Verbindung fehlgeschlagen", attempt=attempt, error=str(exception)
+            )
+            if attempt == max_attempts:
+                break
+
+            logger.info("Warte vor erneutem Verbindungsversuch", delay_s=delay)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2.0, config.tws.reconnect_max_delay_s)
+            attempt += 1
+
+    logger.critical(
+        f"Verbindung zu TWS nach {max_attempts} Versuchen unmoeglich. Beende Anwendung."
+    )
+    return False
+
+
+def _initialize_config_and_logging(root_dir_path: Path) -> Config:
+    """Lädt die Konfiguration und re-konfiguriert das Logging."""
+    try:
+        config = load_config(root_dir_path)
+        configure_logging(
+            log_file_path=root_dir_path / config.app.log_file_path,
+            backup_count=config.app.log_rotation_backup_count,
+        )
+        logger.info("Konfiguration erfolgreich geladen und Logging re-konfiguriert")
+        return config
+    except Exception as exception:
+        logger.critical(
+            "Schwerer Fehler beim Laden der Konfiguration", error=str(exception)
+        )
+        sys.exit(1)
+
+
+async def _verify_database_integrity(root_dir_path: Path, notifier: TelegramNotifier) -> Path:
+    """Führt eine Integritätsprüfung der SQL-Datenbank durch."""
+    db_path = root_dir_path / "data" / "trading.db"
+    is_db_ok = await verify_db_integrity(db_path)
+    if not is_db_ok:
+        logger.critical(
+            "DB-Integritaetspruefung fehlgeschlagen. Beende zur Sicherheit."
+        )
+        await notifier.send_message(
+            "🚨 KRITISCH: DB-Integritaetspruefung fehlgeschlagen! Anwendung beendet."
+        )
+        sys.exit(1)
+    return db_path
+
+
+async def _run_database_migrations(
+    database_connection: aiosqlite.Connection, root_dir_path: Path, ib: IB
+) -> None:
+    """Führt ausstehende SQL-Migrationen atomar aus und schließt die Verbindung."""
+    try:
+        migrations_dir = root_dir_path / "migrations"
+        await run_migrations(database_connection, migrations_dir)
+    except Exception as exception:
+        logger.critical(
+            "Fehler beim Ausführen der DB-Migrationen", error=str(exception)
+        )
+        await ib.disconnect()
+        await database_connection.close()
+        sys.exit(1)
+    finally:
+        await database_connection.close()
+
+
+def _start_background_tasks(
+    db_factory: Callable[[], Awaitable[aiosqlite.Connection]],
+    ib: IB,
+    queue: asyncio.Queue,
+    notifier: TelegramNotifier,
+    config: Config,
+    root_dir_path: Path,
+    trigger_settlement_callback: Callable[[str, str], Awaitable[None]],
+) -> tuple[asyncio.Task, asyncio.Task, asyncio.Task, asyncio.Task]:
+    """Startet alle asynchronen Hintergrunddienste und gibt Task-Referenzen zurück."""
     importer_task = asyncio.create_task(
         csv_directory_watcher(
             db_factory=db_factory,
             ib=ib,
-            directory_path=root_dir / "data",
+            directory_path=root_dir_path / "data",
             queue=queue,
             notifier=notifier,
             config=config,
@@ -209,10 +277,10 @@ async def main() -> None:
         )
     )
 
-    # 10. Dauerbetrieb Hintergrunddienste starten
     worker_task = asyncio.create_task(
         execution_worker(db_factory, ib, queue, notifier, config)
     )
+
     watcher_task = asyncio.create_task(
         alert_watcher(
             db_factory=db_factory,
@@ -223,6 +291,7 @@ async def main() -> None:
             max_slippage_pct=config.account.default_limit_pct,
         )
     )
+
     sync_task = asyncio.create_task(
         order_status_sync_loop(
             db_factory=db_factory,
@@ -235,43 +304,31 @@ async def main() -> None:
         )
     )
 
-    # Graceful Shutdown Event registrieren
-    shutdown_event = asyncio.Event()
-    loop = asyncio.get_running_loop()
+    return importer_task, worker_task, watcher_task, sync_task
 
-    def signal_handler() -> None:
-        logger.info("Signal empfangen. Starte geordneten Shutdown...")
-        shutdown_event.set()
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, signal_handler)
-        except NotImplementedError:
-            # Fallback für Plattformen ohne Signal-Handler Support
-            pass
-
-    # Auf Beendigungssignal warten
-    await shutdown_event.wait()
-
-    # --- GRACEFUL SHUTDOWN SEQUENZ ---
+async def _graceful_shutdown(
+    notifier: TelegramNotifier,
+    tasks: tuple[asyncio.Task, asyncio.Task, asyncio.Task, asyncio.Task],
+    queue: asyncio.Queue,
+    config: Config,
+    ib: IB,
+) -> None:
+    """Führt eine geordnete Shutdown-Sequenz des gesamten Systems aus."""
     logger.info("Beginne Shutdown-Sequenz...")
     await notifier.send_message("⚠️ Trading System wird heruntergefahren...")
 
-    # A1. Hintergrunddienste abbrechen
+    # Hintergrunddienste abbrechen
     logger.info("Breche Hintergrunddienste ab...")
-    importer_task.cancel()
-    worker_task.cancel()
-    watcher_task.cancel()
-    sync_task.cancel()
+    for task in tasks:
+        task.cancel()
 
     try:
-        await asyncio.gather(
-            importer_task, worker_task, watcher_task, sync_task, return_exceptions=True
-        )
+        await asyncio.gather(*tasks, return_exceptions=True)
     except Exception as exception:
         logger.debug("Fehler beim Abbrechen der Tasks", error=str(exception))
 
-    # A2. Queue vollständig leeren (blockiert bis alle task_done() Aufrufe abgeschlossen sind)
+    # Queue joinen
     logger.info("Warte bis alle Queue-Tasks abgeschlossen sind (queue.join)...")
     try:
         await asyncio.wait_for(queue.join(), timeout=config.app.shutdown_join_timeout_s)
@@ -279,7 +336,7 @@ async def main() -> None:
     except TimeoutError:
         logger.warning("Timeout beim Warten auf das Leeren der Queue. Fahre fort.")
 
-    # A3. TWS Verbindung trennen
+    # TWS Verbindung trennen
     if ib.isConnected():
         logger.info("Trenne API-Verbindung zur TWS...")
         ib.disconnect()
@@ -369,26 +426,20 @@ def _enable_socket_keepalive(ib: IB) -> None:
         return
 
     try:
-        # Socket über den asyncio Transport abrufen
         socket_object = ib.client.conn.transport.get_extra_info("socket")
         if socket_object:
-            # 1. SO_KEEPALIVE aktivieren
             socket_object.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
 
-            # 2. Idle-Zeit einstellen (z. B. 60 Sekunden Inaktivität)
-            # macOS verwendet TCP_KEEPALIVE, Linux/Windows verwendet TCP_KEEPIDLE
             tcp_keepidle = getattr(socket, "TCP_KEEPALIVE", None) or getattr(
                 socket, "TCP_KEEPIDLE", None
             )
             if tcp_keepidle is not None:
                 socket_object.setsockopt(socket.IPPROTO_TCP, tcp_keepidle, 60)
 
-            # 3. Intervall einstellen (z. B. 10 Sekunden zwischen Probes)
             tcp_keepintvl = getattr(socket, "TCP_KEEPINTVL", None)
             if tcp_keepintvl is not None:
                 socket_object.setsockopt(socket.IPPROTO_TCP, tcp_keepintvl, 10)
 
-            # 4. Maximale Anzahl der Fehlversuche einstellen (z. B. 5 Probes)
             tcp_keepcnt = getattr(socket, "TCP_KEEPCNT", None)
             if tcp_keepcnt is not None:
                 socket_object.setsockopt(socket.IPPROTO_TCP, tcp_keepcnt, 5)
