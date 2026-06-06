@@ -48,14 +48,16 @@ async def alert_watcher(
             finally:
                 await db.close()
         except Exception as exception:
-            logger.error("Unerwarteter Fehler im Alert Watcher Loop", error=str(exception))
+            logger.error(
+                "Unerwarteter Fehler im Alert Watcher Loop", error=str(exception)
+            )
 
         await asyncio.sleep(interval_seconds)
 
 
 async def order_status_sync_loop(
     db_factory: Callable[[], Awaitable[aiosqlite.Connection]],
-    ib: IB,
+    interactive_brokers: IB,
     queue: asyncio.Queue,
     notifier: TelegramNotifier,
     trigger_settlement_callback: Callable[[str, str], Awaitable[None]],
@@ -81,10 +83,10 @@ async def order_status_sync_loop(
             try:
                 await run_recovery(
                     database_connection=db,
-                    interactive_brokers_session=ib,
+                    interactive_brokers_session=interactive_brokers,
                     queue=queue,
                     notifier=notifier,
-                    trigger_settlement_cb=trigger_settlement_callback,
+                    trigger_settlement_callback=trigger_settlement_callback,
                     config=config,
                 )
             finally:
@@ -285,8 +287,7 @@ async def _process_single_potential_dead_order(
         return
 
     message_content = (
-        f"⚠️ DEAD ORDER: {trade_group_id} | {symbol} | "
-        f"seit {transmitted_at_string}"
+        f"⚠️ DEAD ORDER: {trade_group_id} | {symbol} | seit {transmitted_at_string}"
     )
     logger.warning(
         "Dead Order erkannt",

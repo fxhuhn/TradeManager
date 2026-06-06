@@ -1,3 +1,10 @@
+"""
+Fehlercode-Klassifizierung für die Interactive Brokers API.
+
+Ordnet TWS-Fehlermeldungen und Informationscodes in strukturierte Klassen ein
+(INFO, RECONNECT, RETRIABLE, CANCEL, FATAL), um das automatische Fehlermanagement zu steuern.
+"""
+
 from enum import Enum, auto
 
 

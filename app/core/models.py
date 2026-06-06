@@ -1,3 +1,10 @@
+"""
+Datenmodelle und Datenbankschemata.
+
+Definiert die internen Datenstrukturen für Order-Legs, TWS-Orders,
+Order-Ausführungen und Settlements als typsichere Dataclasses.
+"""
+
 from dataclasses import dataclass
 from decimal import Decimal
 

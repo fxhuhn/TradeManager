@@ -1,3 +1,10 @@
+"""
+Konfigurations-Verwaltung für das Trading-System.
+
+Lädt globale Einstellungen und Parameter aus config.toml und Umgebungsvariablen
+aus .env-Dateien in typsichere Konfigurations-Klassen.
+"""
+
 import os
 
 # Da tomllib ab Python 3.11 in der Standardbibliothek ist

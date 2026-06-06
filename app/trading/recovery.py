@@ -24,7 +24,7 @@ async def run_recovery(
     interactive_brokers_session: IB,
     queue: asyncio.Queue,
     notifier: TelegramNotifier,
-    trigger_settlement_cb: Callable[[str, str], Awaitable[None]],
+    trigger_settlement_callback: Callable[[str, str], Awaitable[None]],
     config: Config,
 ) -> None:
     """
@@ -66,7 +66,7 @@ async def run_recovery(
                 tws_active=tws_active,
                 tws_completed=tws_completed,
                 notifier=notifier,
-                trigger_settlement_cb=trigger_settlement_cb,
+                trigger_settlement_callback=trigger_settlement_callback,
             )
         elif order.status == "Created":
             await _recover_created_order(
@@ -85,19 +85,24 @@ async def run_recovery(
     logger.info("Recovery-Phase abgeschlossen")
 
 
-async def fetch_active_orders(ib: IB, timeout_seconds: float) -> None:
+async def fetch_active_orders(interactive_brokers: IB, timeout_seconds: float) -> None:
     """Ruft offene Orders aktiv von TWS ab."""
     try:
-        await asyncio.wait_for(ib.reqOpenOrdersAsync(), timeout=timeout_seconds)
+        await asyncio.wait_for(
+            interactive_brokers.reqOpenOrdersAsync(), timeout=timeout_seconds
+        )
     except TimeoutError:
         logger.warning("Timeout beim Warten auf active orders von TWS")
 
 
-async def fetch_completed_orders(ib: IB, timeout_seconds: float) -> None:
+async def fetch_completed_orders(
+    interactive_brokers: IB, timeout_seconds: float
+) -> None:
     """Ruft abgeschlossene Orders asynchron von TWS ab."""
     try:
         await asyncio.wait_for(
-            ib.reqCompletedOrdersAsync(apiOnly=False), timeout=timeout_seconds
+            interactive_brokers.reqCompletedOrdersAsync(apiOnly=False),
+            timeout=timeout_seconds,
         )
     except TimeoutError:
         logger.warning("Timeout beim Abrufen der completed orders von TWS")
@@ -148,7 +153,7 @@ async def _recover_submitted_order(
     tws_active: list | None,
     tws_completed: list | None,
     notifier: TelegramNotifier,
-    trigger_settlement_cb: Callable[[str, str], Awaitable[None]],
+    trigger_settlement_callback: Callable[[str, str], Awaitable[None]],
 ) -> None:
     """Gleicht den Zustand einer lokalen Submitted/PreSubmitted Order mit TWS ab."""
     order_id = order.order_id
@@ -156,7 +161,7 @@ async def _recover_submitted_order(
         perm_id = tws_active.order.permId
         tws_status = tws_active.orderStatus.status
         mapped_status = "PreSubmitted" if tws_status == "PreSubmitted" else "Submitted"
-        
+
         logger.info(
             f"Recovery Szenario 1: Order aktiv in TWS. Aktualisiere perm_id und Status auf {mapped_status}.",
             order_id=order_id,
@@ -179,7 +184,7 @@ async def _recover_submitted_order(
             order_id=order_id,
         )
         asyncio.create_task(
-            trigger_settlement_cb(order.trade_group_id, order.account_id)
+            trigger_settlement_callback(order.trade_group_id, order.account_id)
         )
 
     else:
@@ -215,7 +220,7 @@ async def _recover_created_order(
         perm_id = tws_active.order.permId
         tws_status = tws_active.orderStatus.status
         mapped_status = "PreSubmitted" if tws_status == "PreSubmitted" else "Submitted"
-        
+
         logger.info(
             f"Recovery Szenario 4: Mid-Crash erkannt (Created in DB, aktiv in TWS). Setze auf {mapped_status}.",
             order_id=order_id,

@@ -1,3 +1,10 @@
+"""
+CSV-Reader und Validierungskomponente für Order-Dateien.
+
+Liest die täglichen Orders-CSV-Dateien ein, extrahiert die Leg-Strukturen und
+validiert die Integrität und Konsistenz von Bracket-Order-Gruppen.
+"""
+
 import csv
 from decimal import Decimal
 from pathlib import Path
@@ -106,7 +113,7 @@ def load_csv(csv_path: Path) -> dict[str, list[LegRow]]:
                 else []
             )
 
-            for row_num, row in enumerate(reader, start=2):
+            for row_number, row in enumerate(reader, start=2):
                 try:
                     price_str = row.get("target_price") or ""
                     target_price = (
@@ -133,13 +140,13 @@ def load_csv(csv_path: Path) -> dict[str, list[LegRow]]:
                 except KeyError as key_error:
                     logger.error(
                         "Fehlende Spalte in CSV-Zeile",
-                        row_num=row_num,
+                        row_number=row_number,
                         error=str(key_error),
                     )
                 except ValueError as value_error:
                     logger.error(
                         "Falsches Datenformat in CSV-Zeile",
-                        row_num=row_num,
+                        row_number=row_number,
                         error=str(value_error),
                     )
 

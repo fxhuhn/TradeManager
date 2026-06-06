@@ -1,3 +1,10 @@
+"""
+Telegram-Notifier-Dienst für Systembenachrichtigungen und Alerts.
+
+Stellt einen asynchronen, rate-limitierten Client zur Übermittlung von
+Order-Statusberichten, Handelsabschlüssen und Fehlermeldungen per Telegram bereit.
+"""
+
 import asyncio
 import time
 
@@ -53,7 +60,7 @@ class TelegramNotifier:
         Nutzt aiohttp, damit der Event-Loop nicht blockiert wird.
         """
         if not self.is_active:
-            logger.info("Telegram-Alert (MOCK):", msg=text)
+            logger.info("Telegram-Alert (MOCK):", message=text)
             return True
 
         # Warte, um Rate-Limits einzuhalten
@@ -75,7 +82,7 @@ class TelegramNotifier:
                     url, json=payload, timeout=self.request_timeout_seconds
                 ) as response:
                     if response.status == 200:
-                        logger.info("Telegram Alert gesendet", msg=text)
+                        logger.info("Telegram Alert gesendet", message=text)
                         return True
                     else:
                         response_text = await response.text()

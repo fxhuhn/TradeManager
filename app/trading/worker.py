@@ -27,7 +27,7 @@ ORDER_ID_LOCK = asyncio.Lock()
 
 async def execution_worker(
     db_factory: Callable[[], Awaitable[aiosqlite.Connection]],
-    ib: IB,
+    interactive_brokers: IB,
     queue: asyncio.Queue,
     notifier: TelegramNotifier,
     config: Config,
@@ -46,7 +46,9 @@ async def execution_worker(
 
             db = await db_factory()
             try:
-                await process_trade_group(db, ib, trade_group_id, notifier, config)
+                await process_trade_group(
+                    db, interactive_brokers, trade_group_id, notifier, config
+                )
             finally:
                 await db.close()
 
@@ -62,7 +64,7 @@ async def execution_worker(
 
 async def process_trade_group(
     db: aiosqlite.Connection,
-    ib: IB,
+    interactive_brokers: IB,
     trade_group_id: str,
     notifier: TelegramNotifier,
     config: Config,
@@ -83,7 +85,9 @@ async def process_trade_group(
         )
         return
 
-    entry_order = next((order for order in orders if order.bracket_role == "ENTRY"), None)
+    entry_order = next(
+        (order for order in orders if order.bracket_role == "ENTRY"), None
+    )
     child_orders = [order for order in orders if order.bracket_role != "ENTRY"]
 
     if not entry_order:
@@ -99,10 +103,20 @@ async def process_trade_group(
         logger.info(
             "Normaler Einstieg: Verarbeite ENTRY-Order", trade_group_id=trade_group_id
         )
-        await _process_entry_order(db, ib, entry_order, child_orders, notifier, config)
+        await _process_entry_order(
+            db, interactive_brokers, entry_order, child_orders, notifier, config
+        )
 
     # 2. Child-Orders verarbeiten (SL, TP, EXIT)
-    await _process_child_orders(db, ib, entry_order, child_orders, is_post_fill, notifier, config)
+    await _process_child_orders(
+        db,
+        interactive_brokers,
+        entry_order,
+        child_orders,
+        is_post_fill,
+        notifier,
+        config,
+    )
 
 
 async def _load_trade_group_orders(
@@ -146,7 +160,7 @@ async def _load_trade_group_orders(
 
 async def _process_entry_order(
     db: aiosqlite.Connection,
-    ib: IB,
+    interactive_brokers: IB,
     entry_order: OrderRow,
     child_orders: list[OrderRow],
     notifier: TelegramNotifier,
@@ -154,7 +168,7 @@ async def _process_entry_order(
 ) -> None:
     """Weist dem Entry eine TWS Order-ID zu, aktualisiert die DB und übermittelt an TWS."""
     async with ORDER_ID_LOCK:
-        tws_order_id = await _get_next_non_colliding_order_id(db, ib)
+        tws_order_id = await _get_next_non_colliding_order_id(db, interactive_brokers)
 
         await db.execute("BEGIN IMMEDIATE")
         try:
@@ -185,7 +199,7 @@ async def _process_entry_order(
     logger.info(
         "Sende ENTRY-Order an TWS", order_id=tws_order_id, symbol=entry_order.symbol
     )
-    ib.placeOrder(contract, ib_entry_order)
+    interactive_brokers.placeOrder(contract, ib_entry_order)
 
     price_str = (
         f" @ {entry_order.target_price:.2f}"
@@ -203,7 +217,7 @@ async def _process_entry_order(
 
 async def _process_child_orders(
     db: aiosqlite.Connection,
-    ib: IB,
+    interactive_brokers: IB,
     entry_order: OrderRow,
     child_orders: list[OrderRow],
     is_post_fill: bool,
@@ -222,12 +236,16 @@ async def _process_child_orders(
         )
 
         if is_post_fill and child.bracket_role in ("SL", "TP", "EXIT"):
-            should_continue = await _adjust_exit_order_quantity(db, ib, child, notifier)
+            should_continue = await _adjust_exit_order_quantity(
+                db, interactive_brokers, child, notifier
+            )
             if not should_continue:
                 continue
 
         async with ORDER_ID_LOCK:
-            tws_order_id = await _get_next_non_colliding_order_id(db, ib)
+            tws_order_id = await _get_next_non_colliding_order_id(
+                db, interactive_brokers
+            )
 
             await db.execute("BEGIN IMMEDIATE")
             try:
@@ -262,13 +280,13 @@ async def _process_child_orders(
             order_id=tws_order_id,
             role=child.bracket_role,
         )
-        ib.placeOrder(contract, ib_child_order)
+        interactive_brokers.placeOrder(contract, ib_child_order)
 
         price_str = (
             f" @ {child.target_price:.2f}"
             if child.target_price and child.target_price > 0
             else ""
-          )
+        )
         await notifier.send_message(
             f"📤 ORDER GESENDET: {child.symbol} | {child.bracket_role} | "
             f"{child.action} {child.quantity}{price_str} ({child.order_type}) | "
@@ -280,12 +298,14 @@ async def _process_child_orders(
 
 async def _adjust_exit_order_quantity(
     db: aiosqlite.Connection,
-    ib: IB,
+    interactive_brokers: IB,
     child: OrderRow,
     notifier: TelegramNotifier,
 ) -> bool:
     """Gleicht Depotbestand ab und passt die Order-Menge an oder storniert sie."""
-    live_position = _get_live_position_quantity(ib, child.account_id, child.symbol)
+    live_position = _get_live_position_quantity(
+        interactive_brokers, child.account_id, child.symbol
+    )
 
     if child.action == "SELL":
         available_quantity = max(Decimal("0.0"), live_position)
@@ -353,9 +373,11 @@ async def _adjust_exit_order_quantity(
     return True
 
 
-def _get_live_position_quantity(ib: IB, account_id: str, symbol: str) -> Decimal:
+def _get_live_position_quantity(
+    interactive_brokers: IB, account_id: str, symbol: str
+) -> Decimal:
     """Ermittelt den aktuellen Depotbestand für ein bestimmtes Symbol und Account."""
-    for position in ib.positions():
+    for position in interactive_brokers.positions():
         if (
             position.account == account_id
             and position.contract.symbol == symbol.upper()
@@ -364,15 +386,17 @@ def _get_live_position_quantity(ib: IB, account_id: str, symbol: str) -> Decimal
     return Decimal("0.0")
 
 
-async def _get_next_non_colliding_order_id(db: aiosqlite.Connection, ib: IB) -> int:
+async def _get_next_non_colliding_order_id(
+    db: aiosqlite.Connection, interactive_brokers: IB
+) -> int:
     """Ermittelt die nächste gültige Order-ID zur Abwehr von DB-ID-Kollisionen."""
     async with db.execute("SELECT MAX(order_id) FROM orders") as cursor:
         row = await cursor.fetchone()
         max_db_id = row[0] if (row and row[0] is not None) else 0
 
     if max_db_id > 0:
-        current_sequence = getattr(ib.client, "_reqIdSeq", None)
+        current_sequence = getattr(interactive_brokers.client, "_reqIdSeq", None)
         if isinstance(current_sequence, int):
-            ib.client._reqIdSeq = max(current_sequence, max_db_id + 1)
+            interactive_brokers.client._reqIdSeq = max(current_sequence, max_db_id + 1)
 
-    return ib.client.getReqId()
+    return interactive_brokers.client.getReqId()

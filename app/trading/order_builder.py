@@ -1,3 +1,10 @@
+"""
+Konstruktion von Verträgen (Contracts) und TWS-Aufträgen (Orders).
+
+Erstellt SMART-Routing US-Aktienkontrakte und konfiguriert
+die entsprechenden Stop-, Limit- oder Market-Orders inkl. OCA-Gruppen.
+"""
+
 import structlog
 from ib_async import Order, Stock
 

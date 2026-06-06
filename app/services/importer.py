@@ -25,7 +25,7 @@ logger = structlog.get_logger()
 
 async def csv_directory_watcher(
     db_factory: Callable[[], Awaitable[aiosqlite.Connection]],
-    ib: IB,
+    interactive_brokers: IB,
     directory_path: Path,
     queue: asyncio.Queue,
     notifier: TelegramNotifier,
@@ -53,7 +53,12 @@ async def csv_directory_watcher(
                 for csv_file in sorted(directory_path.glob("orders_*.csv")):
                     if date_pattern.match(csv_file.name):
                         await _process_daily_csv_file(
-                            db_factory, ib, csv_file, queue, notifier, config
+                            db_factory,
+                            interactive_brokers,
+                            csv_file,
+                            queue,
+                            notifier,
+                            config,
                         )
         except asyncio.CancelledError:
             logger.info("CSV Directory Watcher wurde abgebrochen.")
@@ -66,7 +71,7 @@ async def csv_directory_watcher(
 
 async def run_csv_import(
     db: aiosqlite.Connection,
-    ib: IB,
+    interactive_brokers: IB,
     csv_path: Path,
     queue: asyncio.Queue,
     notifier: TelegramNotifier,
@@ -94,7 +99,7 @@ async def run_csv_import(
     for trade_group_id, raw_legs in grouped_legs.items():
         await _process_and_upsert_group(
             db=db,
-            ib=ib,
+            interactive_brokers=interactive_brokers,
             trade_group_id=trade_group_id,
             raw_legs=raw_legs,
             queue=queue,
@@ -105,7 +110,7 @@ async def run_csv_import(
 
 async def _process_daily_csv_file(
     db_factory: Callable[[], Awaitable[aiosqlite.Connection]],
-    ib: IB,
+    interactive_brokers: IB,
     csv_file: Path,
     queue: asyncio.Queue,
     notifier: TelegramNotifier,
@@ -116,7 +121,9 @@ async def _process_daily_csv_file(
 
     database_connection = await db_factory()
     try:
-        await run_csv_import(database_connection, ib, csv_file, queue, notifier, config)
+        await run_csv_import(
+            database_connection, interactive_brokers, csv_file, queue, notifier, config
+        )
 
         backup_path = csv_file.with_name(csv_file.name + ".bak")
         csv_file.rename(backup_path)
@@ -183,7 +190,7 @@ async def _check_csv_dos_limits(
 
 async def _process_and_upsert_group(
     db: aiosqlite.Connection,
-    ib: IB,
+    interactive_brokers: IB,
     trade_group_id: str,
     raw_legs: list,
     queue: asyncio.Queue,
@@ -191,15 +198,15 @@ async def _process_and_upsert_group(
     config: Config,
 ) -> None:
     """Validiert eine einzelne Gruppe, berechnet das Sizing und speichert sie in der DB."""
-    is_valid, err_msg = validate_group(trade_group_id, raw_legs)
+    is_valid, error_message = validate_group(trade_group_id, raw_legs)
     if not is_valid:
         logger.error(
             "Validierungsfehler in Gruppe. Überspringe Gruppe.",
             trade_group_id=trade_group_id,
-            error=err_msg,
+            error=error_message,
         )
         await notifier.send_message(
-            f"❌ VALIDIERUNGSFEHLER ({trade_group_id}): {err_msg}. Gruppe wurde uebersprungen."
+            f"❌ VALIDIERUNGSFEHLER ({trade_group_id}): {error_message}. Gruppe wurde uebersprungen."
         )
         return
 
@@ -209,7 +216,7 @@ async def _process_and_upsert_group(
 
     target_quantity = first_leg.quantity
     if entry_leg:
-        total_cash_value = await fetch_total_cash_value(ib, account_id)
+        total_cash_value = await fetch_total_cash_value(interactive_brokers, account_id)
         if total_cash_value <= Decimal("0.0"):
             logger.warning(
                 "Kein verfügbares Cash-Kapital vorhanden. Überspringe Gruppe.",
@@ -232,7 +239,9 @@ async def _process_and_upsert_group(
                 "Sizing ergab Qty <= 0. Überspringe Gruppe.",
                 trade_group_id=trade_group_id,
                 max_allocation=float(total_cash_value),
-                target_price=float(entry_leg.target_price) if entry_leg.target_price else 0.0,
+                target_price=float(entry_leg.target_price)
+                if entry_leg.target_price
+                else 0.0,
             )
             await notifier.send_message(
                 f"⚠️ SIZING-FEHLER ({trade_group_id}): Erforderliches Kapital überschreitet Limit "
@@ -241,6 +250,7 @@ async def _process_and_upsert_group(
             return
 
     import dataclasses
+
     legs = [dataclasses.replace(leg, quantity=target_quantity) for leg in raw_legs]
 
     await _upsert_trade_group_legs(
@@ -312,7 +322,9 @@ async def _upsert_trade_group_legs(
                             entry_leg.action,
                             target_quantity,
                             entry_leg.order_type,
-                            float(entry_leg.target_price) if entry_leg.target_price is not None else None,
+                            float(entry_leg.target_price)
+                            if entry_leg.target_price is not None
+                            else None,
                             entry_leg.tif,
                             entry_leg.strategy_name,
                             entry_order_id,
@@ -348,7 +360,9 @@ async def _upsert_trade_group_legs(
                     entry_leg.action,
                     target_quantity,
                     entry_leg.order_type,
-                    float(entry_leg.target_price) if entry_leg.target_price is not None else None,
+                    float(entry_leg.target_price)
+                    if entry_leg.target_price is not None
+                    else None,
                     entry_leg.tif,
                     entry_leg.strategy_name,
                 ),
@@ -394,7 +408,9 @@ async def _upsert_trade_group_legs(
                             leg.action,
                             target_quantity,
                             leg.order_type,
-                            float(leg.target_price) if leg.target_price is not None else None,
+                            float(leg.target_price)
+                            if leg.target_price is not None
+                            else None,
                             leg.tif,
                             leg.strategy_name,
                             child_order_id,
@@ -426,7 +442,9 @@ async def _upsert_trade_group_legs(
                         leg.action,
                         target_quantity,
                         leg.order_type,
-                        float(leg.target_price) if leg.target_price is not None else None,
+                        float(leg.target_price)
+                        if leg.target_price is not None
+                        else None,
                         leg.tif,
                         leg.strategy_name,
                     ),
@@ -452,16 +470,16 @@ async def _upsert_trade_group_legs(
         raise exception
 
 
-async def fetch_total_cash_value(ib: IB, account_id: str) -> Decimal:
+async def fetch_total_cash_value(interactive_brokers: IB, account_id: str) -> Decimal:
     """
     Fragt das gesamte Cash-Guthaben von TWS ab.
 
-    Versucht es zuerst aus dem Cache (ib.accountValues()) und fällt bei Bedarf
+    Versucht es zuerst aus dem Cache (interactive_brokers.accountValues()) und fällt bei Bedarf
     auf einen reqAccountSummary()-Aufruf zurück.
     """
     funds = Decimal("0.0")
 
-    for account_value in ib.accountValues():
+    for account_value in interactive_brokers.accountValues():
         if account_value.tag == "TotalCashValue" and (
             not account_id or account_value.account == account_id
         ):
@@ -500,8 +518,8 @@ async def fetch_total_cash_value(ib: IB, account_id: str) -> Decimal:
                     error=str(exception),
                 )
 
-    ib.accountSummaryEvent.connect(on_account_summary)
-    ib.reqAccountSummary()
+    interactive_brokers.accountSummaryEvent.connect(on_account_summary)
+    interactive_brokers.reqAccountSummary()
 
     try:
         await asyncio.wait_for(summary_event.wait(), timeout=10.0)
@@ -516,8 +534,8 @@ async def fetch_total_cash_value(ib: IB, account_id: str) -> Decimal:
             "Timeout beim Warten auf reqAccountSummary. Setze standardmaessig 0.0"
         )
     finally:
-        ib.accountSummaryEvent.disconnect(on_account_summary)
-        ib.cancelAccountSummary()
+        interactive_brokers.accountSummaryEvent.disconnect(on_account_summary)
+        interactive_brokers.cancelAccountSummary()
 
     return funds
 

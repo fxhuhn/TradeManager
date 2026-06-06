@@ -1,3 +1,10 @@
+"""
+Callback-Manager für TWS-API-Events.
+
+Registriert Event-Handler für Order-Statusaktualisierungen, Ausführungsberichte,
+Kommissionen, Fehlermeldungen und Verbindungsabbrüche der Trader Workstation (TWS).
+"""
+
 import asyncio
 from collections.abc import Awaitable, Callable
 from decimal import Decimal
@@ -13,7 +20,6 @@ from app.trading.error_codes import ErrorClass, classify_error_code
 logger = structlog.get_logger()
 
 
-# We pass callbacks to avoid circular imports.
 class TwsCallbacksManager:
     """
     Registriert und verwaltet alle asynchronen TWS-Callbacks (Events)
@@ -23,16 +29,16 @@ class TwsCallbacksManager:
     def __init__(
         self,
         db_factory: Callable[[], Awaitable[aiosqlite.Connection]],
-        ib: IB,
+        interactive_brokers: IB,
         notifier: TelegramNotifier,
         config: Config,
         trigger_settlement_callback: Callable[[str, str], Awaitable[None]],
         handle_retriable_error_callback: Callable[[int], Awaitable[None]],
         run_recovery_callback: Callable[[], Awaitable[None]],
         run_reconnect_callback: Callable[[], Awaitable[None]],
-    ):
+    ) -> None:
         self.db_factory = db_factory
-        self.ib = ib
+        self.interactive_brokers = interactive_brokers
         self.notifier = notifier
         self.config = config
         self.trigger_settlement_callback = trigger_settlement_callback
@@ -42,11 +48,13 @@ class TwsCallbacksManager:
 
     def register_all(self) -> None:
         """Verknüpft die Event-Methoden mit den ib_async Signalen."""
-        self.ib.orderStatusEvent.connect(self.on_order_status)
-        self.ib.execDetailsEvent.connect(self.on_exec_details)
-        self.ib.commissionReportEvent.connect(self.on_commission_report)
-        self.ib.errorEvent.connect(self.on_error)
-        self.ib.disconnectedEvent.connect(self.on_disconnected)
+        self.interactive_brokers.orderStatusEvent.connect(self.on_order_status)
+        self.interactive_brokers.execDetailsEvent.connect(self.on_exec_details)
+        self.interactive_brokers.commissionReportEvent.connect(
+            self.on_commission_report
+        )
+        self.interactive_brokers.errorEvent.connect(self.on_error)
+        self.interactive_brokers.disconnectedEvent.connect(self.on_disconnected)
         logger.info("Alle asynchronen TWS-Callbacks erfolgreich registriert")
 
     async def _update_order_status_db(
@@ -64,12 +72,12 @@ class TwsCallbacksManager:
             logger.debug(
                 "Order-Zustand in DB aktualisiert", order_id=order_id, status=status
             )
-        except Exception as e:
+        except Exception as exception:
             await db.execute("ROLLBACK")
             logger.error(
                 "Fehler beim DB-Update des Order-Status",
                 order_id=order_id,
-                error=str(e),
+                error=str(exception),
             )
         finally:
             await db.close()
@@ -77,6 +85,7 @@ class TwsCallbacksManager:
     def on_order_status(self, trade: Trade) -> None:
         """
         Wird aufgerufen, wenn TWS eine Statusänderung einer Order meldet.
+
         Triggert bei Filled-Status von SL/TP/EXIT das Settlement.
         """
         order_id = trade.order.orderId
@@ -101,12 +110,10 @@ class TwsCallbacksManager:
             mapped_status=mapped_status,
         )
 
-        # DB asynchron updaten, um den Callback nicht zu blockieren
-        async def handle_status_change():
+        async def handle_status_change() -> None:
             await self._update_order_status_db(order_id, mapped_status, perm_id)
 
             if mapped_status == "Filled":
-                # Prüfen, ob dies eine Exit-Order war (SL, TP, EXIT, MOC)
                 db = await self.db_factory()
                 try:
                     async with db.execute(
@@ -125,15 +132,15 @@ class TwsCallbacksManager:
                                     order_id=order_id,
                                     trade_group_id=trade_group_id,
                                 )
-                                # Settlement als asynchrone Hintergrund-Task ausführen (behebt blockierende Heartbeats)
                                 asyncio.create_task(
                                     self.trigger_settlement_callback(
                                         trade_group_id, account_id
                                     )
                                 )
-                except Exception as e:
+                except Exception as exception:
                     logger.error(
-                        "Fehler bei Exit-Pruefung im Status-Callback", error=str(e)
+                        "Fehler bei Exit-Pruefung im Status-Callback",
+                        error=str(exception),
                     )
                 finally:
                     await db.close()
@@ -143,6 +150,7 @@ class TwsCallbacksManager:
     def on_exec_details(self, trade: Trade, fill: Fill) -> None:
         """
         Wird bei jeder atomaren Teilausführung (Partial Fill) einer Order aufgerufen.
+
         Schreibt die Daten idempotent (INSERT OR IGNORE) in die executions-Tabelle.
         """
         exec_id = fill.execution.execId
@@ -160,9 +168,8 @@ class TwsCallbacksManager:
             qty=qty,
         )
 
-        async def save_execution():
+        async def save_execution() -> None:
             db = await self.db_factory()
-            # Prämisse: INSERT OR IGNORE für absolute Idempotenz bei Reconnects
             await db.execute("BEGIN IMMEDIATE")
             try:
                 await db.execute(
@@ -183,12 +190,12 @@ class TwsCallbacksManager:
                 logger.debug(
                     "Teilausfuehrung idempotent in DB verbucht", exec_id=exec_id
                 )
-            except Exception as e:
+            except Exception as exception:
                 await db.execute("ROLLBACK")
                 logger.error(
                     "Fehler beim Speichern der Teilausfuehrung",
                     exec_id=exec_id,
-                    error=str(e),
+                    error=str(exception),
                 )
             finally:
                 await db.close()
@@ -200,6 +207,7 @@ class TwsCallbacksManager:
     ) -> None:
         """
         Empfängt Kommissionsabrechnungen (oft leicht verzögert nach der Ausführung).
+
         Aktualisiert die Spalten 'commission' und 'currency' in der executions-Tabelle.
         """
         exec_id = fill.execution.execId
@@ -213,7 +221,7 @@ class TwsCallbacksManager:
             currency=currency,
         )
 
-        async def update_commission():
+        async def update_commission() -> None:
             db = await self.db_factory()
             await db.execute("BEGIN IMMEDIATE")
             try:
@@ -225,88 +233,89 @@ class TwsCallbacksManager:
                 logger.debug(
                     "Kommission fuer Teilausfuehrung aktualisiert", exec_id=exec_id
                 )
-            except Exception as e:
+            except Exception as exception:
                 await db.execute("ROLLBACK")
                 logger.error(
                     "Fehler beim Aktualisieren der Kommission",
                     exec_id=exec_id,
-                    error=str(e),
+                    error=str(exception),
                 )
             finally:
                 await db.close()
 
         asyncio.create_task(update_commission())
 
-    def on_error(self, reqId: int, errorCode: int, errorString: str) -> None:
+    def on_error(self, request_id: int, errorCode: int, errorString: str) -> None:
         """
-        Klassifiziert alle von TWS gemeldeten Error-Codes und reagiert
-        strukturiert (Loggen, Retries, Warnungen, Telegram-Alerts).
+        Klassifiziert alle von TWS gemeldeten Error-Codes und reagiert strukturiert.
+
+        Triggert Retries, Warnungen, Verbindungsaufbau oder fatale Fehleralarme.
         """
-        # reqId = -1 kennzeichnet allgemeine Systemmeldungen
-        if reqId == -1 and errorCode in (2104, 2106, 2158, 2100):
-            # Reine INFO-Codes ignorieren
-            logger.debug("TWS System-Info empfangen", code=errorCode, msg=errorString)
+        if request_id == -1 and errorCode in (2104, 2106, 2158, 2100):
+            logger.debug(
+                "TWS System-Info empfangen", code=errorCode, message=errorString
+            )
             return
 
         error_class = classify_error_code(errorCode)
         logger.warning(
             "TWS-Fehlermeldung empfangen",
-            reqId=reqId,
+            request_id=request_id,
             code=errorCode,
-            msg=errorString,
+            message=errorString,
             klassifizierung=error_class.name,
         )
 
-        async def handle_error():
+        async def handle_error() -> None:
             db = await self.db_factory()
             try:
                 if error_class == ErrorClass.INFO:
                     pass
 
                 elif error_class == ErrorClass.RECONNECT:
-                    # TWS hat Verbindung verloren, trigger Recovery erneut
                     logger.info("Reconnect signalisiert. Trigger Recovery-Lauf.")
                     asyncio.create_task(self.run_recovery_callback())
 
                 elif error_class == ErrorClass.RETRIABLE:
-                    # Temporärer API-Fehler (z.B. Timeout, Rate-Limit). Starte Retry-Logik.
-                    asyncio.create_task(self.handle_retriable_error_callback(reqId))
+                    asyncio.create_task(
+                        self.handle_retriable_error_callback(request_id)
+                    )
 
                 elif error_class == ErrorClass.CANCEL:
-                    # Manuelle oder automatische Stornierung
                     await db.execute("BEGIN IMMEDIATE")
                     try:
                         await db.execute(
                             "UPDATE orders SET status = 'Cancelled' WHERE order_id = ?",
-                            (reqId,),
+                            (request_id,),
                         )
                         await db.execute("COMMIT")
                     except Exception:
                         await db.execute("ROLLBACK")
                         raise
                     await self.notifier.send_message(
-                        f"🚫 ORDER CANCELED: Order {reqId} wurde storniert (TWS-Code {errorCode}): {errorString}"
+                        f"🚫 ORDER CANCELED: Order {request_id} wurde storniert (TWS-Code {errorCode}): {errorString}"
                     )
 
                 elif error_class == ErrorClass.FATAL:
-                    # Schwerer Systemfehler. Setze Order auf Error und sende Telegram-Alarm.
                     await db.execute("BEGIN IMMEDIATE")
                     try:
                         await db.execute(
                             "UPDATE orders SET status = 'Error' WHERE order_id = ?",
-                            (reqId,),
+                            (request_id,),
                         )
                         await db.execute("COMMIT")
                     except Exception:
                         await db.execute("ROLLBACK")
                         raise
                     await self.notifier.send_message(
-                        f"🚨 SYSTEM-FEHLER (FATAL): Order {reqId} schlug fehl (TWS-Code {errorCode}): {errorString}"
+                        f"🚨 SYSTEM-FEHLER (FATAL): Order {request_id} schlug fehl (TWS-Code {errorCode}): {errorString}"
                     )
 
-            except Exception as e:
+            except Exception as exception:
                 logger.error(
-                    "Fehler bei der API-Error-Verarbeitung", reqId=reqId, error=str(e)
+                    "Fehler bei der API-Error-Verarbeitung",
+                    reqId=request_id,
+                    error=str(exception),
                 )
             finally:
                 await db.close()

@@ -1,3 +1,10 @@
+"""
+Datenbankverbindung und Schema-Migrationen.
+
+Initialisiert die SQLite-Verbindung im WAL-Modus (Write-Ahead Logging),
+aktiviert Fremdschlüssel-Constraints und führt Schema-Migrationen lexikografisch aus.
+"""
+
 from pathlib import Path
 
 import aiosqlite

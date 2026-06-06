@@ -81,7 +81,9 @@ async def trigger_settlement(
                     total_commissions += commission
 
                     if role == "ENTRY":
-                        entry_executions.append(ExecutionTuple(quantity=quantity, price=price))
+                        entry_executions.append(
+                            ExecutionTuple(quantity=quantity, price=price)
+                        )
                         entry_target_price = (
                             Decimal(str(row["target_price"]))
                             if row["target_price"] is not None
@@ -89,7 +91,9 @@ async def trigger_settlement(
                         )
                         entry_action = row["action"]
                     elif role in ("SL", "TP", "EXIT"):
-                        exit_executions.append(ExecutionTuple(quantity=quantity, price=price))
+                        exit_executions.append(
+                            ExecutionTuple(quantity=quantity, price=price)
+                        )
 
             if not entry_executions:
                 logger.warning(
@@ -159,14 +163,16 @@ async def trigger_settlement(
 
             # Telegram-Meldung über erfolgreichen Trade-Abschluss senden
             profit_loss_emoji = (
-                "🟢 Profit" if calculation_outputs.net_profit_loss >= Decimal("0.0") else "🔴 Verlust"
+                "🟢 Profit"
+                if calculation_outputs.net_profit_loss >= Decimal("0.0")
+                else "🔴 Verlust"
             )
             await notifier.send_message(
                 f"✅ TRADE SETTLEMENT ({trade_group_id})\n"
                 f"• Symbol: {entry_action} Position\n"
-                f"• Entry VWAP: {float(calculation_outputs.avg_entry_price):.2f} (Target: {float(entry_target_price):.2f})\n"
-                f"• Exit VWAP: {float(calculation_outputs.avg_exit_price):.2f}\n"
-                f"• Slippage: {float(calculation_outputs.price_diff_slippage):+.4f}\n"
+                f"• Entry: {float(calculation_outputs.avg_entry_price):.2f} (Target: {float(entry_target_price):.2f})\n"
+                f"• Exit: {float(calculation_outputs.avg_exit_price):.2f}\n"
+                f"• Slippage: {float(calculation_outputs.price_diff_slippage):+.2f}\n"
                 f"• Gebühren: {float(total_commissions):.2f} USD\n"
                 f"• *Netto-PnL:* {float(calculation_outputs.net_profit_loss):+.2f} USD ({profit_loss_emoji})"
             )
@@ -233,7 +239,9 @@ def calculate_settlement(inputs: SettlementInput) -> SettlementOutput:
 
     Diese Funktion ist pure: Sie enthält keinerlei Seiteneffekte (Datenbank, I/O, etc.).
     """
-    entry_sum_quantity = sum(execution.quantity for execution in inputs.entry_executions)
+    entry_sum_quantity = sum(
+        execution.quantity for execution in inputs.entry_executions
+    )
     entry_sum_value = sum(
         execution.quantity * execution.price for execution in inputs.entry_executions
     )

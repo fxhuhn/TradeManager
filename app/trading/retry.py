@@ -1,3 +1,10 @@
+"""
+Fehlerbehandlung und automatische Wiederholungsversuche (Retries) für Orders.
+
+Verwaltet transiente Verbindungs- und API-Fehler mittels exponentiellem Backoff
+bis zum Erreichen des konfigurierten Retry-Limits.
+"""
+
 import asyncio
 from collections.abc import Awaitable, Callable
 
