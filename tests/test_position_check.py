@@ -73,9 +73,9 @@ async def test_validate_group_without_entry_allowed() -> None:
             strategy_name="S1",
         )
     ]
-    is_valid, err_msg = validate_group("TG123", legs)
+    is_valid, error_message = validate_group("TG123", legs)
     assert is_valid
-    assert err_msg == ""
+    assert error_message == ""
 
 
 @pytest.mark.asyncio
@@ -179,8 +179,8 @@ async def test_process_trade_group_exit_quantity_reduced(
     sent_messages = [
         call_args[0][0] for call_args in mock_notifier.send_message.call_args_list
     ]
-    assert any("reduziert" in msg for msg in sent_messages)
-    assert any("ORDER GESENDET" in msg for msg in sent_messages)
+    assert any("reduziert" in message for message in sent_messages)
+    assert any("ORDER GESENDET" in message for message in sent_messages)
 
 
 @pytest.mark.asyncio

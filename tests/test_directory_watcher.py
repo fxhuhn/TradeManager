@@ -70,7 +70,7 @@ async def test_csv_directory_watcher_success_rename(
     async def db_factory():
         return mock_db_conn
 
-    mock_ib = MagicMock()
+    mock_interactive_brokers = MagicMock()
     mock_notifier = MagicMock()
     mock_notifier.send_message = AsyncMock(return_value=True)
     mock_queue = asyncio.Queue()
@@ -83,7 +83,7 @@ async def test_csv_directory_watcher_success_rename(
         watcher_task = asyncio.create_task(
             csv_directory_watcher(
                 db_factory=db_factory,
-                ib=mock_ib,
+                interactive_brokers=mock_interactive_brokers,
                 directory_path=data_directory,
                 queue=mock_queue,
                 notifier=mock_notifier,
@@ -135,7 +135,7 @@ async def test_csv_directory_watcher_error_rename(
     async def db_factory():
         return mock_db_conn
 
-    mock_ib = MagicMock()
+    mock_interactive_brokers = MagicMock()
     mock_notifier = MagicMock()
     mock_notifier.send_message = AsyncMock(return_value=True)
     mock_queue = asyncio.Queue()
@@ -150,7 +150,7 @@ async def test_csv_directory_watcher_error_rename(
         watcher_task = asyncio.create_task(
             csv_directory_watcher(
                 db_factory=db_factory,
-                ib=mock_ib,
+                interactive_brokers=mock_interactive_brokers,
                 directory_path=data_directory,
                 queue=mock_queue,
                 notifier=mock_notifier,

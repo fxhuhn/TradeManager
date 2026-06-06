@@ -60,7 +60,7 @@ async def test_order_status_sync_loop_calls_run_recovery(mock_config: Config) ->
     async def db_factory():
         return mock_db_conn
 
-    mock_ib = MagicMock()
+    mock_interactive_brokers = MagicMock()
     mock_notifier = MagicMock()
     mock_queue = asyncio.Queue()
     mock_trigger_settlement = AsyncMock()
@@ -72,7 +72,7 @@ async def test_order_status_sync_loop_calls_run_recovery(mock_config: Config) ->
         sync_task = asyncio.create_task(
             order_status_sync_loop(
                 db_factory=db_factory,
-                ib=mock_ib,
+                interactive_brokers=mock_interactive_brokers,
                 queue=mock_queue,
                 notifier=mock_notifier,
                 trigger_settlement_callback=mock_trigger_settlement,
@@ -135,11 +135,11 @@ async def test_recovery_syncs_presubmitted_order_to_submitted(
     mock_trade.order.permId = 987654321
     mock_trade.orderStatus.status = "Submitted"
 
-    mock_ib = MagicMock()
-    mock_ib.reqOpenOrdersAsync = AsyncMock()
-    mock_ib.reqCompletedOrdersAsync = AsyncMock()
-    mock_ib.openTrades.return_value = [mock_trade]
-    mock_ib.trades.return_value = [mock_trade]
+    mock_interactive_brokers = MagicMock()
+    mock_interactive_brokers.reqOpenOrdersAsync = AsyncMock()
+    mock_interactive_brokers.reqCompletedOrdersAsync = AsyncMock()
+    mock_interactive_brokers.openTrades.return_value = [mock_trade]
+    mock_interactive_brokers.trades.return_value = [mock_trade]
 
     mock_notifier = MagicMock()
     mock_queue = asyncio.Queue()
@@ -148,10 +148,10 @@ async def test_recovery_syncs_presubmitted_order_to_submitted(
     # 3. run_recovery ausfuehren
     await run_recovery(
         database_connection=db,
-        interactive_brokers_session=mock_ib,
+        interactive_brokers_session=mock_interactive_brokers,
         queue=mock_queue,
         notifier=mock_notifier,
-        trigger_settlement_cb=mock_trigger_settlement,
+        trigger_settlement_callback=mock_trigger_settlement,
         config=mock_config,
     )
 

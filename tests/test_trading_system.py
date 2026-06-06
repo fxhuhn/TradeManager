@@ -29,9 +29,9 @@ async def test_csv_validation_fut_rejected():
             strategy_name="FuturesStrategy",
         )
     ]
-    is_valid, err_msg = validate_group("20260530_Invalid", invalid_legs)
+    is_valid, error_message = validate_group("20260530_Invalid", invalid_legs)
     assert not is_valid
-    assert "sec_type='STK' ist erlaubt" in err_msg
+    assert "sec_type='STK' ist erlaubt" in error_message
 
 
 @pytest.mark.asyncio
@@ -67,9 +67,9 @@ async def test_csv_validation_valid_bracket():
             strategy_name="Momentum",
         ),
     ]
-    is_valid, err_msg = validate_group("20260530_Valid", valid_legs)
+    is_valid, error_message = validate_group("20260530_Valid", valid_legs)
     assert is_valid
-    assert err_msg == ""
+    assert error_message == ""
 
 
 @pytest.mark.asyncio
@@ -247,9 +247,12 @@ async def test_alert_watcher_dead_orders(db):
 
     # Check ausführen (Schwellenwert 15 Minuten)
     from datetime import UTC, datetime
+
     # 2026-06-04 14:00:00 UTC corresponds to Thursday, 10:00:00 AM NY time (active trading hours)
     test_time = datetime(2026, 6, 4, 14, 0, 0, tzinfo=UTC)
-    await check_dead_orders(db, mock_notifier, state, threshold_minutes=15, current_time=test_time)
+    await check_dead_orders(
+        db, mock_notifier, state, threshold_minutes=15, current_time=test_time
+    )
 
     # Verifizieren, dass der Alarm gesendet wurde
     mock_notifier.send_message.assert_called_once()
@@ -286,9 +289,9 @@ async def test_order_builder_order_ref():
 def test_calculate_settlement_pure():
     """Verify that calculate_settlement accurately computes VWAP, slippage, and net PnL (pure core)."""
     from app.trading.settlement import (
-        calculate_settlement,
         ExecutionTuple,
         SettlementInput,
+        calculate_settlement,
     )
 
     inputs = SettlementInput(
@@ -310,4 +313,3 @@ def test_calculate_settlement_pure():
     assert abs(output.avg_exit_price - Decimal("155.05")) < Decimal("0.001")
     assert abs(output.price_diff_slippage - Decimal("0.02")) < Decimal("0.001")
     assert abs(output.net_profit_loss - Decimal("503.00")) < Decimal("0.01")
-
