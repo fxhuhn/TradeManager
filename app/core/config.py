@@ -51,6 +51,8 @@ class AccountConfig:
     """Konto- und Kapitalallokationseinstellungen."""
 
     default_limit_pct: float
+    margin_multiplier_factor: float = 2.0
+    sizing_mode: str = "margin_adjusted_capital"
 
 
 @dataclass(frozen=True)
@@ -141,8 +143,18 @@ def load_config(root_path: Path = Path(".")) -> Config:
     )
 
     account_config = AccountConfig(
-        default_limit_pct=float(account_data.get("default_limit_pct", 0.05))
+        default_limit_pct=float(account_data.get("default_limit_pct", 0.05)),
+        margin_multiplier_factor=float(account_data.get("margin_multiplier_factor", 2.0)),
+        sizing_mode=str(account_data.get("sizing_mode", "margin_adjusted_capital")),
     )
+
+    if account_config.sizing_mode not in ("margin_adjusted_capital", "total_cash"):
+        raise ValueError(
+            f"Ungueltiger sizing_mode: {account_config.sizing_mode}. "
+            "Erlaubt sind 'margin_adjusted_capital' oder 'total_cash'."
+        )
+    if account_config.margin_multiplier_factor <= 0.0:
+        raise ValueError("margin_multiplier_factor muss groesser als 0 sein.")
 
     # Laden der .env Variablen
     environment_variables = load_env(environment_path)

@@ -7,6 +7,7 @@ speichert die Orders in der Datenbank und reiht sie in die Execution Queue ein.
 """
 
 import asyncio
+from dataclasses import dataclass
 import re
 from collections.abc import Awaitable, Callable
 from decimal import Decimal
@@ -21,6 +22,15 @@ from app.services.csv_reader import load_csv, validate_group
 from app.services.notifier import TelegramNotifier
 
 logger = structlog.get_logger()
+
+
+@dataclass(frozen=True)
+class AccountBalanceMetrics:
+    """Kontowerte fuer die Sizing-Berechnung."""
+
+    net_liquidation_value: Decimal
+    available_funds_value: Decimal
+    total_cash_value: Decimal
 
 
 async def csv_directory_watcher(
@@ -216,14 +226,39 @@ async def _process_and_upsert_group(
 
     target_quantity = first_leg.quantity
     if entry_leg:
-        total_cash_value = await fetch_total_cash_value(interactive_brokers, account_id)
-        if total_cash_value <= Decimal("0.0"):
+        balance_metrics = await fetch_account_balance_metrics(interactive_brokers, account_id)
+        
+        strategy_limit_percentage = Decimal(str(config.account.default_limit_pct))
+        strategy_name = entry_leg.strategy_name
+        if strategy_name and strategy_name in config.strategy_limits:
+            strategy_limit_percentage = Decimal(str(config.strategy_limits[strategy_name]))
+            
+        maximum_capital_allocation = determine_maximum_capital_allocation(
+            net_liquidation_value=balance_metrics.net_liquidation_value,
+            available_funds_value=balance_metrics.available_funds_value,
+            total_cash_value=balance_metrics.total_cash_value,
+            margin_multiplier_factor=Decimal(str(config.account.margin_multiplier_factor)),
+            sizing_mode=config.account.sizing_mode,
+            allocation_limit_percentage=strategy_limit_percentage,
+        )
+
+        logger.info(
+            "Kapital-Sizing berechnet",
+            trade_group_id=trade_group_id,
+            strategy=strategy_name,
+            limit_percentage=float(strategy_limit_percentage),
+            sizing_mode=config.account.sizing_mode,
+            max_allocation=float(maximum_capital_allocation),
+            original_quantity=entry_leg.quantity,
+        )
+
+        if maximum_capital_allocation <= Decimal("0.0"):
             logger.warning(
-                "Kein verfügbares Cash-Kapital vorhanden. Überspringe Gruppe.",
+                "Kein verfuegbares Allokations-Kapital vorhanden. Überspringe Gruppe.",
                 trade_group_id=trade_group_id,
             )
             await notifier.send_message(
-                f"⚠️ KAPITAL-FEHLER ({trade_group_id}): Kein verfuegbares Cash-Kapital fuer Account {account_id}. "
+                f"⚠️ KAPITAL-FEHLER ({trade_group_id}): Kein verfuegbares Allokations-Kapital fuer Account {account_id}. "
                 f"Gruppe uebersprungen."
             )
             return
@@ -231,21 +266,21 @@ async def _process_and_upsert_group(
         target_quantity = calculate_downscaled_quantity(
             target_quantity=entry_leg.quantity,
             target_price=entry_leg.target_price,
-            max_allocation=total_cash_value,
+            max_allocation=maximum_capital_allocation,
         )
 
         if target_quantity <= 0:
             logger.warning(
                 "Sizing ergab Qty <= 0. Überspringe Gruppe.",
                 trade_group_id=trade_group_id,
-                max_allocation=float(total_cash_value),
+                max_allocation=float(maximum_capital_allocation),
                 target_price=float(entry_leg.target_price)
                 if entry_leg.target_price
                 else 0.0,
             )
             await notifier.send_message(
                 f"⚠️ SIZING-FEHLER ({trade_group_id}): Erforderliches Kapital überschreitet Limit "
-                f"({float(total_cash_value):.2f}). Reduzierte Menge = 0. Gruppe uebersprungen."
+                f"({float(maximum_capital_allocation):.2f}). Reduzierte Menge = 0. Gruppe uebersprungen."
             )
             return
 
@@ -470,50 +505,67 @@ async def _upsert_trade_group_legs(
         raise exception
 
 
-async def fetch_total_cash_value(interactive_brokers: IB, account_id: str) -> Decimal:
+async def fetch_account_balance_metrics(
+    interactive_brokers: IB, account_id: str
+) -> AccountBalanceMetrics:
     """
-    Fragt das gesamte Cash-Guthaben von TWS ab.
-
-    Versucht es zuerst aus dem Cache (interactive_brokers.accountValues()) und fällt bei Bedarf
+    Fragt die wichtigsten Kontowerte (NetLiquidation, AvailableFunds, TotalCashValue)
+    von Interactive Brokers ab. Versucht es zuerst aus dem Cache (accountValues()) und fällt bei Bedarf
     auf einen reqAccountSummary()-Aufruf zurück.
     """
-    funds = Decimal("0.0")
+    net_liquidation_value = Decimal("0.0")
+    available_funds_value = Decimal("0.0")
+    total_cash_value = Decimal("0.0")
 
+    cache_values: dict[str, Decimal] = {}
     for account_value in interactive_brokers.accountValues():
-        if account_value.tag == "TotalCashValue" and (
-            not account_id or account_value.account == account_id
-        ):
-            try:
-                funds = Decimal(str(account_value.value))
-                logger.info(
-                    "TotalCashValue aus Cache geladen",
-                    account=account_id,
-                    funds=float(funds),
-                )
-                return funds
-            except ValueError as exception:
-                logger.warning(
-                    "Ungueltiger Cash-Wert im TWS-Cache gefunden",
-                    raw_value=account_value.value,
-                    error=str(exception),
-                )
+        if not account_id or account_value.account == account_id:
+            if account_value.tag in ("NetLiquidation", "AvailableFunds", "TotalCashValue"):
+                try:
+                    cache_values[account_value.tag] = Decimal(str(account_value.value))
+                except ValueError as exception:
+                    logger.warning(
+                        "Ungueltiger Kontowert im TWS-Cache gefunden",
+                        tag=account_value.tag,
+                        raw_value=account_value.value,
+                        error=str(exception),
+                    )
+
+    if len(cache_values) == 3:
+        logger.info(
+            "Kontowerte erfolgreich aus Cache geladen",
+            account=account_id,
+            net_liquidation=float(cache_values["NetLiquidation"]),
+            available_funds=float(cache_values["AvailableFunds"]),
+            total_cash_value=float(cache_values["TotalCashValue"]),
+        )
+        return AccountBalanceMetrics(
+            net_liquidation_value=cache_values["NetLiquidation"],
+            available_funds_value=cache_values["AvailableFunds"],
+            total_cash_value=cache_values["TotalCashValue"],
+        )
 
     logger.info(
-        "TotalCashValue nicht im Cache. Rufe reqAccountSummary auf.", account=account_id
+        "Einige Kontowerte nicht im Cache. Rufe reqAccountSummary auf.",
+        account=account_id,
     )
     summary_event = asyncio.Event()
-    retrieved_funds: list[Decimal] = [Decimal("0.0")]
+    retrieved_values: dict[str, Decimal] = {}
 
     def on_account_summary(
         request_id: int, account: str, tag: str, value: str, currency: str
     ) -> None:
-        if tag == "TotalCashValue" and (not account_id or account == account_id):
+        if tag in ("NetLiquidation", "AvailableFunds", "TotalCashValue") and (
+            not account_id or account == account_id
+        ):
             try:
-                retrieved_funds[0] = Decimal(str(value))
-                summary_event.set()
+                retrieved_values[tag] = Decimal(str(value))
+                if len(retrieved_values) == 3:
+                    summary_event.set()
             except ValueError as exception:
                 logger.warning(
-                    "Ungueltiger Cash-Wert in Account-Summary-Callback gefunden",
+                    "Ungueltiger Wert in Account-Summary-Callback gefunden",
+                    tag=tag,
                     raw_value=value,
                     error=str(exception),
                 )
@@ -523,21 +575,55 @@ async def fetch_total_cash_value(interactive_brokers: IB, account_id: str) -> De
 
     try:
         await asyncio.wait_for(summary_event.wait(), timeout=10.0)
-        funds = retrieved_funds[0]
         logger.info(
-            "TotalCashValue via Fallback geladen",
+            "Kontowerte via reqAccountSummary geladen",
             account=account_id,
-            funds=float(funds),
+            net_liquidation=float(retrieved_values.get("NetLiquidation", Decimal("0.0"))),
+            available_funds=float(retrieved_values.get("AvailableFunds", Decimal("0.0"))),
+            total_cash_value=float(retrieved_values.get("TotalCashValue", Decimal("0.0"))),
         )
     except TimeoutError:
         logger.warning(
-            "Timeout beim Warten auf reqAccountSummary. Setze standardmaessig 0.0"
+            "Timeout beim Warten auf reqAccountSummary. Nutze unvollstaendige oder Standardwerte."
         )
     finally:
         interactive_brokers.accountSummaryEvent.disconnect(on_account_summary)
         interactive_brokers.cancelAccountSummary()
 
-    return funds
+    return AccountBalanceMetrics(
+        net_liquidation_value=retrieved_values.get("NetLiquidation", net_liquidation_value),
+        available_funds_value=retrieved_values.get("AvailableFunds", available_funds_value),
+        total_cash_value=retrieved_values.get("TotalCashValue", total_cash_value),
+    )
+
+
+def determine_maximum_capital_allocation(
+    net_liquidation_value: Decimal,
+    available_funds_value: Decimal,
+    total_cash_value: Decimal,
+    margin_multiplier_factor: Decimal,
+    sizing_mode: str,
+    allocation_limit_percentage: Decimal,
+) -> Decimal:
+    """
+    Berechnet das maximale Kapitalallokationslimit fuer eine Order.
+
+    Pure Function: Keine Seiteneffekte, rein deterministisch.
+    """
+    if sizing_mode == "total_cash":
+        return total_cash_value
+
+    # Bei Margin-Modus:
+    # 1. Berechne theoretisches Limit basierend auf dem Gesamtkapital (Net Liquidation Value)
+    margin_adjusted_limit = (
+        net_liquidation_value * margin_multiplier_factor * allocation_limit_percentage
+    )
+
+    # 2. Begrenze es auf das tatsaechlich verfuegbare Kapital (AvailableFunds) unter Beruecksichtigung des Margin-Faktors,
+    #    um eine Ablehnung durch TWS wegen mangelnder Deckung zu vermeiden.
+    maximum_buying_power_limit = available_funds_value * margin_multiplier_factor
+
+    return min(margin_adjusted_limit, maximum_buying_power_limit)
 
 
 async def get_next_temp_id(db: aiosqlite.Connection) -> int:
