@@ -7,9 +7,9 @@ speichert die Orders in der Datenbank und reiht sie in die Execution Queue ein.
 """
 
 import asyncio
-from dataclasses import dataclass
 import re
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 
@@ -227,12 +227,12 @@ async def _process_and_upsert_group(
     target_quantity = first_leg.quantity
     if entry_leg:
         balance_metrics = await fetch_account_balance_metrics(interactive_brokers, account_id)
-        
+
         strategy_limit_percentage = Decimal(str(config.account.default_limit_pct))
         strategy_name = entry_leg.strategy_name
         if strategy_name and strategy_name in config.strategy_limits:
             strategy_limit_percentage = Decimal(str(config.strategy_limits[strategy_name]))
-            
+
         maximum_capital_allocation = determine_maximum_capital_allocation(
             net_liquidation_value=balance_metrics.net_liquidation_value,
             available_funds_value=balance_metrics.available_funds_value,

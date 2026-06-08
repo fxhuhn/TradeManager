@@ -230,7 +230,7 @@ async def _fetch_submitted_orders(
     query = """
         SELECT order_id, trade_group_id, symbol, transmitted_at
         FROM orders
-        WHERE status = 'Submitted'
+        WHERE status = 'Submitted' AND order_type IN ('MKT', 'MOC')
     """
     async with db.execute(query) as cursor:
         return await cursor.fetchall()

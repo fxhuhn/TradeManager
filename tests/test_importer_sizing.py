@@ -1,11 +1,11 @@
 import asyncio
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
+
 import pytest
 from ib_async import AccountValue
 
 from app.services.importer import (
-    AccountBalanceMetrics,
     determine_maximum_capital_allocation,
     fetch_account_balance_metrics,
 )
@@ -75,7 +75,7 @@ async def test_fetch_account_balance_metrics_from_summary() -> None:
     mock_ib = MagicMock()
     # Leerer Cache
     mock_ib.accountValues.return_value = []
-    
+
     # Callback registrieren simulieren
     registered_callback = None
     def mock_connect(callback):
@@ -98,6 +98,6 @@ async def test_fetch_account_balance_metrics_from_summary() -> None:
     assert metrics.net_liquidation_value == Decimal("90000.0")
     assert metrics.available_funds_value == Decimal("60000.0")
     assert metrics.total_cash_value == Decimal("40000.0")
-    
+
     mock_ib.reqAccountSummary.assert_called_once()
     mock_ib.cancelAccountSummary.assert_called_once()

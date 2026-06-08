@@ -240,7 +240,7 @@ async def test_alert_watcher_dead_orders(db):
         INSERT INTO orders (
             order_id, parent_id, trade_group_id, account_id, bracket_role,
             symbol, sec_type, exchange, action, quantity, order_type, target_price, status, transmitted_at
-        ) VALUES (1, NULL, 'G1', 'A1', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 100, 'LMT', 180.0, 'Submitted', '2026-05-30 10:00:00')
+        ) VALUES (1, NULL, 'G1', 'A1', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 100, 'MKT', 180.0, 'Submitted', '2026-05-30 10:00:00')
         """
     )
     await db.commit()
