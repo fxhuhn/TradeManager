@@ -162,6 +162,9 @@ async def _recover_submitted_order(
         tws_status = tws_active.orderStatus.status
         mapped_status = "PreSubmitted" if tws_status == "PreSubmitted" else "Submitted"
 
+        if order.perm_id == perm_id and order.status == mapped_status:
+            return
+
         logger.info(
             f"Recovery Szenario 1: Order aktiv in TWS. Aktualisiere perm_id und Status auf {mapped_status}.",
             order_id=order_id,
