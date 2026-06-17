@@ -48,7 +48,7 @@ def configure_logging(
     shared_pre_processors = [
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
-        structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S.%f"),
+        structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S.%f", utc=False),
     ]
 
     # 5. Structlog so konfigurieren, dass es an das Standard-logging weiterleitet

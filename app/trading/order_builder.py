@@ -35,7 +35,7 @@ def build_order(order_row: OrderRow) -> Order:
         order.orderRef = order_row.strategy_name
 
     # Preise setzen (Dezimal-zu-Float-Konvertierung an der API-Schnittstelle)
-    if order.orderType == "LMT":
+    if order.orderType in ("LMT", "LOC"):
         order.lmtPrice = float(order_row.target_price)
     elif order.orderType == "STP":
         # TWS Stop-Orders nutzen auxPrice für das Stop-Trigger-Niveau
@@ -49,10 +49,11 @@ def build_order(order_row: OrderRow) -> Order:
         )
 
     # OCA (One-Cancels-All) Gruppe konfigurieren für SL und TP
-    if order_row.bracket_role in ("SL", "TP"):
-        # Alle Legs derselben trade_group_id tragen denselben OCA-String
-        order.ocaGroup = f"OCA_{order_row.trade_group_id}"
-        # ocaType = 2 (Proportional reduce with auto-size)
-        order.ocaType = 2
+    # WICHTIG: LOC und MOC Orders duerfen laut IBKR nicht in einer OCA Gruppe sein!
+    if order_row.bracket_role in ("SL", "TP") and order.orderType not in ("LOC", "MOC"):
+        # Alle Legs derselben trade_group_id tragen denselben OCA-String.
+        # Wir haengen _v3 an, um Probleme mit dem TWS Session-Memory zu umgehen.
+        order.ocaGroup = f"OCA_{order_row.trade_group_id}_v3"
+        order.ocaType = 1
 
     return order

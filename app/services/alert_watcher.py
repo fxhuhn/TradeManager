@@ -26,7 +26,7 @@ async def alert_watcher(
     notifier: TelegramNotifier,
     config: Config,
     interval_seconds: int = 60,
-    dead_order_threshold_min: int = 15,
+    dead_order_threshold_minutes: int = 15,
     max_slippage_pct: float = 0.01,
 ) -> None:
     """
@@ -42,7 +42,9 @@ async def alert_watcher(
             db = await db_factory()
             try:
                 # 1. Dead Order Check
-                await check_dead_orders(db, notifier, state, dead_order_threshold_min)
+                await check_dead_orders(
+                    db, notifier, state, dead_order_threshold_minutes
+                )
                 # 2. Hohe Slippage Check
                 await check_high_slippage(db, notifier, state, max_slippage_pct)
             finally:

@@ -22,7 +22,7 @@ def classify_error_code(code: int) -> ErrorClass:
     Reagiert gemäß Abschnitt 5 (Error-Code-Klassifikation).
     """
     # 1. Informative Codes
-    if code in (2104, 2106, 2107, 2108, 2119, 2158, 2100, 2182):
+    if code in (2104, 2106, 2107, 2108, 2119, 2158, 2100, 2182, 399):
         return ErrorClass.INFO
 
     # 2. Reconnect Codes

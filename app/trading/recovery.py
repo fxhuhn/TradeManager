@@ -5,6 +5,8 @@ Wird beim Systemstart ausgeführt, um den Zustand offener Orders in der Datenban
 mit der Trader Workstation (TWS) abzugleichen (Reconciliation) und Systemabstürze abzufedern.
 """
 
+from __future__ import annotations
+
 import asyncio
 from collections.abc import Awaitable, Callable
 
@@ -35,13 +37,16 @@ async def run_recovery(
     """
     logger.info("Starte Recovery-Phase")
 
-    await fetch_active_orders(interactive_brokers_session, config.tws.request_timeout_s)
+    await fetch_active_orders(
+        interactive_brokers_session, config.tws.request_timeout_s
+    )
     await fetch_completed_orders(
         interactive_brokers_session, config.tws.completed_orders_timeout_s
     )
 
     tws_active_orders = {
-        trade.order.orderId: trade for trade in interactive_brokers_session.openTrades()
+        trade.order.orderId: trade
+        for trade in interactive_brokers_session.openTrades()
     }
     tws_completed_orders = {
         trade.order.orderId: trade
@@ -52,40 +57,28 @@ async def run_recovery(
     local_orders = await _load_local_pending_orders(database_connection)
     logger.info("Offene lokale Orders geladen", count=len(local_orders))
 
-    groups_to_requeue: set[str] = set()
-
-    for order in local_orders:
-        order_id = order.order_id
-        tws_active = tws_active_orders.get(order_id)
-        tws_completed = tws_completed_orders.get(order_id)
-
-        if order.status in ("PreSubmitted", "Submitted"):
-            await _recover_submitted_order(
-                database_connection=database_connection,
-                order=order,
-                tws_active=tws_active,
-                tws_completed=tws_completed,
-                notifier=notifier,
-                trigger_settlement_callback=trigger_settlement_callback,
-            )
-        elif order.status == "Created":
-            await _recover_created_order(
-                database_connection=database_connection,
-                order=order,
-                tws_active=tws_active,
-                groups_to_requeue=groups_to_requeue,
-            )
+    groups_to_requeue = await _reconcile_orders(
+        database_connection=database_connection,
+        local_orders=local_orders,
+        tws_active_orders=tws_active_orders,
+        tws_completed_orders=tws_completed_orders,
+        notifier=notifier,
+        trigger_settlement_callback=trigger_settlement_callback,
+    )
 
     for trade_group_id in groups_to_requeue:
         logger.info(
-            "Re-queue trade_group_id nach Recovery", trade_group_id=trade_group_id
+            "Re-queue trade_group_id nach Recovery",
+            trade_group_id=trade_group_id,
         )
         await queue.put(trade_group_id)
 
     logger.info("Recovery-Phase abgeschlossen")
 
 
-async def fetch_active_orders(interactive_brokers: IB, timeout_seconds: float) -> None:
+async def fetch_active_orders(
+    interactive_brokers: IB, timeout_seconds: float
+) -> None:
     """Ruft offene Orders aktiv von TWS ab."""
     try:
         await asyncio.wait_for(
@@ -147,11 +140,46 @@ async def _load_local_pending_orders(
     return local_orders
 
 
+async def _reconcile_orders(
+    database_connection: aiosqlite.Connection,
+    local_orders: list[OrderRow],
+    tws_active_orders: dict[int, object],
+    tws_completed_orders: dict[int, object],
+    notifier: TelegramNotifier,
+    trigger_settlement_callback: Callable[[str, str], Awaitable[None]],
+) -> set[str]:
+    """Gleicht die ausstehenden lokalen Orders ab und gibt neu einzureihende Trade-Gruppen zurück."""
+    groups_to_requeue: set[str] = set()
+
+    for order in local_orders:
+        order_id = order.order_id
+        tws_active = tws_active_orders.get(order_id)
+        tws_completed = tws_completed_orders.get(order_id)
+
+        if order.status in ("PreSubmitted", "Submitted"):
+            await _recover_submitted_order(
+                database_connection=database_connection,
+                order=order,
+                tws_active=tws_active,
+                tws_completed=tws_completed,
+                notifier=notifier,
+                trigger_settlement_callback=trigger_settlement_callback,
+            )
+        elif order.status == "Created":
+            await _recover_created_order(
+                database_connection=database_connection,
+                order=order,
+                tws_active=tws_active,
+                groups_to_requeue=groups_to_requeue,
+            )
+    return groups_to_requeue
+
+
 async def _recover_submitted_order(
     database_connection: aiosqlite.Connection,
     order: OrderRow,
-    tws_active: list | None,
-    tws_completed: list | None,
+    tws_active: object | None,
+    tws_completed: object | None,
     notifier: TelegramNotifier,
     trigger_settlement_callback: Callable[[str, str], Awaitable[None]],
 ) -> None:
@@ -160,7 +188,9 @@ async def _recover_submitted_order(
     if tws_active:
         perm_id = tws_active.order.permId
         tws_status = tws_active.orderStatus.status
-        mapped_status = "PreSubmitted" if tws_status == "PreSubmitted" else "Submitted"
+        mapped_status = (
+            "PreSubmitted" if tws_status == "PreSubmitted" else "Submitted"
+        )
 
         if order.perm_id == perm_id and order.status == mapped_status:
             return
@@ -214,7 +244,7 @@ async def _recover_submitted_order(
 async def _recover_created_order(
     database_connection: aiosqlite.Connection,
     order: OrderRow,
-    tws_active: list | None,
+    tws_active: object | None,
     groups_to_requeue: set[str],
 ) -> None:
     """Gleicht den Zustand einer lokalen Created Order mit TWS ab."""
@@ -222,7 +252,9 @@ async def _recover_created_order(
     if tws_active:
         perm_id = tws_active.order.permId
         tws_status = tws_active.orderStatus.status
-        mapped_status = "PreSubmitted" if tws_status == "PreSubmitted" else "Submitted"
+        mapped_status = (
+            "PreSubmitted" if tws_status == "PreSubmitted" else "Submitted"
+        )
 
         logger.info(
             f"Recovery Szenario 4: Mid-Crash erkannt (Created in DB, aktiv in TWS). Setze auf {mapped_status}.",

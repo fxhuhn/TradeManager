@@ -347,7 +347,7 @@ async def _upsert_trade_group_legs(
                         UPDATE orders SET
                             symbol = ?, sec_type = ?, exchange = ?, action = ?,
                             quantity = ?, order_type = ?, target_price = ?, tif = ?,
-                            strategy_name = ?
+                            strategy_name = ?, status = 'Created', retry_count = 0
                         WHERE order_id = ?
                         """,
                         (
@@ -432,7 +432,7 @@ async def _upsert_trade_group_legs(
                         UPDATE orders SET
                             parent_id = ?, symbol = ?, sec_type = ?, exchange = ?, action = ?,
                             quantity = ?, order_type = ?, target_price = ?, tif = ?,
-                            strategy_name = ?
+                            strategy_name = ?, status = 'Created', retry_count = 0
                         WHERE order_id = ?
                         """,
                         (

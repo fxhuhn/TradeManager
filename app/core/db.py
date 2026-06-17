@@ -64,7 +64,7 @@ async def verify_db_integrity(db_path: Path = DB_PATH) -> bool:
 
 
 async def run_migrations(
-    db: aiosqlite.Connection, migrations_dir: Path = Path("migrations")
+    db: aiosqlite.Connection, migrations_directory: Path = Path("migrations")
 ) -> None:
     """
     Führt alle .sql-Dateien im migrations/-Verzeichnis lexikografisch aus.
@@ -85,13 +85,13 @@ async def run_migrations(
         await db.execute("ROLLBACK")
         raise
 
-    if not migrations_dir.exists():
+    if not migrations_directory.exists():
         logger.warning(
-            "Migrationsverzeichnis existiert nicht", path=str(migrations_dir)
+            "Migrationsverzeichnis existiert nicht", path=str(migrations_directory)
         )
         return
 
-    sql_files = sorted(migrations_dir.glob("*.sql"))
+    sql_files = sorted(migrations_directory.glob("*.sql"))
 
     for sql_file in sql_files:
         try:
@@ -101,35 +101,48 @@ async def run_migrations(
             logger.error("Ungueltiges Migrationsdateiformat", file=sql_file.name)
             continue
 
-        async with db.execute(
-            "SELECT version FROM schema_version WHERE version = ?", (version,)
-        ) as cursor:
-            if await cursor.fetchone():
-                continue
+        if await _is_migration_applied(db, version):
+            continue
 
         logger.info("Führe Migration aus", file=sql_file.name, version=version)
-        sql_script = sql_file.read_text(encoding="utf-8")
+        await _apply_migration_file(db, sql_file, version)
 
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            for statement in sql_script.split(";"):
-                statement_clean = statement.strip()
-                if statement_clean:
-                    await db.execute(statement_clean)
 
-            await db.execute(
-                "INSERT INTO schema_version (version) VALUES (?)", (version,)
-            )
-            await db.execute("COMMIT")
-            logger.info("Migration erfolgreich angewendet", version=version)
-        except Exception as exception:
-            await db.execute("ROLLBACK")
-            logger.error("Fehler bei Migration", version=version, error=str(exception))
-            raise exception
+async def _is_migration_applied(db: aiosqlite.Connection, version: int) -> bool:
+    """Prüft, ob eine bestimmte Migrationsversion bereits angewendet wurde."""
+    async with db.execute(
+        "SELECT version FROM schema_version WHERE version = ?", (version,)
+    ) as cursor:
+        row = await cursor.fetchone()
+        return row is not None
+
+
+async def _apply_migration_file(
+    db: aiosqlite.Connection, sql_file: Path, version: int
+) -> None:
+    """Führt ein einzelnes Migrationsskript aus und verbucht die Version."""
+    sql_script = sql_file.read_text(encoding="utf-8")
+
+    await db.execute("BEGIN IMMEDIATE")
+    try:
+        for statement in sql_script.split(";"):
+            statement_clean = statement.strip()
+            if statement_clean:
+                await db.execute(statement_clean)
+
+        await db.execute(
+            "INSERT INTO schema_version (version) VALUES (?)", (version,)
+        )
+        await db.execute("COMMIT")
+        logger.info("Migration erfolgreich angewendet", version=version)
+    except Exception as exception:
+        await db.execute("ROLLBACK")
+        logger.error("Fehler bei Migration", version=version, error=str(exception))
+        raise exception
 
 
 async def safe_execute_transaction(
-    db: aiosqlite.Connection, sql: str, params: tuple = ()
+    db: aiosqlite.Connection, sql: str, parameters: tuple = ()
 ) -> None:
     """
     Hilfsfunktion zur sicheren Ausführung einer einzelnen manipulierenden Anweisung
@@ -137,8 +150,9 @@ async def safe_execute_transaction(
     """
     await db.execute("BEGIN IMMEDIATE")
     try:
-        await db.execute(sql, params)
+        await db.execute(sql, parameters)
         await db.execute("COMMIT")
     except Exception as exception:
         await db.execute("ROLLBACK")
         raise exception
+

@@ -11,15 +11,14 @@ import asyncio
 import signal
 import socket
 import sys
-from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 import aiosqlite
 
-# Sicherstellen, dass das Root-Verzeichnis im PYTHONPATH ist, wenn das Skript direkt gestartet wird
-root_dir = str(Path(__file__).resolve().parent.parent)
-if root_dir not in sys.path:
-    sys.path.insert(0, root_dir)
+# Sicherstellen, dass das Hauptverzeichnis im PYTHONPATH ist, wenn das Skript direkt gestartet wird
+root_directory = str(Path(__file__).resolve().parent.parent)
+if root_directory not in sys.path:
+    sys.path.insert(0, root_directory)
 
 import structlog
 from ib_async import IB
@@ -41,20 +40,238 @@ configure_logging()
 logger = structlog.get_logger()
 
 
+class TradingSystemOrchestrator:
+    """Orchestriert das Trading-System, verwaltet Ressourcen, Callbacks und Hintergrund-Tasks."""
+
+    def __init__(
+        self,
+        root_directory_path: Path,
+        database_path: Path,
+        config: Config,
+        notifier: TelegramNotifier,
+        interactive_brokers: IB,
+        queue: asyncio.Queue,
+    ) -> None:
+        self.root_directory_path: Path = root_directory_path
+        self.database_path: Path = database_path
+        self.config: Config = config
+        self.notifier: TelegramNotifier = notifier
+        self.interactive_brokers: IB = interactive_brokers
+        self.queue: asyncio.Queue = queue
+        self.is_reconnecting: bool = False
+        self.tasks: tuple[asyncio.Task, ...] = ()
+        self.shutdown_event: asyncio.Event = asyncio.Event()
+
+    async def create_database_connection(self) -> aiosqlite.Connection:
+        """Erstellt eine neue type-safe Verbindung zur Datenbank."""
+        return await get_db(self.database_path)
+
+    async def trigger_settlement_callback(
+        self, trade_group_id: str, account_id: str
+    ) -> None:
+        """Callback für das Abwickeln (Settlement) von geschlossenen Trades."""
+        await trigger_settlement(
+            self.create_database_connection, trade_group_id, account_id, self.notifier
+        )
+
+    async def handle_retriable_error_callback(self, order_id: int) -> None:
+        """Callback für die Handhabung transienter/wiederholbarer Orderfehler."""
+        await handle_retriable_error(
+            self.create_database_connection,
+            order_id,
+            self.queue,
+            self.notifier,
+            self.config,
+        )
+
+    async def run_recovery_callback(self) -> None:
+        """Führt eine Synchronisations- und Recovery-Phase aus."""
+        database_connection_instance = await self.create_database_connection()
+        try:
+            await run_recovery(
+                database_connection_instance,
+                self.interactive_brokers,
+                self.queue,
+                self.notifier,
+                self.trigger_settlement_callback,
+                self.config,
+            )
+        finally:
+            await database_connection_instance.close()
+
+    async def run_reconnect_callback(self) -> None:
+        """Wrapper für die Wiederverbindungsschleife bei Verbindungsverlust."""
+        if self.is_reconnecting:
+            logger.warning("Reconnection loop is already running. Skipping trigger.")
+            return
+        self.is_reconnecting = True
+        try:
+            await self._execute_reconnect_loop()
+        finally:
+            self.is_reconnecting = False
+
+    def start_background_tasks(self) -> None:
+        """Startet alle asynchronen Hintergrunddienste und speichert deren Tasks."""
+        importer_task = asyncio.create_task(
+            csv_directory_watcher(
+                db_factory=self.create_database_connection,
+                interactive_brokers=self.interactive_brokers,
+                directory_path=self.root_directory_path / "data",
+                queue=self.queue,
+                notifier=self.notifier,
+                config=self.config,
+                interval_seconds=self.config.app.csv_watcher_interval_s,
+            )
+        )
+
+        worker_task = asyncio.create_task(
+            execution_worker(
+                self.create_database_connection,
+                self.interactive_brokers,
+                self.queue,
+                self.notifier,
+                self.config,
+            )
+        )
+
+        watcher_task = asyncio.create_task(
+            alert_watcher(
+                db_factory=self.create_database_connection,
+                notifier=self.notifier,
+                config=self.config,
+                interval_seconds=self.config.app.alert_watcher_interval_s,
+                dead_order_threshold_minutes=self.config.app.dead_order_threshold_minutes,
+                max_slippage_pct=self.config.account.default_limit_pct,
+            )
+        )
+
+        sync_task = asyncio.create_task(
+            order_status_sync_loop(
+                db_factory=self.create_database_connection,
+                interactive_brokers=self.interactive_brokers,
+                queue=self.queue,
+                notifier=self.notifier,
+                trigger_settlement_callback=self.trigger_settlement_callback,
+                config=self.config,
+                interval_seconds=self.config.app.order_sync_interval_s,
+            )
+        )
+
+        self.tasks = (importer_task, worker_task, watcher_task, sync_task)
+
+    async def graceful_shutdown(self) -> None:
+        """Führt eine geordnete Shutdown-Sequenz des gesamten Systems aus."""
+        logger.info("Beginne Shutdown-Sequenz...")
+        await self.notifier.send_message("⚠️ Trading System wird heruntergefahren...")
+
+        logger.info("Breche Hintergrunddienste ab...")
+        for task in self.tasks:
+            task.cancel()
+
+        try:
+            await asyncio.gather(*self.tasks, return_exceptions=True)
+        except Exception as exception:
+            logger.debug("Fehler beim Abbrechen der Tasks", error=str(exception))
+
+        logger.info("Warte bis alle Queue-Tasks abgeschlossen sind (queue.join)...")
+        try:
+            await asyncio.wait_for(
+                self.queue.join(), timeout=self.config.app.shutdown_join_timeout_s
+            )
+            logger.info("Queue erfolgreich geleert")
+        except TimeoutError:
+            logger.warning("Timeout beim Warten auf das Leeren der Queue. Fahre fort.")
+
+        if self.interactive_brokers.isConnected():
+            logger.info("Trenne API-Verbindung zur TWS...")
+            self.interactive_brokers.disconnect()
+            logger.info("Verbindung getrennt")
+
+        logger.info("Shutdown-Sequenz erfolgreich abgeschlossen. Auf Wiedersehen!")
+        await self.notifier.send_message("🛑 Trading System geordnet heruntergefahren.")
+
+    async def _execute_reconnect_loop(self) -> None:
+        """Führt die Wiederverbindungsschleife mit steigenden Intervallen aus."""
+        logger.info("Starte automatischen Wiederverbindungsaufbau...")
+        delays = [30.0, 60.0, 120.0, 240.0]
+        attempt = 1
+        max_attempts = self.config.tws.reconnect_max_attempts
+
+        while attempt <= max_attempts:
+            current_delay = delays[min(attempt - 1, len(delays) - 1)]
+            logger.info(
+                "Warte vor Wiederverbindungsversuch",
+                attempt=attempt,
+                delay_seconds=current_delay,
+            )
+            await asyncio.sleep(current_delay)
+
+            if self.interactive_brokers.isConnected():
+                logger.info("Bereits verbunden. Beende Reconnect-Schleife.")
+                return
+
+            success = await self._attempt_single_reconnect(attempt)
+            if success:
+                logger.info("Wiederverbindung erfolgreich hergestellt!")
+                await self.notifier.send_message(
+                    "✅ WIEDERVERBUNDEN: Die Verbindung zur Interactive Brokers TWS wurde erfolgreich wiederhergestellt."
+                )
+                self.interactive_brokers.reqAutoOpenOrders(True)
+                logger.info("Trigger Recovery-Lauf nach Wiederverbindung...")
+                await self.run_recovery_callback()
+                return
+
+            attempt += 1
+
+        logger.critical(
+            f"Wiederverbindung nach {max_attempts} Versuchen fehlgeschlagen. Anwendung bleibt getrennt."
+        )
+        await self.notifier.send_message(
+            f"🚨 WIEDERVERBINDUNG FEHLGESCHLAGEN: Die Verbindung konnte nach {max_attempts} Versuchen nicht wiederhergestellt werden."
+        )
+
+    async def _attempt_single_reconnect(self, attempt: int) -> bool:
+        """Führt einen einzelnen Verbindungsversuch zur TWS durch."""
+        logger.info(
+            "Versuche Wiederverbindung",
+            attempt=attempt,
+            host=self.config.tws.host,
+            port=self.config.tws.port,
+        )
+        try:
+            await asyncio.wait_for(
+                self.interactive_brokers.connectAsync(
+                    self.config.tws.host,
+                    self.config.tws.port,
+                    clientId=self.config.tws.client_id,
+                ),
+                timeout=self.config.tws.connection_timeout_s,
+            )
+            _enable_socket_keepalive(self.interactive_brokers)
+            return True
+        except Exception as exception:
+            logger.warning(
+                "Wiederverbindung-Verbindungsversuch fehlgeschlagen",
+                attempt=attempt,
+                error=str(exception),
+            )
+            return False
+
+
 async def main() -> None:
     """Zentraler Orchestrierungs- und Lebenszyklus-Einstiegspunkt des Systems."""
     logger.info("Starte IBKR Equities Trading System (Release 1)")
 
     # 1. Konfiguration laden & Logging konfigurieren
-    root_dir_path = Path(__file__).resolve().parent.parent
-    config = _initialize_config_and_logging(root_dir_path)
+    root_directory_path = Path(__file__).resolve().parent.parent
+    config = _initialize_config_and_logging(root_directory_path)
 
     # 2. Telegram Notifier initialisieren
     notifier = TelegramNotifier(config)
     await notifier.send_message("🚀 Trading System startet...")
 
     # 3. Datenbank-Integrity Check
-    db_path = await _verify_database_integrity(root_dir_path, notifier)
+    database_path = await _verify_database_integrity(root_directory_path, notifier)
 
     # 4. Verbindung zu TWS aufbauen
     interactive_brokers = IB()
@@ -62,15 +279,20 @@ async def main() -> None:
     if not is_connected:
         sys.exit(1)
 
-    # Hilfsfunktion für DB-Verbindungen (Factory)
-    async def db_factory() -> aiosqlite.Connection:
-        return await get_db(db_path)
-
     # 5. DB-Verbindung öffnen und Migrationen ausführen
-    database_connection = await db_factory()
-    await _run_database_migrations(
-        database_connection, root_dir_path, interactive_brokers
-    )
+    database_connection_instance = await get_db(database_path)
+    try:
+        migrations_directory = root_directory_path / "migrations"
+        await run_migrations(database_connection_instance, migrations_directory)
+    except Exception as exception:
+        logger.critical(
+            "Fehler beim Ausführen der DB-Migrationen", error=str(exception)
+        )
+        await interactive_brokers.disconnect()
+        await database_connection_instance.close()
+        sys.exit(1)
+    finally:
+        await database_connection_instance.close()
 
     # 6. reqAutoOpenOrders aktivieren
     interactive_brokers.reqAutoOpenOrders(True)
@@ -78,87 +300,41 @@ async def main() -> None:
     # Asynchrone Queue für Trade-Gruppen initialisieren
     queue: asyncio.Queue = asyncio.Queue()
 
-    # Lokale Callback-Brücken zur Vermeidung zirkulärer Importe
-    async def trigger_settlement_callback(trade_group_id: str, account_id: str) -> None:
-        await trigger_settlement(db_factory, trade_group_id, account_id, notifier)
-
-    async def handle_retriable_error_callback(order_id: int) -> None:
-        await handle_retriable_error(db_factory, order_id, queue, notifier, config)
-
-    async def run_recovery_callback() -> None:
-        database_connection_obj = await db_factory()
-        try:
-            await run_recovery(
-                database_connection_obj,
-                interactive_brokers,
-                queue,
-                notifier,
-                trigger_settlement_callback,
-                config,
-            )
-        finally:
-            await database_connection_obj.close()
-
-    is_reconnecting = False
-
-    async def run_reconnect_callback() -> None:
-        nonlocal is_reconnecting
-        if is_reconnecting:
-            logger.warning("Reconnection loop is already running. Skipping trigger.")
-            return
-        is_reconnecting = True
-        try:
-            await _execute_reconnect_loop(
-                interactive_brokers, config, notifier, run_recovery_callback
-            )
-        finally:
-            is_reconnecting = False
+    # Orchestrator instanziieren
+    orchestrator = TradingSystemOrchestrator(
+        root_directory_path=root_directory_path,
+        database_path=database_path,
+        config=config,
+        notifier=notifier,
+        interactive_brokers=interactive_brokers,
+        queue=queue,
+    )
 
     # 7. Callbacks in TwsCallbacksManager registrieren
     callbacks_manager = TwsCallbacksManager(
-        db_factory=db_factory,
+        db_factory=orchestrator.create_database_connection,
         interactive_brokers=interactive_brokers,
         notifier=notifier,
         config=config,
-        trigger_settlement_callback=trigger_settlement_callback,
-        handle_retriable_error_callback=handle_retriable_error_callback,
-        run_recovery_callback=run_recovery_callback,
-        run_reconnect_callback=run_reconnect_callback,
+        trigger_settlement_callback=orchestrator.trigger_settlement_callback,
+        handle_retriable_error_callback=orchestrator.handle_retriable_error_callback,
+        run_recovery_callback=orchestrator.run_recovery_callback,
+        run_reconnect_callback=orchestrator.run_reconnect_callback,
     )
     callbacks_manager.register_all()
 
     # 8. Recovery-Phase beim Start ausführen (Zustandsabgleich)
-    database_connection_obj = await db_factory()
-    try:
-        await run_recovery(
-            database_connection_obj,
-            interactive_brokers,
-            queue,
-            notifier,
-            trigger_settlement_callback,
-            config,
-        )
-    finally:
-        await database_connection_obj.close()
+    await orchestrator.run_recovery_callback()
 
     # 9 & 10. Hintergrunddienste starten
-    tasks = _start_background_tasks(
-        db_factory=db_factory,
-        interactive_brokers=interactive_brokers,
-        queue=queue,
-        notifier=notifier,
-        config=config,
-        root_dir_path=root_dir_path,
-        trigger_settlement_callback=trigger_settlement_callback,
-    )
+    orchestrator.start_background_tasks()
 
     # 11. Graceful Shutdown Event registrieren
-    shutdown_event = asyncio.Event()
     loop = asyncio.get_running_loop()
 
     def signal_handler() -> None:
         logger.info("Signal empfangen. Starte geordneten Shutdown...")
-        shutdown_event.set()
+        orchestrator.shutdown_event.set()
 
     for signal_type in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -167,10 +343,10 @@ async def main() -> None:
             pass
 
     # Auf Beendigungssignal warten
-    await shutdown_event.wait()
+    await orchestrator.shutdown_event.wait()
 
     # 12. Graceful Shutdown Sequenz ausführen
-    await _graceful_shutdown(notifier, tasks, queue, config, interactive_brokers)
+    await orchestrator.graceful_shutdown()
 
 
 async def connect_to_tws(interactive_brokers: IB, config: Config) -> bool:
@@ -219,12 +395,12 @@ async def connect_to_tws(interactive_brokers: IB, config: Config) -> bool:
     return False
 
 
-def _initialize_config_and_logging(root_dir_path: Path) -> Config:
+def _initialize_config_and_logging(root_directory_path: Path) -> Config:
     """Lädt die Konfiguration und re-konfiguriert das Logging."""
     try:
-        config = load_config(root_dir_path)
+        config = load_config(root_directory_path)
         configure_logging(
-            log_file_path=root_dir_path / config.app.log_file_path,
+            log_file_path=root_directory_path / config.app.log_file_path,
             backup_count=config.app.log_rotation_backup_count,
         )
         logger.info("Konfiguration erfolgreich geladen und Logging re-konfiguriert")
@@ -237,11 +413,11 @@ def _initialize_config_and_logging(root_dir_path: Path) -> Config:
 
 
 async def _verify_database_integrity(
-    root_dir_path: Path, notifier: TelegramNotifier
+    root_directory_path: Path, notifier: TelegramNotifier
 ) -> Path:
     """Führt eine Integritätsprüfung der SQL-Datenbank durch."""
-    db_path = root_dir_path / "data" / "trading.db"
-    is_db_ok = await verify_db_integrity(db_path)
+    database_path = root_directory_path / "data" / "trading.db"
+    is_db_ok = await verify_db_integrity(database_path)
     if not is_db_ok:
         logger.critical(
             "DB-Integritaetspruefung fehlgeschlagen. Beende zur Sicherheit."
@@ -250,192 +426,7 @@ async def _verify_database_integrity(
             "🚨 KRITISCH: DB-Integritaetspruefung fehlgeschlagen! Anwendung beendet."
         )
         sys.exit(1)
-    return db_path
-
-
-async def _run_database_migrations(
-    database_connection: aiosqlite.Connection,
-    root_dir_path: Path,
-    interactive_brokers: IB,
-) -> None:
-    """Führt ausstehende SQL-Migrationen atomar aus und schließt die Verbindung."""
-    try:
-        migrations_dir = root_dir_path / "migrations"
-        await run_migrations(database_connection, migrations_dir)
-    except Exception as exception:
-        logger.critical(
-            "Fehler beim Ausführen der DB-Migrationen", error=str(exception)
-        )
-        await interactive_brokers.disconnect()
-        await database_connection.close()
-        sys.exit(1)
-    finally:
-        await database_connection.close()
-
-
-def _start_background_tasks(
-    db_factory: Callable[[], Awaitable[aiosqlite.Connection]],
-    interactive_brokers: IB,
-    queue: asyncio.Queue,
-    notifier: TelegramNotifier,
-    config: Config,
-    root_dir_path: Path,
-    trigger_settlement_callback: Callable[[str, str], Awaitable[None]],
-) -> tuple[asyncio.Task, asyncio.Task, asyncio.Task, asyncio.Task]:
-    """Startet alle asynchronen Hintergrunddienste und gibt Task-Referenzen zurück."""
-    importer_task = asyncio.create_task(
-        csv_directory_watcher(
-            db_factory=db_factory,
-            interactive_brokers=interactive_brokers,
-            directory_path=root_dir_path / "data",
-            queue=queue,
-            notifier=notifier,
-            config=config,
-            interval_seconds=config.app.csv_watcher_interval_s,
-        )
-    )
-
-    worker_task = asyncio.create_task(
-        execution_worker(db_factory, interactive_brokers, queue, notifier, config)
-    )
-
-    watcher_task = asyncio.create_task(
-        alert_watcher(
-            db_factory=db_factory,
-            notifier=notifier,
-            config=config,
-            interval_seconds=config.app.alert_watcher_interval_s,
-            dead_order_threshold_min=config.app.dead_order_threshold_min,
-            max_slippage_pct=config.account.default_limit_pct,
-        )
-    )
-
-    sync_task = asyncio.create_task(
-        order_status_sync_loop(
-            db_factory=db_factory,
-            interactive_brokers=interactive_brokers,
-            queue=queue,
-            notifier=notifier,
-            trigger_settlement_callback=trigger_settlement_callback,
-            config=config,
-            interval_seconds=config.app.order_sync_interval_s,
-        )
-    )
-
-    return importer_task, worker_task, watcher_task, sync_task
-
-
-async def _graceful_shutdown(
-    notifier: TelegramNotifier,
-    tasks: tuple[asyncio.Task, asyncio.Task, asyncio.Task, asyncio.Task],
-    queue: asyncio.Queue,
-    config: Config,
-    interactive_brokers: IB,
-) -> None:
-    """Führt eine geordnete Shutdown-Sequenz des gesamten Systems aus."""
-    logger.info("Beginne Shutdown-Sequenz...")
-    await notifier.send_message("⚠️ Trading System wird heruntergefahren...")
-
-    # Hintergrunddienste abbrechen
-    logger.info("Breche Hintergrunddienste ab...")
-    for task in tasks:
-        task.cancel()
-
-    try:
-        await asyncio.gather(*tasks, return_exceptions=True)
-    except Exception as exception:
-        logger.debug("Fehler beim Abbrechen der Tasks", error=str(exception))
-
-    # Queue joinen
-    logger.info("Warte bis alle Queue-Tasks abgeschlossen sind (queue.join)...")
-    try:
-        await asyncio.wait_for(queue.join(), timeout=config.app.shutdown_join_timeout_s)
-        logger.info("Queue erfolgreich geleert")
-    except TimeoutError:
-        logger.warning("Timeout beim Warten auf das Leeren der Queue. Fahre fort.")
-
-    # TWS Verbindung trennen
-    if interactive_brokers.isConnected():
-        logger.info("Trenne API-Verbindung zur TWS...")
-        interactive_brokers.disconnect()
-        logger.info("Verbindung getrennt")
-
-    logger.info("Shutdown-Sequenz erfolgreich abgeschlossen. Auf Wiedersehen!")
-    await notifier.send_message("🛑 Trading System geordnet heruntergefahren.")
-
-
-async def _execute_reconnect_loop(
-    interactive_brokers: IB,
-    config: Config,
-    notifier: TelegramNotifier,
-    recovery_callback: Callable[[], Awaitable[None]],
-) -> None:
-    """Führt die Wiederverbindungsschleife mit steigenden Intervallen aus."""
-    logger.info("Starte automatischen Wiederverbindungsaufbau...")
-    delays = [30.0, 60.0, 120.0, 240.0]
-    attempt = 1
-    max_attempts = config.tws.reconnect_max_attempts
-
-    while attempt <= max_attempts:
-        current_delay = delays[min(attempt - 1, len(delays) - 1)]
-        logger.info(
-            "Warte vor Wiederverbindungsversuch",
-            attempt=attempt,
-            delay_seconds=current_delay,
-        )
-        await asyncio.sleep(current_delay)
-
-        if interactive_brokers.isConnected():
-            logger.info("Bereits verbunden. Beende Reconnect-Schleife.")
-            return
-
-        success = await _attempt_single_reconnect(interactive_brokers, config, attempt)
-        if success:
-            logger.info("Wiederverbindung erfolgreich hergestellt!")
-            await notifier.send_message(
-                "✅ WIEDERVERBUNDEN: Die Verbindung zur Interactive Brokers TWS wurde erfolgreich wiederhergestellt."
-            )
-            interactive_brokers.reqAutoOpenOrders(True)
-            logger.info("Trigger Recovery-Lauf nach Wiederverbindung...")
-            await recovery_callback()
-            return
-
-        attempt += 1
-
-    logger.critical(
-        f"Wiederverbindung nach {max_attempts} Versuchen fehlgeschlagen. Anwendung bleibt getrennt."
-    )
-    await notifier.send_message(
-        f"🚨 WIEDERVERBINDUNG FEHLGESCHLAGEN: Die Verbindung konnte nach {max_attempts} Versuchen nicht wiederhergestellt werden."
-    )
-
-
-async def _attempt_single_reconnect(
-    interactive_brokers: IB, config: Config, attempt: int
-) -> bool:
-    """Führt einen einzelnen Verbindungsversuch zur TWS durch."""
-    logger.info(
-        "Versuche Wiederverbindung",
-        attempt=attempt,
-        host=config.tws.host,
-        port=config.tws.port,
-    )
-    try:
-        await asyncio.wait_for(
-            interactive_brokers.connectAsync(
-                config.tws.host, config.tws.port, clientId=config.tws.client_id
-            ),
-            timeout=config.tws.connection_timeout_s,
-        )
-        _enable_socket_keepalive(interactive_brokers)
-        return True
-    except Exception as exception:
-        logger.warning(
-            "Wiederverbindung-Verbindungsversuch fehlgeschlagen",
-            attempt=attempt,
-            error=str(exception),
-        )
-        return False
+    return database_path
 
 
 def _enable_socket_keepalive(interactive_brokers: IB) -> None:

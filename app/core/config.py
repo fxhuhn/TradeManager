@@ -34,7 +34,7 @@ class AppConfig:
 
     max_retries: int
     order_rate_limit_s: float
-    dead_order_threshold_min: int
+    dead_order_threshold_minutes: int
     alert_watcher_interval_s: int
     csv_watcher_interval_s: int
     order_sync_interval_s: int
@@ -130,7 +130,7 @@ def load_config(root_path: Path = Path(".")) -> Config:
     app_config = AppConfig(
         max_retries=int(app_data.get("max_retries", 3)),
         order_rate_limit_s=float(app_data.get("order_rate_limit_s", 0.02)),
-        dead_order_threshold_min=int(app_data.get("dead_order_threshold_min", 15)),
+        dead_order_threshold_minutes=int(app_data.get("dead_order_threshold_minutes", 15)),
         alert_watcher_interval_s=int(app_data.get("alert_watcher_interval_s", 60)),
         csv_watcher_interval_s=int(app_data.get("csv_watcher_interval_s", 60)),
         order_sync_interval_s=int(app_data.get("order_sync_interval_s", 300)),
