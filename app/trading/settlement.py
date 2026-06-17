@@ -5,6 +5,8 @@ Berechnet nach der Schließung eines Trades (ENTRY und EXIT vollzogen)
 das PnL und die Slippage hochpräzise und speichert die Ergebnisse in der Datenbank.
 """
 
+from __future__ import annotations
+
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -36,87 +38,21 @@ async def trigger_settlement(
     """
     lock = await get_settlement_lock(trade_group_id)
 
-    # 1. Lock erwerben
     async with lock:
         db = await database_connection_factory()
         try:
-            # 2. Prüfen, ob bereits ein Settlement-Eintrag existiert
-            async with db.execute(
-                "SELECT trade_group_id FROM trades_settlement WHERE account_id = ? AND trade_group_id = ?",
-                (account_id, trade_group_id),
-            ) as cursor:
-                if await cursor.fetchone():
-                    logger.info(
-                        "Settlement fuer Trade-Gruppe bereits vorhanden. Abbrechen.",
-                        trade_group_id=trade_group_id,
-                    )
-                    return
-
-            # 3. Alle Executions für diese Trade-Gruppe abfragen
-            query = """
-                SELECT e.qty, e.price, COALESCE(e.commission, 0.0) as commission,
-                       o.bracket_role, o.action, o.target_price
-                FROM executions e
-                JOIN orders o ON e.order_id = o.order_id
-                WHERE o.trade_group_id = ?
-            """
-
-            entry_executions: list[ExecutionTuple] = []
-            exit_executions: list[ExecutionTuple] = []
-            total_commissions = Decimal("0.0")
-            entry_target_price = Decimal("0.0")
-            entry_action = "BUY"
-
-            async with db.execute(query, (trade_group_id,)) as cursor:
-                async for row in cursor:
-                    role = row["bracket_role"]
-                    quantity = Decimal(str(row["qty"]))
-                    price = Decimal(str(row["price"]))
-                    commission = (
-                        Decimal(str(row["commission"]))
-                        if row["commission"] is not None
-                        else Decimal("0.0")
-                    )
-
-                    total_commissions += commission
-
-                    if role == "ENTRY":
-                        entry_executions.append(
-                            ExecutionTuple(quantity=quantity, price=price)
-                        )
-                        entry_target_price = (
-                            Decimal(str(row["target_price"]))
-                            if row["target_price"] is not None
-                            else Decimal("0.0")
-                        )
-                        entry_action = row["action"]
-                    elif role in ("SL", "TP", "EXIT"):
-                        exit_executions.append(
-                            ExecutionTuple(quantity=quantity, price=price)
-                        )
-
-            if not entry_executions:
-                logger.warning(
-                    "Keine ENTRY-Executions fuer Settlement gefunden",
-                    trade_group_id=trade_group_id,
-                )
-                return
-            if not exit_executions:
-                logger.warning(
-                    "Keine EXIT-Executions fuer Settlement gefunden (Trade eventuell noch offen)",
+            if await _has_existing_settlement(db, account_id, trade_group_id):
+                logger.info(
+                    "Settlement fuer Trade-Gruppe bereits vorhanden. Abbrechen.",
                     trade_group_id=trade_group_id,
                 )
                 return
 
-            # 4. Berechnung an den Functional Core delegieren
-            calculation_inputs = SettlementInput(
-                entry_executions=entry_executions,
-                exit_executions=exit_executions,
-                entry_target_price=entry_target_price,
-                entry_action=entry_action,
-                total_commissions=total_commissions,
-            )
-            calculation_outputs = calculate_settlement(calculation_inputs)
+            settlement_input = await _fetch_settlement_data(db, trade_group_id)
+            if not settlement_input:
+                return
+
+            calculation_outputs = calculate_settlement(settlement_input)
 
             logger.info(
                 "Settlement-Berechnung abgeschlossen",
@@ -124,57 +60,25 @@ async def trigger_settlement(
                 entry_vwap=float(calculation_outputs.avg_entry_price),
                 exit_vwap=float(calculation_outputs.avg_exit_price),
                 slippage=float(calculation_outputs.price_diff_slippage),
-                commissions=float(total_commissions),
+                commissions=float(settlement_input.total_commissions),
                 net_pnl=float(calculation_outputs.net_profit_loss),
             )
 
-            # 5. Ergebnisse atomar in die Datenbank schreiben
-            await db.execute("BEGIN IMMEDIATE")
-            try:
-                await db.execute(
-                    """
-                    INSERT INTO trades_settlement (
-                        account_id, trade_group_id, avg_entry_price, avg_exit_price,
-                        price_diff_slippage, total_commissions, net_pnl
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        account_id,
-                        trade_group_id,
-                        float(calculation_outputs.avg_entry_price),
-                        float(calculation_outputs.avg_exit_price),
-                        float(calculation_outputs.price_diff_slippage),
-                        float(total_commissions),
-                        float(calculation_outputs.net_profit_loss),
-                    ),
-                )
-                await db.execute("COMMIT")
-                logger.info(
-                    "Settlement erfolgreich verbucht", trade_group_id=trade_group_id
-                )
-            except Exception as exception:
-                await db.execute("ROLLBACK")
-                logger.error(
-                    "Fehler beim DB-Eintrag des Settlements",
-                    trade_group_id=trade_group_id,
-                    error=str(exception),
-                )
-                raise exception
-
-            # Telegram-Meldung über erfolgreichen Trade-Abschluss senden
-            profit_loss_emoji = (
-                "🟢 Profit"
-                if calculation_outputs.net_profit_loss >= Decimal("0.0")
-                else "🔴 Verlust"
+            await _save_settlement(
+                db,
+                account_id,
+                trade_group_id,
+                calculation_outputs,
+                settlement_input.total_commissions,
             )
-            await notifier.send_message(
-                f"✅ TRADE SETTLEMENT ({trade_group_id})\n"
-                f"• Symbol: {entry_action} Position\n"
-                f"• Entry: {float(calculation_outputs.avg_entry_price):.2f} (Target: {float(entry_target_price):.2f})\n"
-                f"• Exit: {float(calculation_outputs.avg_exit_price):.2f}\n"
-                f"• Slippage: {float(calculation_outputs.price_diff_slippage):+.2f}\n"
-                f"• Gebühren: {float(total_commissions):.2f} USD\n"
-                f"• *Netto-PnL:* {float(calculation_outputs.net_profit_loss):+.2f} USD ({profit_loss_emoji})"
+
+            await _send_settlement_notification(
+                notifier,
+                trade_group_id,
+                settlement_input.entry_action,
+                settlement_input.entry_target_price,
+                calculation_outputs,
+                settlement_input.total_commissions,
             )
 
         except Exception as exception:
@@ -186,8 +90,148 @@ async def trigger_settlement(
         finally:
             await db.close()
 
-    # Lock-Bereinigung durchführen
     await cleanup_settlement_lock(trade_group_id)
+
+
+async def _has_existing_settlement(
+    db: aiosqlite.Connection, account_id: str, trade_group_id: str
+) -> bool:
+    """Prüft, ob für die Kombination Account/Gruppe bereits gerechnet wurde."""
+    query = """
+        SELECT trade_group_id
+        FROM trades_settlement
+        WHERE account_id = ? AND trade_group_id = ?
+    """
+    async with db.execute(query, (account_id, trade_group_id)) as cursor:
+        row = await cursor.fetchone()
+        return row is not None
+
+
+async def _fetch_settlement_data(
+    db: aiosqlite.Connection, trade_group_id: str
+) -> SettlementInput | None:
+    """Lädt Executions und Target-Preise für die Trade-Gruppe aus der DB."""
+    query = """
+        SELECT e.qty, e.price, COALESCE(e.commission, 0.0) as commission,
+               o.bracket_role, o.action, o.target_price
+        FROM executions e
+        JOIN orders o ON e.order_id = o.order_id
+        WHERE o.trade_group_id = ?
+    """
+
+    entry_executions: list[ExecutionTuple] = []
+    exit_executions: list[ExecutionTuple] = []
+    total_commissions = Decimal("0.0")
+    entry_target_price = Decimal("0.0")
+    entry_action = "BUY"
+
+    async with db.execute(query, (trade_group_id,)) as cursor:
+        async for row in cursor:
+            role = row["bracket_role"]
+            quantity = Decimal(str(row["qty"]))
+            price = Decimal(str(row["price"]))
+            commission = (
+                Decimal(str(row["commission"]))
+                if row["commission"] is not None
+                else Decimal("0.0")
+            )
+
+            total_commissions += commission
+
+            if role == "ENTRY":
+                entry_executions.append(ExecutionTuple(quantity=quantity, price=price))
+                entry_target_price = (
+                    Decimal(str(row["target_price"]))
+                    if row["target_price"] is not None
+                    else Decimal("0.0")
+                )
+                entry_action = row["action"]
+            elif role in ("SL", "TP", "EXIT"):
+                exit_executions.append(ExecutionTuple(quantity=quantity, price=price))
+
+    if not entry_executions:
+        logger.warning(
+            "Keine ENTRY-Executions fuer Settlement gefunden",
+            trade_group_id=trade_group_id,
+        )
+        return None
+    if not exit_executions:
+        logger.warning(
+            "Keine EXIT-Executions fuer Settlement gefunden (Trade eventuell noch offen)",
+            trade_group_id=trade_group_id,
+        )
+        return None
+
+    return SettlementInput(
+        entry_executions=entry_executions,
+        exit_executions=exit_executions,
+        entry_target_price=entry_target_price,
+        entry_action=entry_action,
+        total_commissions=total_commissions,
+    )
+
+
+async def _save_settlement(
+    db: aiosqlite.Connection,
+    account_id: str,
+    trade_group_id: str,
+    outputs: SettlementOutput,
+    total_commissions: Decimal,
+) -> None:
+    """Schreibt die Ergebnisse des Settlements atomar in die Datenbank."""
+    await db.execute("BEGIN IMMEDIATE")
+    try:
+        await db.execute(
+            """
+            INSERT INTO trades_settlement (
+                account_id, trade_group_id, avg_entry_price, avg_exit_price,
+                price_diff_slippage, total_commissions, net_pnl
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                account_id,
+                trade_group_id,
+                float(outputs.avg_entry_price),
+                float(outputs.avg_exit_price),
+                float(outputs.price_diff_slippage),
+                float(total_commissions),
+                float(outputs.net_profit_loss),
+            ),
+        )
+        await db.execute("COMMIT")
+        logger.info("Settlement erfolgreich verbucht", trade_group_id=trade_group_id)
+    except Exception as exception:
+        await db.execute("ROLLBACK")
+        logger.error(
+            "Fehler beim DB-Eintrag des Settlements",
+            trade_group_id=trade_group_id,
+            error=str(exception),
+        )
+        raise exception
+
+
+async def _send_settlement_notification(
+    notifier: TelegramNotifier,
+    trade_group_id: str,
+    entry_action: str,
+    entry_target_price: Decimal,
+    outputs: SettlementOutput,
+    total_commissions: Decimal,
+) -> None:
+    """Sendet die Telegram-Meldung über den erfolgreichen Abschluss."""
+    profit_loss_emoji = (
+        "🟢 Profit" if outputs.net_profit_loss >= Decimal("0.0") else "🔴 Verlust"
+    )
+    await notifier.send_message(
+        f"✅ TRADE SETTLEMENT ({trade_group_id})\n"
+        f"• Symbol: {entry_action} Position\n"
+        f"• Entry: {float(outputs.avg_entry_price):.2f} (Target: {float(entry_target_price):.2f})\n"
+        f"• Exit: {float(outputs.avg_exit_price):.2f}\n"
+        f"• Slippage: {float(outputs.price_diff_slippage):+.2f}\n"
+        f"• Gebühren: {float(total_commissions):.2f} USD\n"
+        f"• *Netto-PnL:* {float(outputs.net_profit_loss):+.2f} USD ({profit_loss_emoji})"
+    )
+
 
 
 async def get_settlement_lock(trade_group_id: str) -> asyncio.Lock:

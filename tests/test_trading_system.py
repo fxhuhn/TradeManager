@@ -221,6 +221,7 @@ async def test_settlement_vwap_calculation(db):
 async def test_error_code_classification():
     """Error: Klassifiziert TWS Fehler- und Info-Codes."""
     assert classify_error_code(2104) == ErrorClass.INFO
+    assert classify_error_code(399) == ErrorClass.INFO
     assert classify_error_code(1101) == ErrorClass.RECONNECT
     assert classify_error_code(1100) == ErrorClass.RETRIABLE
     assert classify_error_code(202) == ErrorClass.CANCEL
@@ -313,3 +314,137 @@ def test_calculate_settlement_pure():
     assert abs(output.avg_exit_price - Decimal("155.05")) < Decimal("0.001")
     assert abs(output.price_diff_slippage - Decimal("0.02")) < Decimal("0.001")
     assert abs(output.net_profit_loss - Decimal("503.00")) < Decimal("0.01")
+
+
+@pytest.mark.asyncio
+async def test_place_and_verify_order_warning_399(db):
+    """Prüft, dass _place_and_verify_order bei Warnung 399 (ValidationError) Erfolg (True) zurückgibt."""
+    from app.trading.worker import _place_and_verify_order
+
+    # 1. Database setup
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, status
+        ) VALUES (42, NULL, 'G1', 'A1', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 100, 'LMT', 180.0, 'Submitted')
+        """
+    )
+    await db.commit()
+
+    order_row = OrderRow(
+        order_id=42,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="G1",
+        account_id="A1",
+        bracket_role="ENTRY",
+        symbol="AAPL",
+        sec_type="STK",
+        exchange="SMART",
+        action="BUY",
+        quantity=100,
+        order_type="LMT",
+        target_price=Decimal("180.0"),
+        tif="GTC",
+        strategy_name="NDXMomentum",
+        status="Submitted",
+    )
+
+    # 2. Mocking IB / Trade / Log
+    mock_log_entry = MagicMock()
+    mock_log_entry.errorCode = 399
+    mock_log_entry.status = "ValidationError"
+    mock_log_entry.message = "Warning 399: order held"
+
+    mock_trade = MagicMock()
+    mock_trade.orderStatus.status = "ValidationError"
+    mock_trade.log = [mock_log_entry]
+
+    mock_ib = MagicMock()
+    mock_ib.placeOrder.return_value = mock_trade
+
+    mock_notifier = AsyncMock()
+    mock_notifier.send_message = AsyncMock(return_value=True)
+
+    # 3. Call _place_and_verify_order
+    result = await _place_and_verify_order(
+        db=db,
+        interactive_brokers=mock_ib,
+        contract=MagicMock(),
+        ib_order=MagicMock(),
+        order_row=order_row,
+        tws_order_id=42,
+        notifier=mock_notifier,
+    )
+
+    # 4. Assertions
+    assert result is True
+    # Der Status der Order in der DB sollte unverändert bleiben (nicht auf Error gesetzt)
+    async with db.execute("SELECT status FROM orders WHERE order_id = 42") as cursor:
+        row = await cursor.fetchone()
+        assert row["status"] == "Submitted"
+
+
+@pytest.mark.asyncio
+async def test_place_and_verify_order_real_error(db):
+    """Prüft, dass _place_and_verify_order bei einem echten Fehler False zurückgibt und DB-Status auf Error setzt."""
+    from app.trading.worker import _place_and_verify_order
+
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, status
+        ) VALUES (43, NULL, 'G1', 'A1', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 100, 'LMT', 180.0, 'Submitted')
+        """
+    )
+    await db.commit()
+
+    order_row = OrderRow(
+        order_id=43,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="G1",
+        account_id="A1",
+        bracket_role="ENTRY",
+        symbol="AAPL",
+        sec_type="STK",
+        exchange="SMART",
+        action="BUY",
+        quantity=100,
+        order_type="LMT",
+        target_price=Decimal("180.0"),
+        tif="GTC",
+        strategy_name="NDXMomentum",
+        status="Submitted",
+    )
+
+    mock_log_entry = MagicMock()
+    mock_log_entry.errorCode = 201
+    mock_log_entry.status = "ValidationError"
+    mock_log_entry.message = "Order rejected"
+
+    mock_trade = MagicMock()
+    mock_trade.orderStatus.status = "ValidationError"
+    mock_trade.log = [mock_log_entry]
+
+    mock_ib = MagicMock()
+    mock_ib.placeOrder.return_value = mock_trade
+
+    mock_notifier = AsyncMock()
+
+    result = await _place_and_verify_order(
+        db=db,
+        interactive_brokers=mock_ib,
+        contract=MagicMock(),
+        ib_order=MagicMock(),
+        order_row=order_row,
+        tws_order_id=43,
+        notifier=mock_notifier,
+    )
+
+    assert result is False
+    async with db.execute("SELECT status FROM orders WHERE order_id = 43") as cursor:
+        row = await cursor.fetchone()
+        assert row["status"] == "Error"

@@ -28,7 +28,7 @@ def test_config() -> Config:
     app = AppConfig(
         max_retries=3,
         order_rate_limit_s=0.0,
-        dead_order_threshold_min=15,
+        dead_order_threshold_minutes=15,
         alert_watcher_interval_s=60,
         csv_watcher_interval_s=60,
         order_sync_interval_s=1,

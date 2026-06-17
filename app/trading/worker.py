@@ -5,6 +5,8 @@ Verarbeitet Trade-Gruppen asynchron aus einer Queue und sendet
 die entsprechenden ENTRY und Child-Orders (SL, TP, EXIT) an die TWS.
 """
 
+from __future__ import annotations
+
 import asyncio
 from collections.abc import Awaitable, Callable
 from decimal import Decimal
@@ -98,16 +100,22 @@ async def process_trade_group(
 
     is_post_fill: Final[bool] = entry_order.status == "Filled"
 
-    # 1. ENTRY-Order verarbeiten falls status='Created' (Normaler Bracket-Einstieg)
     if entry_order.status == "Created":
         logger.info(
-            "Normaler Einstieg: Verarbeite ENTRY-Order", trade_group_id=trade_group_id
+            "Normaler Einstieg: Verarbeite ENTRY-Order",
+            trade_group_id=trade_group_id,
         )
         await _process_entry_order(
             db, interactive_brokers, entry_order, child_orders, notifier, config
         )
 
-    # 2. Child-Orders verarbeiten (SL, TP, EXIT)
+    if entry_order.status == "Error":
+        logger.warning(
+            "ENTRY-Order fehlgeschlagen. Verarbeite keine Child-Orders.",
+            trade_group_id=trade_group_id,
+        )
+        return
+
     await _process_child_orders(
         db,
         interactive_brokers,
@@ -169,22 +177,7 @@ async def _process_entry_order(
     """Weist dem Entry eine TWS Order-ID zu, aktualisiert die DB und übermittelt an TWS."""
     async with ORDER_ID_LOCK:
         tws_order_id = await _get_next_non_colliding_order_id(db, interactive_brokers)
-
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            await db.execute(
-                "UPDATE orders SET order_id = ?, status = 'Submitted', transmitted_at = datetime('now') WHERE order_id = ?",
-                (tws_order_id, entry_order.order_id),
-            )
-            await db.execute("COMMIT")
-        except Exception as exception:
-            await db.execute("ROLLBACK")
-            logger.error(
-                "Fehler beim Zuweisen der ENTRY order_id",
-                trade_group_id=entry_order.trade_group_id,
-                error=str(exception),
-            )
-            raise exception
+        await _assign_order_id_in_db(db, entry_order.order_id, tws_order_id)
 
     entry_order.order_id = tws_order_id
     entry_order.status = "Submitted"
@@ -192,27 +185,41 @@ async def _process_entry_order(
     contract = make_stock_contract(entry_order.symbol)
     ib_entry_order = build_order(entry_order)
 
-    # Wenn noch ungesendete Kinder existieren, übertragen wir die Order noch nicht vollständig
     has_unsent_children = any(child.status == "Created" for child in child_orders)
     ib_entry_order.transmit = not has_unsent_children
 
     logger.info(
         "Sende ENTRY-Order an TWS", order_id=tws_order_id, symbol=entry_order.symbol
     )
-    interactive_brokers.placeOrder(contract, ib_entry_order)
-
-    price_str = (
-        f" @ {entry_order.target_price:.2f}"
-        if entry_order.target_price and entry_order.target_price > 0
-        else ""
+    success = await _place_and_verify_order(
+        db, interactive_brokers, contract, ib_entry_order, entry_order, tws_order_id, notifier
     )
-    await notifier.send_message(
-        f"📤 ORDER GESENDET: {entry_order.symbol} | {entry_order.bracket_role} | "
-        f"{entry_order.action} {entry_order.quantity}{price_str} ({entry_order.order_type}) | "
-        f"ID: {tws_order_id} ({entry_order.strategy_name})"
-    )
+    if not success:
+        return
 
     await asyncio.sleep(config.app.order_rate_limit_s)
+
+
+async def _assign_order_id_in_db(
+    db: aiosqlite.Connection, original_order_id: int, tws_order_id: int
+) -> None:
+    """Updates order status and order_id in database."""
+    await db.execute("BEGIN IMMEDIATE")
+    try:
+        await db.execute(
+            "UPDATE orders SET order_id = ?, status = 'Submitted', transmitted_at = datetime('now') WHERE order_id = ?",
+            (tws_order_id, original_order_id),
+        )
+        await db.execute("COMMIT")
+    except Exception as exception:
+        await db.execute("ROLLBACK")
+        logger.error(
+            "Fehler beim Zuweisen der order_id in DB",
+            original_id=original_order_id,
+            tws_id=tws_order_id,
+            error=str(exception),
+        )
+        raise exception
 
 
 async def _process_child_orders(
@@ -225,75 +232,156 @@ async def _process_child_orders(
     config: Config,
 ) -> None:
     """Verarbeitet die verbleibenden untergeordneten Orders (SL, TP, EXIT)."""
-    for iteration_index, child in enumerate(child_orders):
-        if child.status != "Created":
-            continue
-
-        logger.info(
-            "Verarbeite Child-Order",
-            bracket_role=child.bracket_role,
-            trade_group_id=child.trade_group_id,
+    created_children = [child for child in child_orders if child.status == "Created"]
+    for iteration_index, child in enumerate(created_children):
+        is_last = iteration_index == len(created_children) - 1
+        await _place_single_child_order(
+            db,
+            interactive_brokers,
+            child,
+            entry_order,
+            is_post_fill,
+            is_last,
+            notifier,
+            config,
         )
 
-        if is_post_fill and child.bracket_role in ("SL", "TP", "EXIT"):
-            should_continue = await _adjust_exit_order_quantity(
-                db, interactive_brokers, child, notifier
-            )
-            if not should_continue:
-                continue
 
-        async with ORDER_ID_LOCK:
-            tws_order_id = await _get_next_non_colliding_order_id(
-                db, interactive_brokers
+async def _place_single_child_order(
+    db: aiosqlite.Connection,
+    interactive_brokers: IB,
+    child: OrderRow,
+    entry_order: OrderRow,
+    is_post_fill: bool,
+    is_last: bool,
+    notifier: TelegramNotifier,
+    config: Config,
+) -> None:
+    """Bereitet eine einzelne untergeordnete Order vor und übermittelt sie an TWS."""
+    logger.info(
+        "Verarbeite Child-Order",
+        bracket_role=child.bracket_role,
+        trade_group_id=child.trade_group_id,
+    )
+
+    if is_post_fill and child.bracket_role in ("SL", "TP", "EXIT"):
+        should_continue = await _adjust_exit_order_quantity(
+            db, interactive_brokers, child, notifier
+        )
+        if not should_continue:
+            return
+
+    async with ORDER_ID_LOCK:
+        tws_order_id = await _get_next_non_colliding_order_id(db, interactive_brokers)
+        await _assign_order_id_in_db(db, child.order_id, tws_order_id)
+
+    child.order_id = tws_order_id
+    child.status = "Submitted"
+
+    contract = make_stock_contract(child.symbol)
+    ib_child_order = build_order(child)
+
+    if not is_post_fill:
+        ib_child_order.parentId = entry_order.order_id
+
+    ib_child_order.transmit = is_last
+
+    logger.info(
+        "Sende Child-Order an TWS",
+        order_id=tws_order_id,
+        role=child.bracket_role,
+    )
+    await _place_and_verify_order(
+        db, interactive_brokers, contract, ib_child_order, child, tws_order_id, notifier
+    )
+
+    await asyncio.sleep(config.app.order_rate_limit_s)
+
+
+async def _place_and_verify_order(
+    db: aiosqlite.Connection,
+    interactive_brokers: IB,
+    contract: object,
+    ib_order: object,
+    order_row: OrderRow,
+    tws_order_id: int,
+    notifier: TelegramNotifier,
+) -> bool:
+    """Sendet die Order und prüft auf Fehler (z. B. Read-Only Modus)."""
+    trade = interactive_brokers.placeOrder(contract, ib_order)
+
+    # Kurz warten, um sofortige Ablehnungen (z.B. ValidationError) zu erkennen
+    for _ in range(20):
+        if trade.orderStatus.status not in ("PendingSubmit", "PendingCancel"):
+            break
+        await asyncio.sleep(0.1)
+
+    if trade.orderStatus.status in ("Inactive", "Cancelled", "ValidationError", "Error"):
+        log_errors = [
+            entry
+            for entry in trade.log
+            if entry.errorCode != 0 or entry.status in ("ValidationError", "Error")
+        ]
+        is_only_warning_399: bool = len(log_errors) > 0 and all(
+            entry.errorCode == 399 for entry in log_errors
+        )
+
+        if is_only_warning_399:
+            logger.info(
+                "Ignoriere Warning 399 (ValidationError/Außerbörslich) bei Orderplatzierung",
+                order_id=tws_order_id,
+                symbol=order_row.symbol,
+            )
+        else:
+            error_msg = "Unbekannter Fehler"
+            for entry in log_errors:
+                if entry.errorCode != 399:
+                    error_msg = entry.message
+                    break
+
+            logger.error(
+                "Order-Uebertragung fehlgeschlagen",
+                order_id=tws_order_id,
+                status=trade.orderStatus.status,
+                symbol=order_row.symbol,
+                error=error_msg,
             )
 
+            order_row.status = "Error"
             await db.execute("BEGIN IMMEDIATE")
             try:
                 await db.execute(
-                    "UPDATE orders SET order_id = ?, status = 'Submitted', transmitted_at = datetime('now') WHERE order_id = ?",
-                    (tws_order_id, child.order_id),
+                    "UPDATE orders SET status = 'Error' WHERE order_id = ?",
+                    (tws_order_id,),
                 )
                 await db.execute("COMMIT")
             except Exception as exception:
                 await db.execute("ROLLBACK")
-                logger.error(
-                    "Fehler beim Zuweisen der Child order_id",
-                    trade_group_id=child.trade_group_id,
-                    error=str(exception),
+                logger.error("Fehler beim DB-Update (Error)", error=str(exception))
+
+            if "Read-Only mode" in error_msg or "321" in error_msg:
+                await notifier.send_message(
+                    f"🚨 IBKR API READ-ONLY MODUS: Order {tws_order_id} ({order_row.symbol}) "
+                    f"wurde abgewiesen! Bitte API-Einstellungen prüfen.\nDetails: {error_msg}"
                 )
-                raise exception
+            else:
+                await notifier.send_message(
+                    f"🚫 ORDER FEHLGESCHLAGEN: {order_row.symbol} | {order_row.bracket_role} | "
+                    f"ID: {tws_order_id}\nStatus: {trade.orderStatus.status}\nGrund: {error_msg}"
+                )
+            return False
 
-        child.order_id = tws_order_id
-        child.status = "Submitted"
-
-        contract = make_stock_contract(child.symbol)
-        ib_child_order = build_order(child)
-
-        if not is_post_fill:
-            ib_child_order.parentId = entry_order.order_id
-
-        is_last = iteration_index == len(child_orders) - 1
-        ib_child_order.transmit = is_last
-
-        logger.info(
-            "Sende Child-Order an TWS",
-            order_id=tws_order_id,
-            role=child.bracket_role,
-        )
-        interactive_brokers.placeOrder(contract, ib_child_order)
-
-        price_str = (
-            f" @ {child.target_price:.2f}"
-            if child.target_price and child.target_price > 0
-            else ""
-        )
-        await notifier.send_message(
-            f"📤 ORDER GESENDET: {child.symbol} | {child.bracket_role} | "
-            f"{child.action} {child.quantity}{price_str} ({child.order_type}) | "
-            f"ID: {tws_order_id} ({child.strategy_name})"
-        )
-
-        await asyncio.sleep(config.app.order_rate_limit_s)
+    price_str = (
+        f" @ {order_row.target_price:.2f}"
+        if order_row.target_price and order_row.target_price > 0
+        else ""
+    )
+    await notifier.send_message(
+        f"📤 ORDER GESENDET: {order_row.symbol} | {order_row.bracket_role} | "
+        f"{order_row.action} {order_row.quantity}{price_str} ({order_row.order_type}) | "
+        f"ID: {tws_order_id} ({order_row.strategy_name})"
+    )
+    return True
 
 
 async def _adjust_exit_order_quantity(
@@ -307,70 +395,95 @@ async def _adjust_exit_order_quantity(
         interactive_brokers, child.account_id, child.symbol
     )
 
-    if child.action == "SELL":
-        available_quantity = max(Decimal("0.0"), live_position)
-    else:
-        available_quantity = max(Decimal("0.0"), -live_position)
+    available_quantity = (
+        max(Decimal("0.0"), live_position)
+        if child.action == "SELL"
+        else max(Decimal("0.0"), -live_position)
+    )
 
     if available_quantity <= Decimal("0.0"):
-        logger.warning(
-            "Keine offene Gegenposition im Depot gefunden. Exit-Order wird storniert.",
-            trade_group_id=child.trade_group_id,
-            symbol=child.symbol,
-            bracket_role=child.bracket_role,
-            live_position=float(live_position),
-        )
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            await db.execute(
-                "UPDATE orders SET status = 'Cancelled' WHERE order_id = ?",
-                (child.order_id,),
-            )
-            await db.execute("COMMIT")
-        except Exception as exception:
-            await db.execute("ROLLBACK")
-            logger.error(
-                "Fehler beim Stornieren der Child-Order in DB",
-                order_id=child.order_id,
-                error=str(exception),
-            )
-
-        await notifier.send_message(
-            f"⚠️ EXIT ABGEBROCHEN ({child.trade_group_id}): Keine offene Position für {child.symbol} "
-            f"vorhanden (Depotbestand: {float(live_position)}). Order wurde storniert."
-        )
+        await _cancel_empty_exit_order(db, child, live_position, notifier)
         return False
 
     intended_quantity = Decimal(str(child.quantity))
     if available_quantity < intended_quantity:
-        logger.info(
-            "Exit-Order Menge an realen Depotbestand angepasst",
-            trade_group_id=child.trade_group_id,
-            old_qty=float(intended_quantity),
-            new_qty=float(available_quantity),
+        await _reduce_exit_order_quantity(
+            db, child, intended_quantity, available_quantity, notifier
         )
-        child.quantity = int(available_quantity)
 
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            await db.execute(
-                "UPDATE orders SET quantity = ? WHERE order_id = ?",
-                (child.quantity, child.order_id),
-            )
-            await db.execute("COMMIT")
-        except Exception as exception:
-            await db.execute("ROLLBACK")
-            logger.error(
-                "Fehler beim Aktualisieren der Child-Order Menge in DB",
-                order_id=child.order_id,
-                error=str(exception),
-            )
-
-        await notifier.send_message(
-            f"⚠️ EXIT MENGE ANGEPASST ({child.trade_group_id}): Stückzahl für {child.symbol} von "
-            f"{float(intended_quantity)} auf {float(available_quantity)} reduziert, um dem realen Depotbestand zu entsprechen."
-        )
     return True
+
+
+async def _cancel_empty_exit_order(
+    db: aiosqlite.Connection,
+    child: OrderRow,
+    live_position: Decimal,
+    notifier: TelegramNotifier,
+) -> None:
+    """Storniert eine Exit-Order bei fehlender Gegenposition im Depot."""
+    logger.warning(
+        "Keine offene Gegenposition im Depot gefunden. Exit-Order wird storniert.",
+        trade_group_id=child.trade_group_id,
+        symbol=child.symbol,
+        bracket_role=child.bracket_role,
+        live_position=float(live_position),
+    )
+    await db.execute("BEGIN IMMEDIATE")
+    try:
+        await db.execute(
+            "UPDATE orders SET status = 'Cancelled' WHERE order_id = ?",
+            (child.order_id,),
+        )
+        await db.execute("COMMIT")
+    except Exception as exception:
+        await db.execute("ROLLBACK")
+        logger.error(
+            "Fehler beim Stornieren der Child-Order in DB",
+            order_id=child.order_id,
+            error=str(exception),
+        )
+
+    await notifier.send_message(
+        f"⚠️ EXIT ABGEBROCHEN ({child.trade_group_id}): Keine offene Position für {child.symbol} "
+        f"vorhanden (Depotbestand: {float(live_position)}). Order wurde storniert."
+    )
+
+
+async def _reduce_exit_order_quantity(
+    db: aiosqlite.Connection,
+    child: OrderRow,
+    intended_quantity: Decimal,
+    available_quantity: Decimal,
+    notifier: TelegramNotifier,
+) -> None:
+    """Reduziert Exit-Menge auf verbleibenden Depotbestand."""
+    logger.info(
+        "Exit-Order Menge an realen Depotbestand angepasst",
+        trade_group_id=child.trade_group_id,
+        old_qty=float(intended_quantity),
+        new_qty=float(available_quantity),
+    )
+    child.quantity = int(available_quantity)
+
+    await db.execute("BEGIN IMMEDIATE")
+    try:
+        await db.execute(
+            "UPDATE orders SET quantity = ? WHERE order_id = ?",
+            (child.quantity, child.order_id),
+        )
+        await db.execute("COMMIT")
+    except Exception as exception:
+        await db.execute("ROLLBACK")
+        logger.error(
+            "Fehler beim Aktualisieren der Child-Order Menge in DB",
+            order_id=child.order_id,
+            error=str(exception),
+        )
+
+    await notifier.send_message(
+        f"⚠️ EXIT MENGE ANGEPASST ({child.trade_group_id}): Stückzahl für {child.symbol} von "
+        f"{float(intended_quantity)} auf {float(available_quantity)} reduziert, um dem realen Depotbestand zu entsprechen."
+    )
 
 
 def _get_live_position_quantity(
