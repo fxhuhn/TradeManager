@@ -501,7 +501,9 @@ async def _upsert_trade_group_legs(
                             leg.action,
                             target_quantity,
                             leg.order_type,
-                            str(leg.target_price) if leg.target_price is not None else None,
+                            str(leg.target_price)
+                            if leg.target_price is not None
+                            else None,
                             leg.tif,
                             leg.strategy_name,
                         ),

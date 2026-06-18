@@ -51,9 +51,7 @@ async def alert_watcher(
             finally:
                 await db.close()
         except Exception as exception:
-            logger.error(
-                "Unexpected error in Alert Watcher loop", error=str(exception)
-            )
+            logger.error("Unexpected error in Alert Watcher loop", error=str(exception))
 
         await asyncio.sleep(interval_seconds)
 
@@ -185,7 +183,9 @@ async def check_high_slippage(
                     slippage_limit = avg_entry_price * Decimal(str(max_slippage_pct))
                     if abs(price_diff_slippage) > slippage_limit:
                         if not state.is_group_reported(trade_group_id):
-                            message_content = f"📉 <b>HIGH SLIPPAGE</b> | <code>{symbol}</code>"
+                            message_content = (
+                                f"📉 <b>HIGH SLIPPAGE</b> | <code>{symbol}</code>"
+                            )
                             logger.warning(
                                 "High slippage detected",
                                 trade_group_id=trade_group_id,

@@ -130,7 +130,9 @@ async def _apply_migration_file(
                 if statement_clean:
                     await db.execute(statement_clean)
 
-            await db.execute("INSERT INTO schema_version (version) VALUES (?)", (version,))
+            await db.execute(
+                "INSERT INTO schema_version (version) VALUES (?)", (version,)
+            )
             logger.info("Migration successfully applied", version=version)
     finally:
         # Fremdschlüssel-Prüfungen wieder aktivieren

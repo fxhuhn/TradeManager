@@ -56,13 +56,16 @@ def _simplify_ibkr_warning(msg: str) -> str:
         return f"IBKR API validation warning: {details} (OrderId: {order_id})"
 
 
-def clean_ib_async_warnings_processor(logger: object, method_name: str, event_dict: dict) -> dict:
+def clean_ib_async_warnings_processor(
+    logger: object, method_name: str, event_dict: dict
+) -> dict:
     """Structlog processor to simplify verbose IBKR wrapper validation warnings."""
     event = event_dict.get("event")
-    if isinstance(event, str) and event.startswith("IBKR API validation warning: Trade("):
+    if isinstance(event, str) and event.startswith(
+        "IBKR API validation warning: Trade("
+    ):
         event_dict["event"] = _simplify_ibkr_warning(event)
     return event_dict
-
 
 
 def configure_logging(

@@ -269,7 +269,9 @@ class TwsCallbacksManager:
                         executed_at,
                     ),
                 )
-            logger.debug("Partial execution idempotently recorded in DB", exec_id=exec_id)
+            logger.debug(
+                "Partial execution idempotently recorded in DB", exec_id=exec_id
+            )
         except Exception as exception:
             logger.error(
                 "Error saving partial execution",
@@ -311,9 +313,7 @@ class TwsCallbacksManager:
                     "UPDATE executions SET commission = ?, currency = ? WHERE exec_id = ?",
                     (str(commission), currency, exec_id),
                 )
-            logger.debug(
-                "Commission for partial execution updated", exec_id=exec_id
-            )
+            logger.debug("Commission for partial execution updated", exec_id=exec_id)
         except Exception as exception:
             logger.error(
                 "Error updating commission",

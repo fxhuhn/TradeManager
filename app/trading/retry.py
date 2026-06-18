@@ -124,7 +124,9 @@ async def _process_retry_backoff(
 
     await asyncio.sleep(backoff_delay)
 
-    logger.info("Re-queueing trade_group_id after backoff", trade_group_id=trade_group_id)
+    logger.info(
+        "Re-queueing trade_group_id after backoff", trade_group_id=trade_group_id
+    )
     await queue.put(trade_group_id)
 
 

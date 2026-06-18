@@ -285,7 +285,9 @@ async def main() -> None:
         sys.exit(1)
 
     # 5. DB-Verbindung öffnen und Migrationen ausführen
-    await _run_database_migrations(root_directory_path, database_path, interactive_brokers)
+    await _run_database_migrations(
+        root_directory_path, database_path, interactive_brokers
+    )
 
     # 6. reqAutoOpenOrders aktivieren
     interactive_brokers.reqAutoOpenOrders(True)
@@ -405,9 +407,7 @@ async def connect_to_tws(interactive_brokers: IB, config: Config) -> bool:
             _enable_socket_keepalive(interactive_brokers)
             return True
         except Exception as exception:
-            logger.warning(
-                "Connection failed", attempt=attempt, error=str(exception)
-            )
+            logger.warning("Connection failed", attempt=attempt, error=str(exception))
             if attempt == max_attempts:
                 break
 
@@ -433,9 +433,7 @@ def _initialize_config_and_logging(root_directory_path: Path) -> Config:
         logger.info("Configuration successfully loaded and logging re-configured")
         return config
     except Exception as exception:
-        logger.critical(
-            "Severe error loading configuration", error=str(exception)
-        )
+        logger.critical("Severe error loading configuration", error=str(exception))
         sys.exit(1)
 
 
@@ -446,9 +444,7 @@ async def _verify_database_integrity(
     database_path = root_directory_path / "data" / "trading.db"
     is_db_ok = await verify_db_integrity(database_path)
     if not is_db_ok:
-        logger.critical(
-            "DB integrity check failed. Terminating for safety."
-        )
+        logger.critical("DB integrity check failed. Terminating for safety.")
         await notifier.send_system_status(
             title="DB-Integritaetspruefung fehlgeschlagen! Anwendung beendet.",
             emoji="🚨",
@@ -483,9 +479,7 @@ def _enable_socket_keepalive(interactive_brokers: IB) -> None:
             if tcp_keepcnt is not None:
                 socket_object.setsockopt(socket.IPPROTO_TCP, tcp_keepcnt, 5)
 
-            logger.info(
-                "TCP keep-alive settings successfully applied to socket"
-            )
+            logger.info("TCP keep-alive settings successfully applied to socket")
     except Exception as exception:
         logger.warning(
             "Error enabling TCP keep-alive on the socket",
