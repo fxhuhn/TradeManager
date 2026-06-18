@@ -94,9 +94,7 @@ async def process_trade_group(
     child_orders = [order for order in orders if order.bracket_role != "ENTRY"]
 
     if not entry_order:
-        logger.error(
-            "No ENTRY order present in group", trade_group_id=trade_group_id
-        )
+        logger.error("No ENTRY order present in group", trade_group_id=trade_group_id)
         return
 
     is_post_fill: Final[bool] = entry_order.status == "Filled"
@@ -330,8 +328,15 @@ async def _place_and_verify_order(
 
     await _wait_for_order_submission(trade)
 
-    if trade.orderStatus.status in ("Inactive", "Cancelled", "ValidationError", "Error"):
-        is_success = await _handle_order_rejection(db, trade, order_row, tws_order_id, notifier)
+    if trade.orderStatus.status in (
+        "Inactive",
+        "Cancelled",
+        "ValidationError",
+        "Error",
+    ):
+        is_success = await _handle_order_rejection(
+            db, trade, order_row, tws_order_id, notifier
+        )
         if not is_success:
             return False
 
