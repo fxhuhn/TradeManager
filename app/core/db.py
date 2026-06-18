@@ -5,6 +5,8 @@ Initialisiert die SQLite-Verbindung im WAL-Modus (Write-Ahead Logging),
 aktiviert Fremdschlüssel-Constraints und führt Schema-Migrationen lexikografisch aus.
 """
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import aiosqlite
@@ -54,12 +56,12 @@ async def verify_db_integrity(db_path: Path = DB_PATH) -> bool:
                     return True
                 else:
                     logger.error(
-                        "DB-Integritaetspruefung fehlgeschlagen",
+                        "DB integrity check failed",
                         result=dict(row) if row else None,
                     )
                     return False
     except Exception as exception:
-        logger.error("Integritaetspruefung verunglueckt", error=str(exception))
+        logger.error("Integrity check failed", error=str(exception))
         return False
 
 
@@ -70,8 +72,7 @@ async def run_migrations(
     Führt alle .sql-Dateien im migrations/-Verzeichnis lexikografisch aus.
     Erfasst angewendete Migrationen in der Tabelle 'schema_version'.
     """
-    await db.execute("BEGIN IMMEDIATE")
-    try:
+    async with transaction(db):
         await db.execute(
             """
             CREATE TABLE IF NOT EXISTS schema_version (
@@ -80,14 +81,10 @@ async def run_migrations(
             );
             """
         )
-        await db.execute("COMMIT")
-    except Exception:
-        await db.execute("ROLLBACK")
-        raise
 
     if not migrations_directory.exists():
         logger.warning(
-            "Migrationsverzeichnis existiert nicht", path=str(migrations_directory)
+            "Migrations directory does not exist", path=str(migrations_directory)
         )
         return
 
@@ -98,13 +95,13 @@ async def run_migrations(
             version_str = sql_file.name.split("_", 1)[0]
             version = int(version_str)
         except ValueError:
-            logger.error("Ungueltiges Migrationsdateiformat", file=sql_file.name)
+            logger.error("Invalid migration file format", file=sql_file.name)
             continue
 
         if await _is_migration_applied(db, version):
             continue
 
-        logger.info("Führe Migration aus", file=sql_file.name, version=version)
+        logger.info("Executing migration", file=sql_file.name, version=version)
         await _apply_migration_file(db, sql_file, version)
 
 
@@ -126,36 +123,36 @@ async def _apply_migration_file(
     # Fremdschlüssel-Prüfungen vorübergehend ausschalten für Tabellen-Rekonstruktion
     await db.execute("PRAGMA foreign_keys = OFF;")
 
-    await db.execute("BEGIN IMMEDIATE")
     try:
-        for statement in sql_script.split(";"):
-            statement_clean = statement.strip()
-            if statement_clean:
-                await db.execute(statement_clean)
+        async with transaction(db):
+            for statement in sql_script.split(";"):
+                statement_clean = statement.strip()
+                if statement_clean:
+                    await db.execute(statement_clean)
 
-        await db.execute("INSERT INTO schema_version (version) VALUES (?)", (version,))
-        await db.execute("COMMIT")
-        logger.info("Migration erfolgreich angewendet", version=version)
-    except Exception as exception:
-        await db.execute("ROLLBACK")
-        logger.error("Fehler bei Migration", version=version, error=str(exception))
-        raise exception
+            await db.execute("INSERT INTO schema_version (version) VALUES (?)", (version,))
+            logger.info("Migration successfully applied", version=version)
     finally:
         # Fremdschlüssel-Prüfungen wieder aktivieren
         await db.execute("PRAGMA foreign_keys = ON;")
 
 
-async def safe_execute_transaction(
-    db: aiosqlite.Connection, sql: str, parameters: tuple = ()
-) -> None:
-    """
-    Hilfsfunktion zur sicheren Ausführung einer einzelnen manipulierenden Anweisung
-    im BEGIN IMMEDIATE Block (erwirbt sofort Write-Lock).
+@asynccontextmanager
+async def transaction(db: aiosqlite.Connection) -> AsyncIterator[aiosqlite.Connection]:
+    """Provides an atomic BEGIN IMMEDIATE / COMMIT / ROLLBACK transaction scope.
+
+    Acquires an immediate write-lock on the SQLite database. All statements
+    executed via the yielded connection are committed on successful exit,
+    or rolled back if an exception propagates.
+
+    Usage:
+        async with transaction(db) as tx:
+            await tx.execute("UPDATE orders SET status = ? WHERE order_id = ?", (...))
     """
     await db.execute("BEGIN IMMEDIATE")
     try:
-        await db.execute(sql, parameters)
+        yield db
         await db.execute("COMMIT")
-    except Exception as exception:
+    except Exception:
         await db.execute("ROLLBACK")
-        raise exception
+        raise

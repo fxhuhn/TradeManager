@@ -35,7 +35,7 @@ async def alert_watcher(
 
     Führt periodisch die Dead-Order-Überprüfung und die Slippage-Kontrolle aus.
     """
-    logger.info("Starte Alert Watcher Hintergrunddienst", interval=interval_seconds)
+    logger.info("Starting Alert Watcher background service", interval=interval_seconds)
     state = AlertState()
 
     while True:
@@ -52,7 +52,7 @@ async def alert_watcher(
                 await db.close()
         except Exception as exception:
             logger.error(
-                "Unerwarteter Fehler im Alert Watcher Loop", error=str(exception)
+                "Unexpected error in Alert Watcher loop", error=str(exception)
             )
 
         await asyncio.sleep(interval_seconds)
@@ -73,7 +73,7 @@ async def order_status_sync_loop(
     Gleicht den lokalen Order-Status periodisch mit der TWS ab (Active State Reconciliation).
     """
     logger.info(
-        "Starte periodischen Order-Zustandsabgleich (Reconciliation)",
+        "Starting periodic order status reconciliation",
         interval=interval_seconds,
     )
 
@@ -96,7 +96,7 @@ async def order_status_sync_loop(
                 await db.close()
         except Exception as exception:
             logger.error(
-                "Unerwarteter Fehler im Order-Status-Sync Loop",
+                "Unexpected error in Order Status Sync loop",
                 error=str(exception),
             )
 
@@ -142,7 +142,7 @@ async def check_dead_orders(
     try:
         rows = await _fetch_submitted_orders(db)
     except Exception as exception:
-        logger.error("Fehler beim Dead-Order-Check", error=str(exception))
+        logger.error("Error during dead order check", error=str(exception))
         return
 
     for row in rows:
@@ -185,9 +185,9 @@ async def check_high_slippage(
                     slippage_limit = avg_entry_price * Decimal(str(max_slippage_pct))
                     if abs(price_diff_slippage) > slippage_limit:
                         if not state.is_group_reported(trade_group_id):
-                            message_content = f"📉 SLIPPAGE: {symbol} | {price_diff_slippage:.4f} | Trade: {trade_group_id}"
+                            message_content = f"📉 <b>HIGH SLIPPAGE</b> | <code>{symbol}</code>"
                             logger.warning(
-                                "Hohe Slippage erkannt",
+                                "High slippage detected",
                                 trade_group_id=trade_group_id,
                                 slippage=float(price_diff_slippage),
                             )
@@ -195,7 +195,7 @@ async def check_high_slippage(
                             if await notifier.send_message(message_content):
                                 state.mark_group_reported(trade_group_id)
     except Exception as exception:
-        logger.error("Fehler beim Slippage-Check", error=str(exception))
+        logger.error("Error during slippage check", error=str(exception))
 
 
 class AlertState:
@@ -263,7 +263,7 @@ async def _process_single_potential_dead_order(
         ).replace(tzinfo=UTC)
     except ValueError as exception:
         logger.error(
-            "Fehler beim Parsen von transmitted_at",
+            "Error parsing transmitted_at",
             order_id=order_id,
             value=transmitted_at_string,
             error=str(exception),
@@ -289,11 +289,9 @@ async def _process_single_potential_dead_order(
     if alert_state.is_order_reported(order_id):
         return
 
-    message_content = (
-        f"⚠️ DEAD ORDER: {trade_group_id} | {symbol} | seit {transmitted_at_string}"
-    )
+    message_content = f"⚠️ <b>DEAD ORDER</b> | <code>{symbol}</code>"
     logger.warning(
-        "Dead Order erkannt",
+        "Dead order detected",
         order_id=order_id,
         trade_group_id=trade_group_id,
     )

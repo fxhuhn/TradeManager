@@ -6,6 +6,7 @@ Order-Statusberichten, Handelsabschlüssen und Fehlermeldungen per Telegram bere
 """
 
 import asyncio
+import re
 import time
 
 import aiohttp
@@ -14,6 +15,11 @@ import structlog
 from app.core.config import Config
 
 logger = structlog.get_logger()
+
+
+def _strip_html(text: str) -> str:
+    """Removes HTML tags from text for logging."""
+    return re.sub(r"<[^>]+>", "", text)
 
 
 class AsyncTelegramRateLimiter:
@@ -52,7 +58,7 @@ class TelegramNotifier:
 
         self.is_active = bool(self.token and self.chat_id and "DUMMY" not in self.token)
         if not self.is_active:
-            logger.warning("Telegram Notifier inaktiv (DUMMY oder leere Konfiguration)")
+            logger.warning("Telegram Notifier inactive (DUMMY or empty configuration)")
 
     async def send_message(self, text: str) -> bool:
         """
@@ -60,7 +66,7 @@ class TelegramNotifier:
         Nutzt aiohttp, damit der Event-Loop nicht blockiert wird.
         """
         if not self.is_active:
-            logger.info("Telegram-Alert (MOCK):", message=text)
+            logger.info("Telegram Alert (MOCK):", message=_strip_html(text))
             return True
 
         # Warte, um Rate-Limits einzuhalten
@@ -82,18 +88,18 @@ class TelegramNotifier:
                     url, json=payload, timeout=request_timeout
                 ) as response:
                     if response.status == 200:
-                        logger.info("Telegram Alert gesendet", message=text)
+                        logger.info("Telegram Alert sent", message=_strip_html(text))
                         return True
                     else:
                         response_text = await response.text()
                         logger.error(
-                            "Telegram-API lieferte Fehler",
+                            "Telegram API returned error",
                             status=response.status,
                             response=response_text,
                         )
                         return False
         except Exception as exception:
-            logger.error("Fehler beim Senden des Telegram-Alerts", error=str(exception))
+            logger.error("Error sending Telegram alert", error=str(exception))
             return False
 
     async def send_system_status(self, title: str, emoji: str = "🚀") -> bool:
@@ -116,16 +122,7 @@ class TelegramNotifier:
         strategy_name: str,
     ) -> bool:
         """Sendet eine Erfolgsmeldung für eine gefüllte Order."""
-        total_val = float(quantity) * float(price) if price else 0.0
-        price_str = f"{float(price):.2f}" if price else "MKT"
-
-        message = (
-            f"🟢 <b>ORDER GEFÜLLT</b> | <code>{symbol}</code>\n"
-            f"├─ <b>Typ:</b> <code>{bracket_role}</code> ({action})\n"
-            f"├─ <b>Menge:</b> <code>{quantity}</code> @ <code>{price_str}</code> ({order_type})\n"
-            f"├─ <b>Wert:</b> <code>$ {total_val:,.2f}</code>\n"
-            f"└─ <b>System:</b> ID: <code>{order_id}</code> • <i>{strategy_name}</i>"
-        )
+        message = f"🟢 <b>ORDER FILLED</b> | <code>{symbol}</code> ({bracket_role})"
         return await self.send_message(message)
 
     async def send_order_failed(
@@ -139,14 +136,8 @@ class TelegramNotifier:
     ) -> bool:
         """Sendet eine Fehler/Warnmeldung für eine fehlgeschlagene oder stornierte Order."""
         emoji = "🚨" if is_fatal else "🚫"
-        title = "ORDER FEHLGESCHLAGEN" if is_fatal else "ORDER CANCELED"
-
-        message = (
-            f"{emoji} <b>{title}</b> | <code>ID: {order_id}</code>\n"
-            f"├─ <b>Symbol/Typ:</b> <code>{symbol}</code> ({bracket_role})\n"
-            f"├─ <b>TWS-Code:</b> <code>{tws_code}</code>\n"
-            f"└─ <b>Grund:</b> <i>{reason}</i>"
-        )
+        title = "ORDER FAILED" if is_fatal else "ORDER CANCELED"
+        message = f"{emoji} <b>{title}</b> | <code>{symbol}</code> ({bracket_role})"
         return await self.send_message(message)
 
     async def send_importer_info(
@@ -158,11 +149,7 @@ class TelegramNotifier:
         title: str = "DATEN IMPORT",
     ) -> bool:
         """Sendet eine Info-Meldung über importierte Daten oder Validierungsfehler."""
-        message = (
-            f"{emoji} <b>{title}</b> | <code>{file_name}</code>\n"
-            f"├─ <b>Status:</b> <code>{status}</code>\n"
-            f"└─ <b>Details:</b> <i>{details}</i>"
-        )
+        message = f"{emoji} <b>{title}</b> | <code>{file_name}</code> ({status})"
         return await self.send_message(message)
 
     async def send_bracket_order_submitted(
@@ -176,24 +163,9 @@ class TelegramNotifier:
             return False
 
         if len(orders) == 1:
-            title = "ORDER GESENDET"
+            title = "ORDER SUBMITTED"
         else:
-            title = "BRACKET ORDER GESENDET"
+            title = "BRACKET ORDER SUBMITTED"
 
-        lines = [f"📤 <b>{title}</b> | <code>{symbol}</code>"]
-
-        for order in orders:
-            price_str = f"{float(order['price']):.2f}" if order.get("price") else "MKT"
-            lines.append(
-                f"├─ <b>{order['role']}:</b> <code>{order['action']} {order['quantity']}</code> @ <code>{price_str}</code> ({order['order_type']})"
-            )
-
-        if trade_group_id:
-            lines.append(
-                f"└─ <b>System:</b> Group: <code>{trade_group_id}</code> • <i>{strategy_name}</i>"
-            )
-        else:
-            lines.append(f"└─ <b>System:</b> <i>{strategy_name}</i>")
-
-        message = "\n".join(lines)
+        message = f"📤 <b>{title}</b> | <code>{symbol}</code>"
         return await self.send_message(message)

@@ -108,6 +108,7 @@ async def test_process_trade_group_exit_cancelled_if_no_position(
 
     mock_notifier = MagicMock()
     mock_notifier.send_importer_info = AsyncMock()
+    mock_notifier.send_message = AsyncMock()
 
     # 3. Execution ausführen
     await process_trade_group(db, mock_ib, "TG_NO_POS", mock_notifier, test_config)
@@ -162,6 +163,7 @@ async def test_process_trade_group_exit_quantity_reduced(
     mock_notifier = MagicMock()
     mock_notifier.send_importer_info = AsyncMock()
     mock_notifier.send_bracket_order_submitted = AsyncMock()
+    mock_notifier.send_message = AsyncMock()
 
     # 3. Execution ausführen
     await process_trade_group(db, mock_ib, "TG_RED_POS", mock_notifier, test_config)

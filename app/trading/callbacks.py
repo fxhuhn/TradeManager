@@ -16,6 +16,7 @@ import structlog
 from ib_async import IB, CommissionReport, Fill, Trade
 
 from app.core.config import Config
+from app.core.db import transaction
 from app.services.notifier import TelegramNotifier
 from app.trading.error_codes import ErrorClass, classify_error_code
 
@@ -58,7 +59,7 @@ class TwsCallbacksManager:
         )
         self.interactive_brokers.errorEvent.connect(self.on_error)
         self.interactive_brokers.disconnectedEvent.connect(self.on_disconnected)
-        logger.info("Alle asynchronen TWS-Callbacks erfolgreich registriert")
+        logger.info("All async TWS callbacks successfully registered")
 
     def _get_order_lock(self, order_id: int) -> asyncio.Lock:
         """Gibt das Lock für eine spezifische Order ID zurück (erstellt es bei Bedarf)."""
@@ -71,58 +72,54 @@ class TwsCallbacksManager:
     ) -> None:
         """Schreibt das Status-Update atomar in die Datenbank."""
         db = await self.db_factory()
-        await db.execute("BEGIN IMMEDIATE")
         try:
-            # Aktuellen Status abfragen, um ungültige Zustandsübergänge zu verhindern
-            async with db.execute(
-                "SELECT status FROM orders WHERE order_id = ?", (order_id,)
-            ) as cursor:
-                row = await cursor.fetchone()
+            async with transaction(db):
+                # Aktuellen Status abfragen, um ungültige Zustandsübergänge zu verhindern
+                async with db.execute(
+                    "SELECT status FROM orders WHERE order_id = ?", (order_id,)
+                ) as cursor:
+                    row = await cursor.fetchone()
 
-            if row:
-                current_status = row["status"]
+                if row:
+                    current_status = row["status"]
 
-                # Terminale Zustände dürfen nicht überschrieben werden
-                if current_status in ("Filled", "Cancelled"):
-                    logger.debug(
-                        "Ignoriere Status-Update für Order in terminalem Zustand",
-                        order_id=order_id,
-                        current_status=current_status,
-                        new_status=status,
-                    )
-                    await db.execute("COMMIT")
-                    return
-
-                # Ein Fehler-Status (z. B. durch ValidationError-Warnung) darf einen aktiven Zustand nicht überschreiben
-                if status == "Error" and current_status in (
-                    "PreSubmitted",
-                    "Submitted",
-                ):
-                    logger.info(
-                        "Ignoriere Error-Status-Update für aktive Order (vermutlich Warnung/ValidationError)",
-                        order_id=order_id,
-                        current_status=current_status,
-                    )
-                    if perm_id:
-                        await db.execute(
-                            "UPDATE orders SET perm_id = ? WHERE order_id = ?",
-                            (perm_id, order_id),
+                    # Terminale Zustände dürfen nicht überschrieben werden
+                    if current_status in ("Filled", "Cancelled"):
+                        logger.debug(
+                            "Ignoring status update for order in terminal state",
+                            order_id=order_id,
+                            current_status=current_status,
+                            new_status=status,
                         )
-                    await db.execute("COMMIT")
-                    return
+                        return
 
-            await db.execute(
-                "UPDATE orders SET status = ?, perm_id = ? WHERE order_id = ?",
-                (status, perm_id, order_id),
-            )
-            await db.execute("COMMIT")
-            logger.debug(
-                "Order-Zustand in DB aktualisiert", order_id=order_id, status=status
-            )
+                    # Ein Fehler-Status darf einen aktiven Zustand nicht überschreiben
+                    if status == "Error" and current_status in (
+                        "PreSubmitted",
+                        "Submitted",
+                    ):
+                        logger.info(
+                            "Ignoring error status update for active order (likely warning/ValidationError)",
+                            order_id=order_id,
+                            current_status=current_status,
+                        )
+                        if perm_id:
+                            await db.execute(
+                                "UPDATE orders SET perm_id = ? WHERE order_id = ?",
+                                (perm_id, order_id),
+                            )
+                        return
+
+                await db.execute(
+                    "UPDATE orders SET status = ?, perm_id = ? WHERE order_id = ?",
+                    (status, perm_id, order_id),
+                )
+                logger.debug(
+                    "Order status updated in database", order_id=order_id, status=status
+                )
         except Exception as exception:
-            await db.execute("ROLLBACK")
             logger.error(
-                "Fehler beim DB-Update des Order-Status",
+                "Error updating order status in database",
                 order_id=order_id,
                 error=str(exception),
             )
@@ -150,7 +147,7 @@ class TwsCallbacksManager:
             mapped_status = "Error"
 
         logger.info(
-            "orderStatusEvent empfangen",
+            "orderStatusEvent received",
             order_id=order_id,
             tws_status=status,
             mapped_status=mapped_status,
@@ -192,8 +189,8 @@ class TwsCallbacksManager:
                 symbol=order_row["symbol"],
                 bracket_role=order_row["bracket_role"],
                 action=order_row["action"],
-                quantity=float(order_row["quantity"]),
-                price=float(target_price_decimal) if target_price_decimal else 0.0,
+                quantity=Decimal(str(order_row["quantity"])),
+                price=target_price_decimal,
                 order_type=order_row["order_type"],
                 order_id=order_id,
                 strategy_name=order_row["strategy_name"],
@@ -205,7 +202,7 @@ class TwsCallbacksManager:
 
             if bracket_role in ("SL", "TP", "EXIT"):
                 logger.info(
-                    "Exit-Order gefüllt! Settlement wird ausgelöst.",
+                    "Exit order filled. Triggering settlement.",
                     order_id=order_id,
                     trade_group_id=trade_group_id,
                 )
@@ -214,7 +211,7 @@ class TwsCallbacksManager:
                 )
         except Exception as exception:
             logger.error(
-                "Fehler bei Exit-Pruefung im Status-Callback",
+                "Error during exit check in status callback",
                 error=str(exception),
             )
         finally:
@@ -234,7 +231,7 @@ class TwsCallbacksManager:
         executed_at = fill.execution.time
 
         logger.info(
-            "execDetailsEvent empfangen (Teilausfuehrung)",
+            "execDetailsEvent received (partial execution)",
             exec_id=exec_id,
             order_id=order_id,
             price=price,
@@ -256,28 +253,26 @@ class TwsCallbacksManager:
     ) -> None:
         """Speichert ein Ausführungsdetail in der executions-Tabelle."""
         db = await self.db_factory()
-        await db.execute("BEGIN IMMEDIATE")
         try:
-            await db.execute(
-                """
-                INSERT OR IGNORE INTO executions (exec_id, order_id, price, qty, currency, executed_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    exec_id,
-                    order_id,
-                    str(price),
-                    str(qty),
-                    currency,
-                    executed_at,
-                ),
-            )
-            await db.execute("COMMIT")
-            logger.debug("Teilausfuehrung idempotent in DB verbucht", exec_id=exec_id)
+            async with transaction(db):
+                await db.execute(
+                    """
+                    INSERT OR IGNORE INTO executions (exec_id, order_id, price, qty, currency, executed_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        exec_id,
+                        order_id,
+                        str(price),
+                        str(qty),
+                        currency,
+                        executed_at,
+                    ),
+                )
+            logger.debug("Partial execution idempotently recorded in DB", exec_id=exec_id)
         except Exception as exception:
-            await db.execute("ROLLBACK")
             logger.error(
-                "Fehler beim Speichern der Teilausfuehrung",
+                "Error saving partial execution",
                 exec_id=exec_id,
                 error=str(exception),
             )
@@ -297,7 +292,7 @@ class TwsCallbacksManager:
         currency = commission_report.currency
 
         logger.info(
-            "commissionReportEvent empfangen",
+            "commissionReportEvent received",
             exec_id=exec_id,
             commission=commission,
             currency=currency,
@@ -310,20 +305,18 @@ class TwsCallbacksManager:
     ) -> None:
         """Aktualisiert die Kommission einer Ausführung in der executions-Tabelle."""
         db = await self.db_factory()
-        await db.execute("BEGIN IMMEDIATE")
         try:
-            await db.execute(
-                "UPDATE executions SET commission = ?, currency = ? WHERE exec_id = ?",
-                (str(commission), currency, exec_id),
-            )
-            await db.execute("COMMIT")
+            async with transaction(db):
+                await db.execute(
+                    "UPDATE executions SET commission = ?, currency = ? WHERE exec_id = ?",
+                    (str(commission), currency, exec_id),
+                )
             logger.debug(
-                "Kommission fuer Teilausfuehrung aktualisiert", exec_id=exec_id
+                "Commission for partial execution updated", exec_id=exec_id
             )
         except Exception as exception:
-            await db.execute("ROLLBACK")
             logger.error(
-                "Fehler beim Aktualisieren der Kommission",
+                "Error updating commission",
                 exec_id=exec_id,
                 error=str(exception),
             )
@@ -338,17 +331,17 @@ class TwsCallbacksManager:
         """
         if request_id == -1 and error_code in (2104, 2106, 2158, 2100):
             logger.debug(
-                "TWS System-Info empfangen", code=error_code, message=error_string
+                "TWS system info received", code=error_code, message=error_string
             )
             return
 
         error_class = classify_error_code(error_code)
         logger.warning(
-            "TWS-Fehlermeldung empfangen",
+            "TWS error message received",
             request_id=request_id,
             code=error_code,
             message=error_string,
-            klassifizierung=error_class.name,
+            classification=error_class.name,
         )
 
         asyncio.create_task(
@@ -367,7 +360,7 @@ class TwsCallbacksManager:
             return
 
         if error_class == ErrorClass.RECONNECT:
-            logger.info("Reconnect signalisiert. Trigger Recovery-Lauf.")
+            logger.info("Reconnect signaled. Triggering recovery run.")
             asyncio.create_task(self.run_recovery_callback())
             return
 
@@ -388,17 +381,15 @@ class TwsCallbacksManager:
     ) -> None:
         """Kennzeichnet Order in DB als storniert und benachrichtigt via Telegram."""
         db = await self.db_factory()
-        await db.execute("BEGIN IMMEDIATE")
         try:
-            await db.execute(
-                "UPDATE orders SET status = 'Cancelled' WHERE order_id = ?",
-                (request_id,),
-            )
-            await db.execute("COMMIT")
+            async with transaction(db):
+                await db.execute(
+                    "UPDATE orders SET status = 'Cancelled' WHERE order_id = ?",
+                    (request_id,),
+                )
         except Exception as exception:
-            await db.execute("ROLLBACK")
             logger.error(
-                "Fehler bei Cancel-Order DB-Update",
+                "Error updating DB for cancelled order",
                 order_id=request_id,
                 error=str(exception),
             )
@@ -418,17 +409,15 @@ class TwsCallbacksManager:
     ) -> None:
         """Kennzeichnet Order in DB als fehlerhaft und benachrichtigt via Telegram."""
         db = await self.db_factory()
-        await db.execute("BEGIN IMMEDIATE")
         try:
-            await db.execute(
-                "UPDATE orders SET status = 'Error' WHERE order_id = ?",
-                (request_id,),
-            )
-            await db.execute("COMMIT")
+            async with transaction(db):
+                await db.execute(
+                    "UPDATE orders SET status = 'Error' WHERE order_id = ?",
+                    (request_id,),
+                )
         except Exception as exception:
-            await db.execute("ROLLBACK")
             logger.error(
-                "Fehler bei Fatal-Order DB-Update",
+                "Error updating DB for fatal order",
                 order_id=request_id,
                 error=str(exception),
             )
@@ -445,7 +434,7 @@ class TwsCallbacksManager:
 
     def on_disconnected(self) -> None:
         """Loggt Verbindungsverlust zu TWS und alarmiert den Betreiber."""
-        logger.error("Verbindung zur Interactive Brokers TWS wurde getrennt!")
+        logger.error("Connection to Interactive Brokers TWS lost!")
         asyncio.create_task(
             self.notifier.send_system_status(
                 title="VERBINDUNGSABBRUCH",

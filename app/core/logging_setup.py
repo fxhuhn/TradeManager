@@ -1,9 +1,68 @@
 import logging
+import re
 import sys
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
 import structlog
+
+
+def _simplify_ibkr_warning(msg: str) -> str:
+    """Extracts key details from a long raw Trade representation in IBKR warning."""
+    if not msg.startswith("IBKR API validation warning: Trade("):
+        return msg
+
+    # Extract symbol
+    symbol_match = re.search(r"symbol='([^']+)'", msg)
+    symbol = symbol_match.group(1) if symbol_match else "UNKNOWN"
+
+    # Extract orderId
+    order_id_match = re.search(r"orderId=(\d+)", msg)
+    order_id = order_id_match.group(1) if order_id_match else "UNKNOWN"
+
+    # Extract action
+    action_match = re.search(r"action='([^']+)'", msg)
+    action = action_match.group(1) if action_match else "UNKNOWN"
+
+    # Extract quantity
+    qty_match = re.search(r"totalQuantity=([\d.]+)", msg)
+    qty = qty_match.group(1) if qty_match else "UNKNOWN"
+
+    # Extract order type
+    order_type_match = re.search(r"orderType='([^']+)'", msg)
+    order_type = order_type_match.group(1) if order_type_match else "UNKNOWN"
+
+    # Extract price (lmtPrice)
+    price_match = re.search(r"lmtPrice=([\d.]+)", msg)
+    price = price_match.group(1) if price_match else "UNKNOWN"
+
+    # Extract warning/error message from TradeLogEntry
+    messages = re.findall(r"message='([^']*)'", msg)
+    warning_msg = ""
+    for m in reversed(messages):
+        if m.strip():
+            warning_msg = m
+            break
+
+    if not warning_msg:
+        why_held_match = re.search(r"whyHeld='([^']*)'", msg)
+        if why_held_match and why_held_match.group(1):
+            warning_msg = f"Held: {why_held_match.group(1)}"
+
+    details = f"{action} {qty} {symbol} ({order_type} @ {price})"
+    if warning_msg:
+        return f"IBKR API validation warning: {details} -> {warning_msg} (OrderId: {order_id})"
+    else:
+        return f"IBKR API validation warning: {details} (OrderId: {order_id})"
+
+
+def clean_ib_async_warnings_processor(logger: object, method_name: str, event_dict: dict) -> dict:
+    """Structlog processor to simplify verbose IBKR wrapper validation warnings."""
+    event = event_dict.get("event")
+    if isinstance(event, str) and event.startswith("IBKR API validation warning: Trade("):
+        event_dict["event"] = _simplify_ibkr_warning(event)
+    return event_dict
+
 
 
 def configure_logging(
@@ -49,6 +108,7 @@ def configure_logging(
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
         structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S.%f", utc=False),
+        clean_ib_async_warnings_processor,
     ]
 
     # 5. Structlog so konfigurieren, dass es an das Standard-logging weiterleitet

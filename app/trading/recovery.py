@@ -16,6 +16,7 @@ import structlog
 from ib_async import IB
 
 from app.core.config import Config
+from app.core.db import transaction
 from app.core.models import OrderRow, order_row_from_db_row
 from app.services.notifier import TelegramNotifier
 
@@ -36,7 +37,7 @@ async def run_recovery(
     Gleicht ausstehende lokale Orders mit der TWS ab und veranlasst bei Bedarf
     ein Re-queue oder Settlement.
     """
-    logger.info("Starte Recovery-Phase")
+    logger.info("Starting recovery phase")
 
     await fetch_active_orders(interactive_brokers_session, config.tws.request_timeout_s)
     await fetch_completed_orders(
@@ -53,7 +54,7 @@ async def run_recovery(
     }
 
     local_orders = await _load_local_pending_orders(database_connection)
-    logger.info("Offene lokale Orders geladen", count=len(local_orders))
+    logger.info("Pending local orders loaded", count=len(local_orders))
 
     groups_to_requeue = await _reconcile_orders(
         database_connection=database_connection,
@@ -67,12 +68,12 @@ async def run_recovery(
 
     for trade_group_id in groups_to_requeue:
         logger.info(
-            "Re-queue trade_group_id nach Recovery",
+            "Re-queueing trade_group_id after recovery",
             trade_group_id=trade_group_id,
         )
         await queue.put(trade_group_id)
 
-    logger.info("Recovery-Phase abgeschlossen")
+    logger.info("Recovery phase completed")
 
 
 async def fetch_active_orders(interactive_brokers: IB, timeout_seconds: float) -> None:
@@ -82,7 +83,7 @@ async def fetch_active_orders(interactive_brokers: IB, timeout_seconds: float) -
             interactive_brokers.reqOpenOrdersAsync(), timeout=timeout_seconds
         )
     except TimeoutError:
-        logger.warning("Timeout beim Warten auf active orders von TWS")
+        logger.warning("Timeout waiting for active orders from TWS")
 
 
 async def fetch_completed_orders(
@@ -95,7 +96,7 @@ async def fetch_completed_orders(
             timeout=timeout_seconds,
         )
     except TimeoutError:
-        logger.warning("Timeout beim Abrufen der completed orders von TWS")
+        logger.warning("Timeout retrieving completed orders from TWS")
 
 
 async def _load_local_pending_orders(
@@ -177,37 +178,28 @@ async def _recover_submitted_order(
             return
 
         logger.info(
-            f"Recovery Szenario 1: Order aktiv in TWS. Aktualisiere perm_id und Status auf {mapped_status}.",
+            "Recovery scenario 1: Order active in TWS. Updating perm_id and status.",
             order_id=order_id,
             perm_id=perm_id,
+            mapped_status=mapped_status,
         )
-        await database_connection.execute("BEGIN IMMEDIATE")
-        try:
+        async with transaction(database_connection):
             await database_connection.execute(
                 "UPDATE orders SET perm_id = ?, status = ? WHERE order_id = ?",
                 (perm_id, mapped_status, order_id),
             )
-            await database_connection.execute("COMMIT")
-        except Exception:
-            await database_connection.execute("ROLLBACK")
-            raise
         return
 
     if tws_completed and tws_completed.orderStatus.status == "Filled":
         logger.info(
-            "Recovery Szenario 2: Order in TWS gefüllt während Downtime. Stoße Settlement an.",
+            "Recovery scenario 2: Order filled in TWS during downtime. Triggering settlement.",
             order_id=order_id,
         )
-        await database_connection.execute("BEGIN IMMEDIATE")
-        try:
+        async with transaction(database_connection):
             await database_connection.execute(
                 "UPDATE orders SET status = 'Filled' WHERE order_id = ?",
                 (order_id,),
             )
-            await database_connection.execute("COMMIT")
-        except Exception:
-            await database_connection.execute("ROLLBACK")
-            raise
 
         await _save_missing_executions(
             database_connection, order, interactive_brokers_session
@@ -230,20 +222,15 @@ async def _recover_submitted_order(
 
         if has_active_child or has_position:
             logger.info(
-                "Recovery Szenario 2b: Entry-Order wurde gefüllt (Aktive Position oder Child-Order gefunden). Setze auf Filled.",
+                "Recovery scenario 2b: Entry order filled (active position or child order found). Setting to Filled.",
                 order_id=order_id,
                 symbol=order.symbol,
             )
-            await database_connection.execute("BEGIN IMMEDIATE")
-            try:
+            async with transaction(database_connection):
                 await database_connection.execute(
                     "UPDATE orders SET status = 'Filled' WHERE order_id = ?",
                     (order_id,),
                 )
-                await database_connection.execute("COMMIT")
-            except Exception:
-                await database_connection.execute("ROLLBACK")
-                raise
 
             # Fehlende Ausführungen sichern
             await _save_missing_executions(
@@ -253,22 +240,16 @@ async def _recover_submitted_order(
 
     # Recovery Szenario 3: Ghost Order
     logger.warning(
-        "Recovery Szenario 3: Ghost Order erkannt (Submitted in DB, nicht in TWS). Abbrechen.",
+        "Recovery scenario 3: Ghost Order detected (Submitted in DB, not in TWS). Cancelling.",
         order_id=order_id,
     )
-    await database_connection.execute("BEGIN IMMEDIATE")
-    try:
+    async with transaction(database_connection):
         await database_connection.execute(
             "UPDATE orders SET status = 'Cancelled' WHERE order_id = ?",
             (order_id,),
         )
-        await database_connection.execute("COMMIT")
-    except Exception:
-        await database_connection.execute("ROLLBACK")
-        raise
     await notifier.send_message(
-        f"⚠️ GHOST ORDER RECOVERED: Order {order_id} ({order.symbol} {order.bracket_role}) "
-        f"stand auf 'Submitted', existiert aber nicht in TWS. Status wurde auf 'Cancelled' gesetzt."
+        f"⚠️ <b>GHOST ORDER RECOVERED</b> | <code>{order.symbol}</code> ({order.bracket_role})"
     )
 
 
@@ -286,24 +267,20 @@ async def _recover_created_order(
         mapped_status = "PreSubmitted" if tws_status == "PreSubmitted" else "Submitted"
 
         logger.info(
-            f"Recovery Szenario 4: Mid-Crash erkannt (Created in DB, aktiv in TWS). Setze auf {mapped_status}.",
+            "Recovery scenario 4: Mid-crash detected (Created in DB, active in TWS).",
             order_id=order_id,
             perm_id=perm_id,
+            mapped_status=mapped_status,
         )
-        await database_connection.execute("BEGIN IMMEDIATE")
-        try:
+        async with transaction(database_connection):
             await database_connection.execute(
                 "UPDATE orders SET status = ?, perm_id = ? WHERE order_id = ?",
                 (mapped_status, perm_id, order_id),
             )
-            await database_connection.execute("COMMIT")
-        except Exception:
-            await database_connection.execute("ROLLBACK")
-            raise
 
     else:
         logger.info(
-            "Recovery Szenario 5: Order nie gesendet. Trade-Gruppe wird neu eingereiht.",
+            "Recovery scenario 5: Order never sent. Re-queueing trade group.",
             order_id=order_id,
             trade_group_id=order.trade_group_id,
         )
@@ -346,59 +323,55 @@ async def _save_missing_executions(
             if hasattr(fill, "commissionReport") and fill.commissionReport:
                 commission = Decimal(str(fill.commissionReport.commission))
 
-            await database_connection.execute("BEGIN IMMEDIATE")
             try:
-                await database_connection.execute(
-                    """
-                    INSERT OR IGNORE INTO executions (exec_id, order_id, price, qty, commission, currency, executed_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        exec_id,
-                        order_id,
-                        str(price),
-                        str(qty),
-                        str(commission),
-                        currency,
-                        executed_at,
-                    ),
-                )
-                await database_connection.execute("COMMIT")
+                async with transaction(database_connection):
+                    await database_connection.execute(
+                        """
+                        INSERT OR IGNORE INTO executions (exec_id, order_id, price, qty, commission, currency, executed_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            exec_id,
+                            order_id,
+                            str(price),
+                            str(qty),
+                            str(commission),
+                            currency,
+                            executed_at,
+                        ),
+                    )
             except Exception as exception:
-                await database_connection.execute("ROLLBACK")
                 logger.error(
-                    "Fehler beim Speichern der nachgetragenen Ausfuehrung",
+                    "Error saving late execution detail",
                     exec_id=exec_id,
                     error=str(exception),
                 )
     else:
         # Fallback-Ausführung anlegen, um PnL-Berechnung im Settlement abzusichern
         logger.warning(
-            "Keine TWS-Ausfuehrungsdetails fuer rekonstruierte Order gefunden. Verwende Fallback.",
+            "No TWS execution details found for reconstructed order. Using fallback.",
             order_id=order_id,
         )
         fallback_exec_id = f"RECOVERED_{order_id}"
-        await database_connection.execute("BEGIN IMMEDIATE")
         try:
-            await database_connection.execute(
-                """
-                INSERT OR IGNORE INTO executions (exec_id, order_id, price, qty, commission, currency, executed_at)
-                VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-                """,
-                (
-                    fallback_exec_id,
-                    order_id,
-                    str(order.target_price or Decimal("0.0")),
-                    str(order.quantity),
-                    "0.0",
-                    "USD",
-                ),
-            )
-            await database_connection.execute("COMMIT")
+            async with transaction(database_connection):
+                await database_connection.execute(
+                    """
+                    INSERT OR IGNORE INTO executions (exec_id, order_id, price, qty, commission, currency, executed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                    """,
+                    (
+                        fallback_exec_id,
+                        order_id,
+                        str(order.target_price or Decimal("0.0")),
+                        str(order.quantity),
+                        "0.0",
+                        "USD",
+                    ),
+                )
         except Exception as exception:
-            await database_connection.execute("ROLLBACK")
             logger.error(
-                "Fehler beim Speichern der Fallback-Ausfuehrung",
+                "Error saving fallback execution",
                 order_id=order_id,
                 error=str(exception),
             )

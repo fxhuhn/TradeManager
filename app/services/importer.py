@@ -7,6 +7,7 @@ speichert die Orders in der Datenbank und reiht sie in die Execution Queue ein.
 """
 
 import asyncio
+import dataclasses
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -18,6 +19,8 @@ import structlog
 from ib_async import IB
 
 from app.core.config import Config
+from app.core.db import transaction
+from app.core.models import LegRow
 from app.services.csv_reader import load_csv, validate_group
 from app.services.notifier import TelegramNotifier
 
@@ -50,7 +53,7 @@ async def csv_directory_watcher(
     Fehlerhafte Dateien werden in '.csv.err' umbenannt.
     """
     logger.info(
-        "Starte CSV Directory Watcher Hintergrunddienst",
+        "Starting CSV Directory Watcher background service",
         directory=str(directory_path),
         interval=interval_seconds,
     )
@@ -71,10 +74,10 @@ async def csv_directory_watcher(
                             config,
                         )
         except asyncio.CancelledError:
-            logger.info("CSV Directory Watcher wurde abgebrochen.")
+            logger.info("CSV Directory Watcher was cancelled.")
             raise
         except Exception as exception:
-            logger.error("Fehler im CSV Directory Watcher Loop", error=str(exception))
+            logger.error("Error in CSV Directory Watcher loop", error=str(exception))
 
         await asyncio.sleep(interval_seconds)
 
@@ -93,7 +96,7 @@ async def run_csv_import(
     Führt Sicherheitsprüfungen durch, lädt die CSV-Daten, berechnet das
     Downscaling und speichert die validierten Trade-Gruppen in der Datenbank.
     """
-    logger.info("Starte CSV-Import", file=str(csv_path))
+    logger.info("Starting CSV import", file=str(csv_path))
 
     # 1. DoS Ressourcenschutz-Check
     if not await _check_csv_dos_limits(csv_path, config, notifier):
@@ -102,7 +105,7 @@ async def run_csv_import(
     # 2. CSV laden und gruppieren
     grouped_legs = load_csv(csv_path)
     if not grouped_legs:
-        logger.info("Keine Trade-Gruppen zum Importieren gefunden")
+        logger.info("No trade groups found for import")
         return
 
     # 3. Gruppen einzeln validieren, sizing anpassen und in DB verbuchen
@@ -127,7 +130,7 @@ async def _process_daily_csv_file(
     config: Config,
 ) -> None:
     """Verarbeitet eine einzelne gefundene CSV-Datei und benennt sie anschließend um."""
-    logger.info("Neue Order-Datei erkannt", file=csv_file.name)
+    logger.info("New order file detected", file=csv_file.name)
 
     database_connection = await db_factory()
     try:
@@ -141,7 +144,7 @@ async def _process_daily_csv_file(
         csv_file.rename(backup_path)
 
         logger.info(
-            "Order-Datei erfolgreich verarbeitet und umbenannt",
+            "Order file successfully processed and renamed",
             file=csv_file.name,
             backup=backup_path.name,
         )
@@ -155,7 +158,7 @@ async def _process_daily_csv_file(
 
     except Exception as exception:
         logger.error(
-            "Fehler bei der Verarbeitung der Order-Datei",
+            "Error processing order file",
             file=csv_file.name,
             error=str(exception),
         )
@@ -166,7 +169,7 @@ async def _process_daily_csv_file(
         try:
             csv_file.rename(error_path)
             logger.warning(
-                "Fehlerhafte Order-Datei umbenannt",
+                "Failed order file renamed",
                 file=csv_file.name,
                 error_file=error_path.name,
             )
@@ -179,7 +182,7 @@ async def _process_daily_csv_file(
             )
         except Exception as rename_exception:
             logger.critical(
-                "Kritischer Fehler beim Umbenennen einer fehlerhaften Datei",
+                "Critical error renaming failed file",
                 file=csv_file.name,
                 error=str(rename_exception),
             )
@@ -196,7 +199,7 @@ async def _check_csv_dos_limits(
     file_size_bytes = csv_path.stat().st_size
     if file_size_bytes > config.app.max_csv_size_bytes:
         logger.error(
-            "CSV-Datei ueberschreitet Sicherheitslimit. Import verweigert.",
+            "CSV file exceeds security limit. Import rejected.",
             size=file_size_bytes,
             max_size=config.app.max_csv_size_bytes,
         )
@@ -224,7 +227,7 @@ async def _process_and_upsert_group(
     is_valid, error_message = validate_group(trade_group_id, raw_legs)
     if not is_valid:
         logger.error(
-            "Validierungsfehler in Gruppe. Überspringe Gruppe.",
+            "Validation error in group. Skipping group.",
             trade_group_id=trade_group_id,
             error=error_message,
         )
@@ -266,7 +269,7 @@ async def _process_and_upsert_group(
         )
 
         logger.info(
-            "Kapital-Sizing berechnet",
+            "Capital sizing calculated",
             trade_group_id=trade_group_id,
             strategy=strategy_name,
             limit_percentage=float(strategy_limit_percentage),
@@ -277,7 +280,7 @@ async def _process_and_upsert_group(
 
         if maximum_capital_allocation <= Decimal("0.0"):
             logger.warning(
-                "Kein verfuegbares Allokations-Kapital vorhanden. Überspringe Gruppe.",
+                "No available allocation capital. Skipping group.",
                 trade_group_id=trade_group_id,
             )
             await notifier.send_importer_info(
@@ -297,7 +300,7 @@ async def _process_and_upsert_group(
 
         if target_quantity <= 0:
             logger.warning(
-                "Sizing ergab Qty <= 0. Überspringe Gruppe.",
+                "Sizing resulted in Qty <= 0. Skipping group.",
                 trade_group_id=trade_group_id,
                 max_allocation=float(maximum_capital_allocation),
                 target_price=float(entry_leg.target_price)
@@ -312,8 +315,6 @@ async def _process_and_upsert_group(
                 title="SIZING-FEHLER",
             )
             return
-
-    import dataclasses
 
     legs = [dataclasses.replace(leg, quantity=target_quantity) for leg in raw_legs]
 
@@ -349,143 +350,59 @@ async def _upsert_trade_group_legs(
     db: aiosqlite.Connection,
     trade_group_id: str,
     account_id: str,
-    entry_leg: getattr(validate_group, "__annotations__", dict).get("legs") or None,
-    legs: list,
+    entry_leg: LegRow | None,
+    legs: list[LegRow],
     target_quantity: int,
     notifier: TelegramNotifier,
 ) -> None:
     """Führt die atomaren INSERT/UPDATE (UPSERT) Operationen in der Datenbank aus."""
-    await db.execute("BEGIN IMMEDIATE")
     try:
-        entry_order_id = None
+        async with transaction(db):
+            entry_order_id = None
 
-        # Prüfen ob dieser Entry bereits in der DB existiert
-        async with db.execute(
-            "SELECT order_id, status FROM orders WHERE account_id = ? AND trade_group_id = ? AND bracket_role = 'ENTRY'",
-            (account_id, trade_group_id),
-        ) as cursor:
-            row = await cursor.fetchone()
-
-        if row:
-            entry_order_id = row["order_id"]
-            existing_status = row["status"]
-            if existing_status in ("Created", "Error"):
-                if entry_leg:
-                    await db.execute(
-                        """
-                        UPDATE orders SET
-                            symbol = ?, sec_type = ?, exchange = ?, action = ?,
-                            quantity = ?, order_type = ?, target_price = ?, tif = ?,
-                            strategy_name = ?, status = 'Created', retry_count = 0
-                        WHERE order_id = ?
-                        """,
-                        (
-                            entry_leg.symbol,
-                            entry_leg.sec_type,
-                            entry_leg.exchange,
-                            entry_leg.action,
-                            target_quantity,
-                            entry_leg.order_type,
-                            str(entry_leg.target_price)
-                            if entry_leg.target_price is not None
-                            else None,
-                            entry_leg.tif,
-                            entry_leg.strategy_name,
-                            entry_order_id,
-                        ),
-                    )
-            else:
-                logger.info(
-                    "ENTRY-Order ist bereits aktiv/abgeschlossen. Überspringe ENTRY-Schreiben/Update.",
-                    order_id=entry_order_id,
-                    status=existing_status,
-                )
-        elif entry_leg:
-            entry_order_id = await get_next_temp_id(db)
-            await db.execute(
-                """
-                INSERT INTO orders (
-                    order_id, parent_id, trade_group_id, account_id, bracket_role,
-                    symbol, sec_type, exchange, action, quantity, order_type,
-                    target_price, tif, strategy_name, status, retry_count
-                ) VALUES (
-                    ?, NULL, ?, ?, 'ENTRY',
-                    ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, 'Created', 0
-                )
-                """,
-                (
-                    entry_order_id,
-                    trade_group_id,
-                    account_id,
-                    entry_leg.symbol,
-                    entry_leg.sec_type,
-                    entry_leg.exchange,
-                    entry_leg.action,
-                    target_quantity,
-                    entry_leg.order_type,
-                    str(entry_leg.target_price)
-                    if entry_leg.target_price is not None
-                    else None,
-                    entry_leg.tif,
-                    entry_leg.strategy_name,
-                ),
-            )
-        else:
-            logger.error(
-                "Reine Exit-Order importiert, aber kein ENTRY-Auftrag in der DB gefunden",
-                trade_group_id=trade_group_id,
-            )
-            await db.execute("ROLLBACK")
-            await notifier.send_importer_info(
-                file_name=trade_group_id,
-                status="Abgebrochen",
-                details="Exit-Order importiert, aber kein passender ENTRY-Auftrag in der DB gefunden.",
-                emoji="❌",
-                title="IMPORT-FEHLER",
-            )
-            return
-
-        for leg in legs:
-            if leg.bracket_role == "ENTRY":
-                continue
-
+            # Prüfen ob dieser Entry bereits in der DB existiert
             async with db.execute(
-                "SELECT order_id, status FROM orders WHERE account_id = ? AND trade_group_id = ? AND bracket_role = ? AND order_type = ?",
-                (account_id, trade_group_id, leg.bracket_role, leg.order_type),
+                "SELECT order_id, status FROM orders WHERE account_id = ? AND trade_group_id = ? AND bracket_role = 'ENTRY'",
+                (account_id, trade_group_id),
             ) as cursor:
-                child_row = await cursor.fetchone()
+                row = await cursor.fetchone()
 
-            if child_row:
-                child_order_id = child_row["order_id"]
-                existing_status = child_row["status"]
-                if existing_status in ("Created", "Error", "Cancelled"):
-                    await db.execute(
-                        """
-                        UPDATE orders SET
-                            parent_id = ?, symbol = ?, sec_type = ?, exchange = ?, action = ?,
-                            quantity = ?, order_type = ?, target_price = ?, tif = ?,
-                            strategy_name = ?, status = 'Created', retry_count = 0
-                        WHERE order_id = ?
-                        """,
-                        (
-                            entry_order_id,
-                            leg.symbol,
-                            leg.sec_type,
-                            leg.exchange,
-                            leg.action,
-                            target_quantity,
-                            leg.order_type,
-                            str(leg.target_price)
-                            if leg.target_price is not None
-                            else None,
-                            leg.tif,
-                            leg.strategy_name,
-                            child_order_id,
-                        ),
+            if row:
+                entry_order_id = row["order_id"]
+                existing_status = row["status"]
+                if existing_status in ("Created", "Error"):
+                    if entry_leg:
+                        await db.execute(
+                            """
+                            UPDATE orders SET
+                                symbol = ?, sec_type = ?, exchange = ?, action = ?,
+                                quantity = ?, order_type = ?, target_price = ?, tif = ?,
+                                strategy_name = ?, status = 'Created', retry_count = 0
+                            WHERE order_id = ?
+                            """,
+                            (
+                                entry_leg.symbol,
+                                entry_leg.sec_type,
+                                entry_leg.exchange,
+                                entry_leg.action,
+                                target_quantity,
+                                entry_leg.order_type,
+                                str(entry_leg.target_price)
+                                if entry_leg.target_price is not None
+                                else None,
+                                entry_leg.tif,
+                                entry_leg.strategy_name,
+                                entry_order_id,
+                            ),
+                        )
+                else:
+                    logger.info(
+                        "ENTRY order is already active/completed. Skipping ENTRY write/update.",
+                        order_id=entry_order_id,
+                        status=existing_status,
                     )
-            else:
-                child_order_id = await get_next_temp_id(db)
+            elif entry_leg:
+                entry_order_id = await get_next_temp_id(db)
                 await db.execute(
                     """
                     INSERT INTO orders (
@@ -493,47 +410,119 @@ async def _upsert_trade_group_legs(
                         symbol, sec_type, exchange, action, quantity, order_type,
                         target_price, tif, strategy_name, status, retry_count
                     ) VALUES (
-                        ?, ?, ?, ?, ?,
+                        ?, NULL, ?, ?, 'ENTRY',
                         ?, ?, ?, ?, ?, ?,
                         ?, ?, ?, 'Created', 0
                     )
                     """,
                     (
-                        child_order_id,
                         entry_order_id,
                         trade_group_id,
                         account_id,
-                        leg.bracket_role,
-                        leg.symbol,
-                        leg.sec_type,
-                        leg.exchange,
-                        leg.action,
+                        entry_leg.symbol,
+                        entry_leg.sec_type,
+                        entry_leg.exchange,
+                        entry_leg.action,
                         target_quantity,
-                        leg.order_type,
-                        str(leg.target_price) if leg.target_price is not None else None,
-                        leg.tif,
-                        leg.strategy_name,
+                        entry_leg.order_type,
+                        str(entry_leg.target_price)
+                        if entry_leg.target_price is not None
+                        else None,
+                        entry_leg.tif,
+                        entry_leg.strategy_name,
                     ),
                 )
+            else:
+                raise ValueError(
+                    "Standalone exit order imported, but no ENTRY order found in DB"
+                )
 
-        await db.execute("COMMIT")
+            for leg in legs:
+                if leg.bracket_role == "ENTRY":
+                    continue
+
+                async with db.execute(
+                    "SELECT order_id, status FROM orders WHERE account_id = ? AND trade_group_id = ? AND bracket_role = ? AND order_type = ?",
+                    (account_id, trade_group_id, leg.bracket_role, leg.order_type),
+                ) as cursor:
+                    child_row = await cursor.fetchone()
+
+                if child_row:
+                    child_order_id = child_row["order_id"]
+                    existing_status = child_row["status"]
+                    if existing_status in ("Created", "Error", "Cancelled"):
+                        await db.execute(
+                            """
+                            UPDATE orders SET
+                                parent_id = ?, symbol = ?, sec_type = ?, exchange = ?, action = ?,
+                                quantity = ?, order_type = ?, target_price = ?, tif = ?,
+                                strategy_name = ?, status = 'Created', retry_count = 0
+                            WHERE order_id = ?
+                            """,
+                            (
+                                entry_order_id,
+                                leg.symbol,
+                                leg.sec_type,
+                                leg.exchange,
+                                leg.action,
+                                target_quantity,
+                                leg.order_type,
+                                str(leg.target_price)
+                                if leg.target_price is not None
+                                else None,
+                                leg.tif,
+                                leg.strategy_name,
+                                child_order_id,
+                            ),
+                        )
+                else:
+                    child_order_id = await get_next_temp_id(db)
+                    await db.execute(
+                        """
+                        INSERT INTO orders (
+                            order_id, parent_id, trade_group_id, account_id, bracket_role,
+                            symbol, sec_type, exchange, action, quantity, order_type,
+                            target_price, tif, strategy_name, status, retry_count
+                        ) VALUES (
+                            ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, 'Created', 0
+                        )
+                        """,
+                        (
+                            child_order_id,
+                            entry_order_id,
+                            trade_group_id,
+                            account_id,
+                            leg.bracket_role,
+                            leg.symbol,
+                            leg.sec_type,
+                            leg.exchange,
+                            leg.action,
+                            target_quantity,
+                            leg.order_type,
+                            str(leg.target_price) if leg.target_price is not None else None,
+                            leg.tif,
+                            leg.strategy_name,
+                        ),
+                    )
+
         logger.info(
-            "Trade-Gruppe erfolgreich in DB importiert/aktualisiert",
+            "Trade group successfully imported/updated in DB",
             trade_group_id=trade_group_id,
             qty=target_quantity,
         )
 
     except Exception as exception:
-        await db.execute("ROLLBACK")
         logger.error(
-            "Fehler beim DB-UPSERT der Gruppe",
+            "Error during DB UPSERT of group",
             trade_group_id=trade_group_id,
             error=str(exception),
         )
         await notifier.send_importer_info(
             file_name=trade_group_id,
             status="Fehlgeschlagen",
-            details=f"Error: {str(exception)}",
+            details=f"Error: {exception!s}",
             emoji="❌",
             title="DB-FEHLER",
         )
@@ -564,7 +553,7 @@ async def fetch_account_balance_metrics(
                     cache_values[account_value.tag] = Decimal(str(account_value.value))
                 except ValueError as exception:
                     logger.warning(
-                        "Ungueltiger Kontowert im TWS-Cache gefunden",
+                        "Invalid account value found in TWS cache",
                         tag=account_value.tag,
                         raw_value=account_value.value,
                         error=str(exception),
@@ -572,7 +561,7 @@ async def fetch_account_balance_metrics(
 
     if len(cache_values) == 3:
         logger.info(
-            "Kontowerte erfolgreich aus Cache geladen",
+            "Account values successfully loaded from cache",
             account=account_id,
             net_liquidation=float(cache_values["NetLiquidation"]),
             available_funds=float(cache_values["AvailableFunds"]),
@@ -585,7 +574,7 @@ async def fetch_account_balance_metrics(
         )
 
     logger.info(
-        "Einige Kontowerte nicht im Cache. Rufe reqAccountSummary auf.",
+        "Some account values not in cache. Calling reqAccountSummary.",
         account=account_id,
     )
     summary_event = asyncio.Event()
@@ -603,7 +592,7 @@ async def fetch_account_balance_metrics(
                     summary_event.set()
             except ValueError as exception:
                 logger.warning(
-                    "Ungueltiger Wert in Account-Summary-Callback gefunden",
+                    "Invalid value found in Account Summary callback",
                     tag=tag,
                     raw_value=value,
                     error=str(exception),
@@ -615,7 +604,7 @@ async def fetch_account_balance_metrics(
     try:
         await asyncio.wait_for(summary_event.wait(), timeout=10.0)
         logger.info(
-            "Kontowerte via reqAccountSummary geladen",
+            "Account values loaded via reqAccountSummary",
             account=account_id,
             net_liquidation=float(
                 retrieved_values.get("NetLiquidation", Decimal("0.0"))
@@ -629,7 +618,7 @@ async def fetch_account_balance_metrics(
         )
     except TimeoutError:
         logger.warning(
-            "Timeout beim Warten auf reqAccountSummary. Nutze unvollstaendige oder Standardwerte."
+            "Timeout waiting for reqAccountSummary. Using incomplete or default values."
         )
     finally:
         interactive_brokers.accountSummaryEvent.disconnect(on_account_summary)

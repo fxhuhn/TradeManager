@@ -15,6 +15,7 @@ from decimal import Decimal
 import aiosqlite
 import structlog
 
+from app.core.db import transaction
 from app.services.notifier import TelegramNotifier
 
 logger = structlog.get_logger()
@@ -43,7 +44,7 @@ async def trigger_settlement(
         try:
             if await _has_existing_settlement(db, account_id, trade_group_id):
                 logger.info(
-                    "Settlement fuer Trade-Gruppe bereits vorhanden. Abbrechen.",
+                    "Settlement for trade group already exists. Aborting.",
                     trade_group_id=trade_group_id,
                 )
                 return
@@ -55,7 +56,7 @@ async def trigger_settlement(
             calculation_outputs = calculate_settlement(settlement_input)
 
             logger.info(
-                "Settlement-Berechnung abgeschlossen",
+                "Settlement calculation completed",
                 trade_group_id=trade_group_id,
                 entry_vwap=float(calculation_outputs.avg_entry_price),
                 exit_vwap=float(calculation_outputs.avg_exit_price),
@@ -83,7 +84,7 @@ async def trigger_settlement(
 
         except Exception as exception:
             logger.error(
-                "Schwerer Fehler im Settlement-Prozess",
+                "Severe error in settlement process",
                 trade_group_id=trade_group_id,
                 error=str(exception),
             )
@@ -151,13 +152,13 @@ async def _fetch_settlement_data(
 
     if not entry_executions:
         logger.warning(
-            "Keine ENTRY-Executions fuer Settlement gefunden",
+            "No ENTRY executions found for settlement",
             trade_group_id=trade_group_id,
         )
         return None
     if not exit_executions:
         logger.warning(
-            "Keine EXIT-Executions fuer Settlement gefunden (Trade eventuell noch offen)",
+            "No EXIT executions found for settlement (trade might still be open)",
             trade_group_id=trade_group_id,
         )
         return None
@@ -179,8 +180,7 @@ async def _save_settlement(
     total_commissions: Decimal,
 ) -> None:
     """Schreibt die Ergebnisse des Settlements atomar in die Datenbank."""
-    await db.execute("BEGIN IMMEDIATE")
-    try:
+    async with transaction(db):
         await db.execute(
             """
             INSERT INTO trades_settlement (
@@ -198,16 +198,7 @@ async def _save_settlement(
                 str(outputs.net_profit_loss),
             ),
         )
-        await db.execute("COMMIT")
-        logger.info("Settlement erfolgreich verbucht", trade_group_id=trade_group_id)
-    except Exception as exception:
-        await db.execute("ROLLBACK")
-        logger.error(
-            "Fehler beim DB-Eintrag des Settlements",
-            trade_group_id=trade_group_id,
-            error=str(exception),
-        )
-        raise exception
+    logger.info("Settlement successfully recorded", trade_group_id=trade_group_id)
 
 
 async def _send_settlement_notification(
@@ -218,18 +209,13 @@ async def _send_settlement_notification(
     outputs: SettlementOutput,
     total_commissions: Decimal,
 ) -> None:
-    """Sendet die Telegram-Meldung über den erfolgreichen Abschluss."""
+    """Sends a Telegram notification about the successful trade settlement."""
     profit_loss_emoji = (
-        "🟢 Profit" if outputs.net_profit_loss >= Decimal("0.0") else "🔴 Verlust"
+        "🟢 Profit" if outputs.net_profit_loss >= Decimal("0.0") else "🔴 Loss"
     )
+    pnl_val = float(outputs.net_profit_loss)
     await notifier.send_message(
-        f"✅ TRADE SETTLEMENT ({trade_group_id})\n"
-        f"• Symbol: {entry_action} Position\n"
-        f"• Entry: {float(outputs.avg_entry_price):.2f} (Target: {float(entry_target_price):.2f})\n"
-        f"• Exit: {float(outputs.avg_exit_price):.2f}\n"
-        f"• Slippage: {float(outputs.price_diff_slippage):+.2f}\n"
-        f"• Gebühren: {float(total_commissions):.2f} USD\n"
-        f"• *Netto-PnL:* {float(outputs.net_profit_loss):+.2f} USD ({profit_loss_emoji})"
+        f"✅ <b>TRADE SETTLEMENT</b> | <code>{trade_group_id}</code> | *Netto-PnL:* {pnl_val:+.2f} USD ({profit_loss_emoji})"
     )
 
 

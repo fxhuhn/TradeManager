@@ -24,6 +24,18 @@ def validate_group(group_id: str, legs: list[LegRow]) -> tuple[bool, str]:
     if not legs:
         return False, "Gruppe enthält keine Legs"
 
+    is_valid, msg = _check_group_structure(legs)
+    if not is_valid:
+        return False, msg
+
+    is_valid, msg = _validate_leg_attributes(legs)
+    if not is_valid:
+        return False, msg
+
+    return True, ""
+
+
+def _check_group_structure(legs: list[LegRow]) -> tuple[bool, str]:
     entries = [leg for leg in legs if leg.bracket_role == "ENTRY"]
     if len(entries) > 1:
         return (
@@ -38,6 +50,21 @@ def validate_group(group_id: str, legs: list[LegRow]) -> tuple[bool, str]:
                 "Gruppe muss entweder eine ENTRY-Order oder mindestens eine Exit-Order (SL, TP, EXIT) enthalten",
             )
 
+    if entries:
+        entry = entries[0]
+        entry_action = entry.action
+        exit_action = "SELL" if entry_action == "BUY" else "BUY"
+        for leg in legs:
+            if leg.bracket_role in ("SL", "TP", "EXIT") and leg.action != exit_action:
+                return (
+                    False,
+                    f"Exit-Leg {leg.bracket_role} muss Gegenrichtung ({exit_action}) zu ENTRY ({entry_action}) sein",
+                )
+
+    return True, ""
+
+
+def _validate_leg_attributes(legs: list[LegRow]) -> tuple[bool, str]:
     symbol = legs[0].symbol
     account_id = legs[0].account_id
 
@@ -80,17 +107,6 @@ def validate_group(group_id: str, legs: list[LegRow]) -> tuple[bool, str]:
                     f"target_price ist fuer order_type='{leg.order_type}' zwingend erforderlich",
                 )
 
-    if entries:
-        entry = entries[0]
-        entry_action = entry.action
-        exit_action = "SELL" if entry_action == "BUY" else "BUY"
-        for leg in legs:
-            if leg.bracket_role in ("SL", "TP", "EXIT") and leg.action != exit_action:
-                return (
-                    False,
-                    f"Exit-Leg {leg.bracket_role} muss Gegenrichtung ({exit_action}) zu ENTRY ({entry_action}) sein",
-                )
-
     return True, ""
 
 
@@ -101,7 +117,7 @@ def load_csv(csv_path: Path) -> dict[str, list[LegRow]]:
     grouped_legs: dict[str, list[LegRow]] = {}
 
     if not csv_path.exists():
-        logger.error("CSV-Datei existiert nicht", path=str(csv_path))
+        logger.error("CSV file does not exist", path=str(csv_path))
         return grouped_legs
 
     try:
@@ -139,18 +155,18 @@ def load_csv(csv_path: Path) -> dict[str, list[LegRow]]:
 
                 except KeyError as key_error:
                     logger.error(
-                        "Fehlende Spalte in CSV-Zeile",
+                        "Missing column in CSV row",
                         row_number=row_number,
                         error=str(key_error),
                     )
                 except ValueError as value_error:
                     logger.error(
-                        "Falsches Datenformat in CSV-Zeile",
+                        "Invalid data format in CSV row",
                         row_number=row_number,
                         error=str(value_error),
                     )
 
     except Exception as exception:
-        logger.error("Fehler beim Lesen der CSV-Datei", error=str(exception))
+        logger.error("Error reading CSV file", error=str(exception))
 
     return grouped_legs

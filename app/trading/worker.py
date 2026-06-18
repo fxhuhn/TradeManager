@@ -17,6 +17,7 @@ import structlog
 from ib_async import IB
 
 from app.core.config import Config
+from app.core.db import transaction
 from app.core.models import OrderRow, order_row_from_db_row
 from app.services.notifier import TelegramNotifier
 from app.trading.order_builder import build_order, make_stock_contract
@@ -40,7 +41,7 @@ async def execution_worker(
     Konsumiert permanent Trade-Gruppen-IDs aus der Queue und stößt
     deren Platzierung an.
     """
-    logger.info("Starte Execution Worker Hintergrunddienst")
+    logger.info("Starting Execution Worker background service")
 
     while True:
         try:
@@ -57,10 +58,10 @@ async def execution_worker(
             queue.task_done()
 
         except asyncio.CancelledError:
-            logger.info("Execution Worker wurde abgebrochen.")
+            logger.info("Execution Worker was cancelled.")
             raise
         except Exception as exception:
-            logger.error("Fehler im Execution Worker Loop", error=str(exception))
+            logger.error("Error in Execution Worker loop", error=str(exception))
             await asyncio.sleep(1.0)
 
 
@@ -77,12 +78,12 @@ async def process_trade_group(
     Übermittelt die ENTRY-Order sowie die zugehörigen Child-Orders (SL, TP, EXIT)
     an die TWS.
     """
-    logger.info("Verarbeite Trade-Gruppe aus Queue", trade_group_id=trade_group_id)
+    logger.info("Processing trade group from queue", trade_group_id=trade_group_id)
 
     orders = await _load_trade_group_orders(db, trade_group_id)
     if not orders:
         logger.warning(
-            "Keine Orders fuer Trade-Gruppe in DB gefunden",
+            "No orders found for trade group in DB",
             trade_group_id=trade_group_id,
         )
         return
@@ -94,7 +95,7 @@ async def process_trade_group(
 
     if not entry_order:
         logger.error(
-            "Keine ENTRY-Order in Gruppe vorhanden", trade_group_id=trade_group_id
+            "No ENTRY order present in group", trade_group_id=trade_group_id
         )
         return
 
@@ -103,7 +104,7 @@ async def process_trade_group(
 
     if entry_order.status == "Created":
         logger.info(
-            "Normaler Einstieg: Verarbeite ENTRY-Order",
+            "Normal entry: Processing ENTRY order",
             trade_group_id=trade_group_id,
         )
         await _process_entry_order(
@@ -118,7 +119,7 @@ async def process_trade_group(
 
     if entry_order.status == "Error":
         logger.warning(
-            "ENTRY-Order fehlgeschlagen. Verarbeite keine Child-Orders.",
+            "ENTRY order failed. Skipping child orders.",
             trade_group_id=trade_group_id,
         )
         return
@@ -137,13 +138,13 @@ async def process_trade_group(
     if placed_orders:
         order_dicts = [
             {
-                "role": o.bracket_role,
-                "action": o.action,
-                "quantity": o.quantity,
-                "price": o.target_price,
-                "order_type": o.order_type,
+                "role": placed_order.bracket_role,
+                "action": placed_order.action,
+                "quantity": placed_order.quantity,
+                "price": placed_order.target_price,
+                "order_type": placed_order.order_type,
             }
-            for o in placed_orders
+            for placed_order in placed_orders
         ]
 
         # Sortiere: ENTRY zuerst, dann TP, dann SL
@@ -199,7 +200,7 @@ async def _process_entry_order(
     ib_entry_order.transmit = not has_unsent_children
 
     logger.info(
-        "Sende ENTRY-Order an TWS", order_id=tws_order_id, symbol=entry_order.symbol
+        "Sending ENTRY order to TWS", order_id=tws_order_id, symbol=entry_order.symbol
     )
     success = await _place_and_verify_order(
         db,
@@ -221,22 +222,11 @@ async def _assign_order_id_in_db(
     db: aiosqlite.Connection, original_order_id: int, tws_order_id: int
 ) -> None:
     """Updates order status and order_id in database."""
-    await db.execute("BEGIN IMMEDIATE")
-    try:
+    async with transaction(db):
         await db.execute(
             "UPDATE orders SET order_id = ?, status = 'Submitted', transmitted_at = datetime('now') WHERE order_id = ?",
             (tws_order_id, original_order_id),
         )
-        await db.execute("COMMIT")
-    except Exception as exception:
-        await db.execute("ROLLBACK")
-        logger.error(
-            "Fehler beim Zuweisen der order_id in DB",
-            original_id=original_order_id,
-            tws_id=tws_order_id,
-            error=str(exception),
-        )
-        raise exception
 
 
 async def _process_child_orders(
@@ -279,7 +269,7 @@ async def _place_single_child_order(
 ) -> bool:
     """Bereitet eine einzelne untergeordnete Order vor und übermittelt sie an TWS."""
     logger.info(
-        "Verarbeite Child-Order",
+        "Processing child order",
         bracket_role=child.bracket_role,
         trade_group_id=child.trade_group_id,
     )
@@ -314,7 +304,7 @@ async def _place_single_child_order(
         ib_child_order.transmit = is_last
 
     logger.info(
-        "Sende Child-Order an TWS",
+        "Sending child order to TWS",
         order_id=tws_order_id,
         role=child.bracket_role,
     )
@@ -338,81 +328,99 @@ async def _place_and_verify_order(
     """Sendet die Order und prüft auf Fehler (z. B. Read-Only Modus)."""
     trade = interactive_brokers.placeOrder(contract, ib_order)
 
-    # Kurz warten, um sofortige Ablehnungen (z.B. ValidationError) zu erkennen
+    await _wait_for_order_submission(trade)
+
+    if trade.orderStatus.status in ("Inactive", "Cancelled", "ValidationError", "Error"):
+        is_success = await _handle_order_rejection(db, trade, order_row, tws_order_id, notifier)
+        if not is_success:
+            return False
+
+    price_str = (
+        f" @ {order_row.target_price:.2f}"
+        if order_row.target_price and order_row.target_price > Decimal("0")
+        else ""
+    )
+    await notifier.send_message(
+        f"📤 ORDER GESENDET: {order_row.symbol} | {order_row.bracket_role} | "
+        f"{order_row.action} {order_row.quantity}{price_str} ({order_row.order_type}) | "
+        f"ID: {tws_order_id} ({order_row.strategy_name})"
+    )
+    return True
+
+
+async def _wait_for_order_submission(trade: object) -> None:
+    """Kurz warten, um sofortige Ablehnungen (z.B. ValidationError) zu erkennen."""
     for _ in range(20):
         if trade.orderStatus.status not in ("PendingSubmit", "PendingCancel"):
             break
         await asyncio.sleep(0.1)
 
-    if trade.orderStatus.status in (
-        "Inactive",
-        "Cancelled",
-        "ValidationError",
-        "Error",
-    ):
-        log_errors = [
-            entry
-            for entry in trade.log
-            if entry.errorCode != 0 or entry.status in ("ValidationError", "Error")
-        ]
-        is_only_warning_399: bool = len(log_errors) > 0 and all(
-            entry.errorCode == 399 for entry in log_errors
+
+async def _handle_order_rejection(
+    db: aiosqlite.Connection,
+    trade: object,
+    order_row: OrderRow,
+    tws_order_id: int,
+    notifier: TelegramNotifier,
+) -> bool:
+    """Behandelt Fehlermeldungen bei der Order-Übertragung."""
+    log_errors = [
+        entry
+        for entry in trade.log
+        if entry.errorCode != 0 or entry.status in ("ValidationError", "Error")
+    ]
+    is_only_warning_399: bool = len(log_errors) > 0 and all(
+        entry.errorCode == 399 for entry in log_errors
+    )
+
+    if is_only_warning_399:
+        logger.info(
+            "Ignoring Warning 399 (ValidationError/out-of-hours) during order placement",
+            order_id=tws_order_id,
+            symbol=order_row.symbol,
+        )
+        return True
+
+    error_msg = "Unknown error"
+    for entry in log_errors:
+        if entry.errorCode != 399:
+            error_msg = entry.message
+            break
+
+    logger.error(
+        "Order transmission failed",
+        order_id=tws_order_id,
+        status=trade.orderStatus.status,
+        symbol=order_row.symbol,
+        error=error_msg,
+    )
+
+    order_row.status = "Error"
+    async with transaction(db):
+        await db.execute(
+            "UPDATE orders SET status = 'Error' WHERE order_id = ?",
+            (tws_order_id,),
         )
 
-        if is_only_warning_399:
-            logger.info(
-                "Ignoriere Warning 399 (ValidationError/Außerbörslich) bei Orderplatzierung",
-                order_id=tws_order_id,
-                symbol=order_row.symbol,
-            )
-        else:
-            error_msg = "Unbekannter Fehler"
-            for entry in log_errors:
-                if entry.errorCode != 399:
-                    error_msg = entry.message
-                    break
-
-            logger.error(
-                "Order-Uebertragung fehlgeschlagen",
-                order_id=tws_order_id,
-                status=trade.orderStatus.status,
-                symbol=order_row.symbol,
-                error=error_msg,
-            )
-
-            order_row.status = "Error"
-            await db.execute("BEGIN IMMEDIATE")
-            try:
-                await db.execute(
-                    "UPDATE orders SET status = 'Error' WHERE order_id = ?",
-                    (tws_order_id,),
-                )
-                await db.execute("COMMIT")
-            except Exception as exception:
-                await db.execute("ROLLBACK")
-                logger.error("Fehler beim DB-Update (Error)", error=str(exception))
-
-            if "Read-Only mode" in error_msg or "321" in error_msg:
-                await notifier.send_order_failed(
-                    order_id=tws_order_id,
-                    tws_code=321,
-                    reason=f"API im READ-ONLY Modus. Details: {error_msg}",
-                    symbol=order_row.symbol,
-                    bracket_role=order_row.bracket_role,
-                    is_fatal=True,
-                )
-            else:
-                await notifier.send_order_failed(
-                    order_id=tws_order_id,
-                    tws_code=0,
-                    reason=error_msg,
-                    symbol=order_row.symbol,
-                    bracket_role=order_row.bracket_role,
-                    is_fatal=False,
-                )
-            return False
-
-    return True
+    if "Read-Only mode" in error_msg or "321" in error_msg:
+        await notifier.send_order_failed(
+            order_id=tws_order_id,
+            tws_code=321,
+            reason=f"API im READ-ONLY Modus. Details: {error_msg}",
+            symbol=order_row.symbol,
+            bracket_role=order_row.bracket_role,
+            is_fatal=True,
+        )
+    else:
+        await notifier.send_order_failed(
+            order_id=tws_order_id,
+            tws_code=0,
+            reason=error_msg,
+            symbol=order_row.symbol,
+            bracket_role=order_row.bracket_role,
+            is_fatal=False,
+        )
+    return False
 
 
 async def _adjust_exit_order_quantity(
@@ -453,23 +461,21 @@ async def _cancel_empty_exit_order(
 ) -> None:
     """Storniert eine Exit-Order bei fehlender Gegenposition im Depot."""
     logger.warning(
-        "Keine offene Gegenposition im Depot gefunden. Exit-Order wird storniert.",
+        "No open counter-position found in portfolio. Exit order will be cancelled.",
         trade_group_id=child.trade_group_id,
         symbol=child.symbol,
         bracket_role=child.bracket_role,
         live_position=float(live_position),
     )
-    await db.execute("BEGIN IMMEDIATE")
     try:
-        await db.execute(
-            "UPDATE orders SET status = 'Cancelled' WHERE order_id = ?",
-            (child.order_id,),
-        )
-        await db.execute("COMMIT")
+        async with transaction(db):
+            await db.execute(
+                "UPDATE orders SET status = 'Cancelled' WHERE order_id = ?",
+                (child.order_id,),
+            )
     except Exception as exception:
-        await db.execute("ROLLBACK")
         logger.error(
-            "Fehler beim Stornieren der Child-Order in DB",
+            "Error cancelling child order in DB",
             order_id=child.order_id,
             error=str(exception),
         )
@@ -492,24 +498,22 @@ async def _reduce_exit_order_quantity(
 ) -> None:
     """Reduziert Exit-Menge auf verbleibenden Depotbestand."""
     logger.info(
-        "Exit-Order Menge an realen Depotbestand angepasst",
+        "Exit order quantity adjusted to actual portfolio position",
         trade_group_id=child.trade_group_id,
         old_qty=float(intended_quantity),
         new_qty=float(available_quantity),
     )
     child.quantity = int(available_quantity)
 
-    await db.execute("BEGIN IMMEDIATE")
     try:
-        await db.execute(
-            "UPDATE orders SET quantity = ? WHERE order_id = ?",
-            (child.quantity, child.order_id),
-        )
-        await db.execute("COMMIT")
+        async with transaction(db):
+            await db.execute(
+                "UPDATE orders SET quantity = ? WHERE order_id = ?",
+                (child.quantity, child.order_id),
+            )
     except Exception as exception:
-        await db.execute("ROLLBACK")
         logger.error(
-            "Fehler beim Aktualisieren der Child-Order Menge in DB",
+            "Error updating child order quantity in DB",
             order_id=child.order_id,
             error=str(exception),
         )
