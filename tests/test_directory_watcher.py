@@ -72,7 +72,7 @@ async def test_csv_directory_watcher_success_rename(
 
     mock_interactive_brokers = MagicMock()
     mock_notifier = MagicMock()
-    mock_notifier.send_message = AsyncMock(return_value=True)
+    mock_notifier.send_importer_info = AsyncMock(return_value=True)
     mock_queue = asyncio.Queue()
 
     # 3. run_csv_import mocken (simuliert erfolgreichen Import)
@@ -137,7 +137,7 @@ async def test_csv_directory_watcher_error_rename(
 
     mock_interactive_brokers = MagicMock()
     mock_notifier = MagicMock()
-    mock_notifier.send_message = AsyncMock(return_value=True)
+    mock_notifier.send_importer_info = AsyncMock(return_value=True)
     mock_queue = asyncio.Queue()
 
     # 3. run_csv_import mocken, so dass es eine Exception wirft
@@ -178,7 +178,7 @@ async def test_csv_directory_watcher_error_rename(
         assert error_csv.exists()
 
         # Notifier sollte alarmiert haben
-        mock_notifier.send_message.assert_called_once()
-        notification_text = mock_notifier.send_message.call_args[0][0]
-        assert "IMPORT-FEHLER" in notification_text
-        assert "Sizing ergab Qty" in notification_text
+        mock_notifier.send_importer_info.assert_called_once()
+        kwargs = mock_notifier.send_importer_info.call_args[1]
+        assert kwargs["title"] == "IMPORT-FEHLER"
+        assert "Sizing ergab Qty" in kwargs["details"]

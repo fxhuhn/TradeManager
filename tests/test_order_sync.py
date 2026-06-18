@@ -163,3 +163,114 @@ async def test_recovery_syncs_presubmitted_order_to_submitted(
         assert row is not None
         assert row["status"] == "Submitted"
         assert row["perm_id"] == 987654321
+
+
+@pytest.mark.asyncio
+async def test_recovery_recovers_filled_entry_with_active_child(
+    db, mock_config: Config
+) -> None:
+    """
+    Prüft, dass eine ENTRY-Order, die in TWS nicht mehr aktiv oder abgeschlossen gelistet ist,
+    aber eine aktive Child-Order (z. B. TP) besitzt, korrekt als 'Filled' rekonstruiert wird.
+    """
+    # 1. Parent-Order (ENTRY) und Child-Order (TP) in die In-Memory-Datenbank einfügen
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            177,
+            48380410,
+            None,
+            "890_DipBuyer_BG",
+            "U19605236",
+            "ENTRY",
+            "BG",
+            "STK",
+            "SMART",
+            "BUY",
+            21,
+            "LMT",
+            115.17,
+            "DAY",
+            "DipBuyer",
+            "Submitted",
+        ),
+    )
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            178,
+            48380411,
+            177,
+            "890_DipBuyer_BG",
+            "U19605236",
+            "TP",
+            "BG",
+            "STK",
+            "SMART",
+            "SELL",
+            21,
+            "LOC",
+            122.47,
+            "DAY",
+            "DipBuyer",
+            "Submitted",
+        ),
+    )
+    await db.commit()
+
+    # 2. IB/TWS Mocking:
+    # Parent (177) ist nicht in TWS aktiv/komplettiert (wird also von openTrades/trades nicht zurückgegeben).
+    # Child (178) ist in TWS aktiv (openTrades).
+    mock_trade_child = MagicMock()
+    mock_trade_child.order.orderId = 178
+    mock_trade_child.order.permId = 48380411
+    mock_trade_child.orderStatus.status = "Submitted"
+
+    mock_interactive_brokers = MagicMock()
+    mock_interactive_brokers.reqOpenOrdersAsync = AsyncMock()
+    mock_interactive_brokers.reqCompletedOrdersAsync = AsyncMock()
+    mock_interactive_brokers.openTrades.return_value = [mock_trade_child]
+    mock_interactive_brokers.trades.return_value = [mock_trade_child]
+    mock_interactive_brokers.positions.return_value = []
+
+    # Keine Fills in TWS vorhanden -> testet auch den Fallback
+    mock_interactive_brokers.fills.return_value = []
+
+    mock_notifier = MagicMock()
+    mock_queue = asyncio.Queue()
+    mock_trigger_settlement = AsyncMock()
+
+    # 3. run_recovery ausführen
+    await run_recovery(
+        database_connection=db,
+        interactive_brokers_session=mock_interactive_brokers,
+        queue=mock_queue,
+        notifier=mock_notifier,
+        trigger_settlement_callback=mock_trigger_settlement,
+        config=mock_config,
+    )
+
+    # 4. Assertions:
+    # Parent-Order (177) muss auf 'Filled' aktualisiert worden sein
+    async with db.execute("SELECT status FROM orders WHERE order_id = 177") as cursor:
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row["status"] == "Filled"
+
+    # Eine Fallback-Ausführung für die Parent-Order muss angelegt worden sein
+    async with db.execute("SELECT * FROM executions WHERE order_id = 177") as cursor:
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row["exec_id"] == "RECOVERED_177"
+        assert abs(row["price"] - 115.17) < 0.001
+        assert row["qty"] == 21.0

@@ -107,7 +107,7 @@ async def test_process_trade_group_exit_cancelled_if_no_position(
     mock_ib.client.getReqId.return_value = 100
 
     mock_notifier = MagicMock()
-    mock_notifier.send_message = AsyncMock()
+    mock_notifier.send_importer_info = AsyncMock()
 
     # 3. Execution ausführen
     await process_trade_group(db, mock_ib, "TG_NO_POS", mock_notifier, test_config)
@@ -119,8 +119,8 @@ async def test_process_trade_group_exit_cancelled_if_no_position(
 
     # IB placeOrder darf nicht aufgerufen worden sein
     mock_ib.placeOrder.assert_not_called()
-    mock_notifier.send_message.assert_called_once()
-    assert "Keine offene Position" in mock_notifier.send_message.call_args[0][0]
+    mock_notifier.send_importer_info.assert_called_once()
+    assert "Keine offene Position" in mock_notifier.send_importer_info.call_args[1]["details"]
 
 
 @pytest.mark.asyncio
@@ -157,7 +157,8 @@ async def test_process_trade_group_exit_quantity_reduced(
     mock_ib.client.getReqId.return_value = 101
 
     mock_notifier = MagicMock()
-    mock_notifier.send_message = AsyncMock()
+    mock_notifier.send_importer_info = AsyncMock()
+    mock_notifier.send_bracket_order_submitted = AsyncMock()
 
     # 3. Execution ausführen
     await process_trade_group(db, mock_ib, "TG_RED_POS", mock_notifier, test_config)
@@ -175,12 +176,9 @@ async def test_process_trade_group_exit_quantity_reduced(
     mock_ib.placeOrder.assert_called_once()
     called_order = mock_ib.placeOrder.call_args[0][1]
     assert called_order.totalQuantity == 4.0
-    assert mock_notifier.send_message.call_count == 2
-    sent_messages = [
-        call_args[0][0] for call_args in mock_notifier.send_message.call_args_list
-    ]
-    assert any("reduziert" in message for message in sent_messages)
-    assert any("ORDER GESENDET" in message for message in sent_messages)
+    mock_notifier.send_importer_info.assert_called_once()
+    assert "reduziert" in mock_notifier.send_importer_info.call_args[1]["details"]
+    mock_notifier.send_bracket_order_submitted.assert_called_once()
 
 
 @pytest.mark.asyncio

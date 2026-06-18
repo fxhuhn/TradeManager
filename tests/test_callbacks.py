@@ -86,7 +86,7 @@ async def test_callbacks_filled_notification(db, mock_config: Config) -> None:
         return db
 
     mock_notifier = MagicMock()
-    mock_notifier.send_message = AsyncMock(return_value=True)
+    mock_notifier.send_order_filled = AsyncMock(return_value=True)
 
     mock_trigger_settlement = AsyncMock()
     mock_handle_retriable_error = AsyncMock()
@@ -119,15 +119,12 @@ async def test_callbacks_filled_notification(db, mock_config: Config) -> None:
         assert row["perm_id"] == 9876
 
     # Telegram-Nachricht prüfen
-    mock_notifier.send_message.assert_called_once()
-    message = mock_notifier.send_message.call_args[0][0]
-    assert "✅ ORDER GEFÜLLT" in message
-    assert "AAPL" in message
-    assert "ENTRY" in message
-    assert "BUY" in message
-    assert "100" in message
-    assert "150.00" in message
-    assert "DipBuyer" in message
+    mock_notifier.send_order_filled.assert_called_once()
+    kwargs = mock_notifier.send_order_filled.call_args[1]
+    assert kwargs["symbol"] == "AAPL"
+    assert kwargs["action"] == "BUY"
+    assert kwargs["quantity"] == 100
+    assert kwargs["price"] == 150.00
 
     # Kein Settlement für ENTRY-Order
     mock_trigger_settlement.assert_not_called()
@@ -199,7 +196,7 @@ async def test_callbacks_exit_settlement_trigger(db, mock_config: Config) -> Non
         return db
 
     mock_notifier = MagicMock()
-    mock_notifier.send_message = AsyncMock(return_value=True)
+    mock_notifier.send_order_filled = AsyncMock(return_value=True)
 
     mock_trigger_settlement = AsyncMock()
     mock_handle_retriable_error = AsyncMock()
@@ -223,5 +220,5 @@ async def test_callbacks_exit_settlement_trigger(db, mock_config: Config) -> Non
         db.close = original_close
 
     # 2. Assertions
-    mock_notifier.send_message.assert_called_once()
+    mock_notifier.send_order_filled.assert_called_once()
     mock_trigger_settlement.assert_called_once_with("G1", "A1")

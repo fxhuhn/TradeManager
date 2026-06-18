@@ -16,14 +16,15 @@ async def db():
     # Wichtige PRAGMAs konfigurieren
     await connection.execute("PRAGMA foreign_keys=ON")
 
-    # DDL aus der echten Migrations-Datei ausführen
-    migrations_file = Path("migrations/001_initial.sql")
-    if migrations_file.exists():
-        sql = migrations_file.read_text(encoding="utf-8")
-        for stmt in sql.split(";"):
-            stmt_clean = stmt.strip()
-            if stmt_clean:
-                await connection.execute(stmt_clean)
+    # DDL aus allen Migrations-Dateien ausführen
+    migrations_dir = Path("migrations")
+    if migrations_dir.exists():
+        for migrations_file in sorted(migrations_dir.glob("*.sql")):
+            sql = migrations_file.read_text(encoding="utf-8")
+            for stmt in sql.split(";"):
+                stmt_clean = stmt.strip()
+                if stmt_clean:
+                    await connection.execute(stmt_clean)
         await connection.commit()
 
     yield connection
