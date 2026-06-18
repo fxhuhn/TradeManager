@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from decimal import Decimal
 
 import aiosqlite
 import structlog
 from ib_async import IB
 
 from app.core.config import Config
-from app.core.models import OrderRow
+from app.core.models import OrderRow, order_row_from_db_row
 from app.services.notifier import TelegramNotifier
 
 logger = structlog.get_logger()
@@ -62,6 +63,7 @@ async def run_recovery(
         local_orders=local_orders,
         tws_active_orders=tws_active_orders,
         tws_completed_orders=tws_completed_orders,
+        interactive_brokers_session=interactive_brokers_session,
         notifier=notifier,
         trigger_settlement_callback=trigger_settlement_callback,
     )
@@ -115,28 +117,7 @@ async def _load_local_pending_orders(
     """
     async with database_connection.execute(query) as cursor:
         async for row in cursor:
-            local_orders.append(
-                OrderRow(
-                    order_id=row["order_id"],
-                    perm_id=row["perm_id"],
-                    parent_id=row["parent_id"],
-                    trade_group_id=row["trade_group_id"],
-                    account_id=row["account_id"],
-                    bracket_role=row["bracket_role"],
-                    symbol=row["symbol"],
-                    sec_type=row["sec_type"],
-                    exchange=row["exchange"],
-                    action=row["action"],
-                    quantity=row["quantity"],
-                    order_type=row["order_type"],
-                    target_price=row["target_price"],
-                    tif=row["tif"],
-                    strategy_name=row["strategy_name"],
-                    status=row["status"],
-                    retry_count=row["retry_count"],
-                    transmitted_at=row["transmitted_at"],
-                )
-            )
+            local_orders.append(order_row_from_db_row(row))
     return local_orders
 
 
@@ -145,6 +126,7 @@ async def _reconcile_orders(
     local_orders: list[OrderRow],
     tws_active_orders: dict[int, object],
     tws_completed_orders: dict[int, object],
+    interactive_brokers_session: IB,
     notifier: TelegramNotifier,
     trigger_settlement_callback: Callable[[str, str], Awaitable[None]],
 ) -> set[str]:
@@ -162,6 +144,9 @@ async def _reconcile_orders(
                 order=order,
                 tws_active=tws_active,
                 tws_completed=tws_completed,
+                local_orders=local_orders,
+                tws_active_orders=tws_active_orders,
+                interactive_brokers_session=interactive_brokers_session,
                 notifier=notifier,
                 trigger_settlement_callback=trigger_settlement_callback,
             )
@@ -180,6 +165,9 @@ async def _recover_submitted_order(
     order: OrderRow,
     tws_active: object | None,
     tws_completed: object | None,
+    local_orders: list[OrderRow],
+    tws_active_orders: dict[int, object],
+    interactive_brokers_session: IB,
     notifier: TelegramNotifier,
     trigger_settlement_callback: Callable[[str, str], Awaitable[None]],
 ) -> None:
@@ -210,35 +198,81 @@ async def _recover_submitted_order(
         except Exception:
             await database_connection.execute("ROLLBACK")
             raise
+        return
 
-    elif tws_completed and tws_completed.orderStatus.status == "Filled":
+    if tws_completed and tws_completed.orderStatus.status == "Filled":
         logger.info(
             "Recovery Szenario 2: Order in TWS gefüllt während Downtime. Stoße Settlement an.",
-            order_id=order_id,
-        )
-        asyncio.create_task(
-            trigger_settlement_callback(order.trade_group_id, order.account_id)
-        )
-
-    else:
-        logger.warning(
-            "Recovery Szenario 3: Ghost Order erkannt (Submitted in DB, nicht in TWS). Abbrechen.",
             order_id=order_id,
         )
         await database_connection.execute("BEGIN IMMEDIATE")
         try:
             await database_connection.execute(
-                "UPDATE orders SET status = 'Cancelled' WHERE order_id = ?",
+                "UPDATE orders SET status = 'Filled' WHERE order_id = ?",
                 (order_id,),
             )
             await database_connection.execute("COMMIT")
         except Exception:
             await database_connection.execute("ROLLBACK")
             raise
-        await notifier.send_message(
-            f"⚠️ GHOST ORDER RECOVERED: Order {order_id} ({order.symbol} {order.bracket_role}) "
-            f"stand auf 'Submitted', existiert aber nicht in TWS. Status wurde auf 'Cancelled' gesetzt."
+
+        await _save_missing_executions(database_connection, order, interactive_brokers_session)
+
+        asyncio.create_task(
+            trigger_settlement_callback(order.trade_group_id, order.account_id)
         )
+        return
+
+    # Zusätzliche Prüfung auf indirekt gefüllte Entry-Orders (Szenario 2b)
+    if order.bracket_role == "ENTRY":
+        has_active_child = any(
+            local_ord.parent_id == order_id and local_ord.order_id in tws_active_orders
+            for local_ord in local_orders
+        )
+        has_position = _has_live_position(
+            interactive_brokers_session, order.account_id, order.symbol
+        )
+
+        if has_active_child or has_position:
+            logger.info(
+                "Recovery Szenario 2b: Entry-Order wurde gefüllt (Aktive Position oder Child-Order gefunden). Setze auf Filled.",
+                order_id=order_id,
+                symbol=order.symbol,
+            )
+            await database_connection.execute("BEGIN IMMEDIATE")
+            try:
+                await database_connection.execute(
+                    "UPDATE orders SET status = 'Filled' WHERE order_id = ?",
+                    (order_id,),
+                )
+                await database_connection.execute("COMMIT")
+            except Exception:
+                await database_connection.execute("ROLLBACK")
+                raise
+
+            # Fehlende Ausführungen sichern
+            await _save_missing_executions(database_connection, order, interactive_brokers_session)
+            return
+
+    # Recovery Szenario 3: Ghost Order
+    logger.warning(
+        "Recovery Szenario 3: Ghost Order erkannt (Submitted in DB, nicht in TWS). Abbrechen.",
+        order_id=order_id,
+    )
+    await database_connection.execute("BEGIN IMMEDIATE")
+    try:
+        await database_connection.execute(
+            "UPDATE orders SET status = 'Cancelled' WHERE order_id = ?",
+            (order_id,),
+        )
+        await database_connection.execute("COMMIT")
+    except Exception:
+        await database_connection.execute("ROLLBACK")
+        raise
+    await notifier.send_message(
+        f"⚠️ GHOST ORDER RECOVERED: Order {order_id} ({order.symbol} {order.bracket_role}) "
+        f"stand auf 'Submitted', existiert aber nicht in TWS. Status wurde auf 'Cancelled' gesetzt."
+    )
 
 
 async def _recover_created_order(
@@ -279,3 +313,99 @@ async def _recover_created_order(
             trade_group_id=order.trade_group_id,
         )
         groups_to_requeue.add(order.trade_group_id)
+
+
+def _has_live_position(
+    interactive_brokers: IB, account_id: str, symbol: str
+) -> bool:
+    """Prüft, ob für das Symbol eine offene Position im Depot vorhanden ist."""
+    for position in interactive_brokers.positions():
+        if (
+            position.account == account_id
+            and position.contract.symbol == symbol.upper()
+            and abs(position.position) > 0
+        ):
+            return True
+    return False
+
+
+async def _save_missing_executions(
+    database_connection: aiosqlite.Connection,
+    order: OrderRow,
+    interactive_brokers: IB,
+) -> None:
+    """Sucht nach Fills der Order in TWS und speichert sie in der executions-Tabelle."""
+    order_id = order.order_id
+    found_fills = [
+        fill
+        for fill in interactive_brokers.fills()
+        if fill.execution.orderId == order_id
+    ]
+
+    if found_fills:
+        for fill in found_fills:
+            exec_id = fill.execution.execId
+            price = Decimal(str(fill.execution.price))
+            qty = Decimal(str(fill.execution.shares))
+            currency = fill.contract.currency
+            executed_at = fill.execution.time
+            commission = Decimal("0.0")
+            if hasattr(fill, "commissionReport") and fill.commissionReport:
+                commission = Decimal(str(fill.commissionReport.commission))
+
+            await database_connection.execute("BEGIN IMMEDIATE")
+            try:
+                await database_connection.execute(
+                    """
+                    INSERT OR IGNORE INTO executions (exec_id, order_id, price, qty, commission, currency, executed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        exec_id,
+                        order_id,
+                        str(price),
+                        str(qty),
+                        str(commission),
+                        currency,
+                        executed_at,
+                    ),
+                )
+                await database_connection.execute("COMMIT")
+            except Exception as exception:
+                await database_connection.execute("ROLLBACK")
+                logger.error(
+                    "Fehler beim Speichern der nachgetragenen Ausfuehrung",
+                    exec_id=exec_id,
+                    error=str(exception),
+                )
+    else:
+        # Fallback-Ausführung anlegen, um PnL-Berechnung im Settlement abzusichern
+        logger.warning(
+            "Keine TWS-Ausfuehrungsdetails fuer rekonstruierte Order gefunden. Verwende Fallback.",
+            order_id=order_id,
+        )
+        fallback_exec_id = f"RECOVERED_{order_id}"
+        await database_connection.execute("BEGIN IMMEDIATE")
+        try:
+            await database_connection.execute(
+                """
+                INSERT OR IGNORE INTO executions (exec_id, order_id, price, qty, commission, currency, executed_at)
+                VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                """,
+                (
+                    fallback_exec_id,
+                    order_id,
+                    str(order.target_price or Decimal("0.0")),
+                    str(order.quantity),
+                    "0.0",
+                    "USD",
+                ),
+            )
+            await database_connection.execute("COMMIT")
+        except Exception as exception:
+            await database_connection.execute("ROLLBACK")
+            logger.error(
+                "Fehler beim Speichern der Fallback-Ausfuehrung",
+                order_id=order_id,
+                error=str(exception),
+            )

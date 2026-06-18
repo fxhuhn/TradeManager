@@ -162,7 +162,9 @@ class TradingSystemOrchestrator:
     async def graceful_shutdown(self) -> None:
         """Führt eine geordnete Shutdown-Sequenz des gesamten Systems aus."""
         logger.info("Beginne Shutdown-Sequenz...")
-        await self.notifier.send_message("⚠️ Trading System wird heruntergefahren...")
+        await self.notifier.send_system_status(
+            title="System Shutdown initiiert", emoji="⚠️"
+        )
 
         logger.info("Breche Hintergrunddienste ab...")
         for task in self.tasks:
@@ -188,7 +190,9 @@ class TradingSystemOrchestrator:
             logger.info("Verbindung getrennt")
 
         logger.info("Shutdown-Sequenz erfolgreich abgeschlossen. Auf Wiedersehen!")
-        await self.notifier.send_message("🛑 Trading System geordnet heruntergefahren.")
+        await self.notifier.send_system_status(
+            title="System geordnet heruntergefahren", emoji="🛑"
+        )
 
     async def _execute_reconnect_loop(self) -> None:
         """Führt die Wiederverbindungsschleife mit steigenden Intervallen aus."""
@@ -213,8 +217,8 @@ class TradingSystemOrchestrator:
             success = await self._attempt_single_reconnect(attempt)
             if success:
                 logger.info("Wiederverbindung erfolgreich hergestellt!")
-                await self.notifier.send_message(
-                    "✅ WIEDERVERBUNDEN: Die Verbindung zur Interactive Brokers TWS wurde erfolgreich wiederhergestellt."
+                await self.notifier.send_system_status(
+                    title="WIEDERVERBUNDEN", emoji="✅"
                 )
                 self.interactive_brokers.reqAutoOpenOrders(True)
                 logger.info("Trigger Recovery-Lauf nach Wiederverbindung...")
@@ -226,8 +230,9 @@ class TradingSystemOrchestrator:
         logger.critical(
             f"Wiederverbindung nach {max_attempts} Versuchen fehlgeschlagen. Anwendung bleibt getrennt."
         )
-        await self.notifier.send_message(
-            f"🚨 WIEDERVERBINDUNG FEHLGESCHLAGEN: Die Verbindung konnte nach {max_attempts} Versuchen nicht wiederhergestellt werden."
+        await self.notifier.send_system_status(
+            title=f"WIEDERVERBINDUNG FEHLGESCHLAGEN ({max_attempts} Versuche)",
+            emoji="🚨",
         )
 
     async def _attempt_single_reconnect(self, attempt: int) -> bool:
@@ -268,7 +273,7 @@ async def main() -> None:
 
     # 2. Telegram Notifier initialisieren
     notifier = TelegramNotifier(config)
-    await notifier.send_message("🚀 Trading System startet...")
+    await notifier.send_system_status(title="Trading System startet", emoji="🚀")
 
     # 3. Datenbank-Integrity Check
     database_path = await _verify_database_integrity(root_directory_path, notifier)
@@ -422,8 +427,9 @@ async def _verify_database_integrity(
         logger.critical(
             "DB-Integritaetspruefung fehlgeschlagen. Beende zur Sicherheit."
         )
-        await notifier.send_message(
-            "🚨 KRITISCH: DB-Integritaetspruefung fehlgeschlagen! Anwendung beendet."
+        await notifier.send_system_status(
+            title="DB-Integritaetspruefung fehlgeschlagen! Anwendung beendet.",
+            emoji="🚨",
         )
         sys.exit(1)
     return database_path

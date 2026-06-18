@@ -48,12 +48,17 @@ def build_order(order_row: OrderRow) -> Order:
             order_type=order.orderType,
         )
 
-    # OCA (One-Cancels-All) Gruppe konfigurieren für SL und TP
-    # WICHTIG: LOC und MOC Orders duerfen laut IBKR nicht in einer OCA Gruppe sein!
-    if order_row.bracket_role in ("SL", "TP") and order.orderType not in ("LOC", "MOC"):
+    # OCA (One-Cancels-All) Gruppe konfigurieren für SL, TP und EXIT
+    if order_row.bracket_role in ("SL", "TP", "EXIT"):
         # Alle Legs derselben trade_group_id tragen denselben OCA-String.
-        # Wir haengen _v3 an, um Probleme mit dem TWS Session-Memory zu umgehen.
-        order.ocaGroup = f"OCA_{order_row.trade_group_id}_v3"
-        order.ocaType = 1
+        # Wir haengen _v4 an, um Probleme mit dem TWS Session-Memory zu umgehen.
+        order.ocaGroup = f"OCA_{order_row.trade_group_id}_v4"
+
+        # LOC und MOC Orders duerfen laut IBKR nur mit ocaType = 3 (reduce with no block) in einer OCA Gruppe sein.
+        # Auch bei EXIT-Orders nutzen wir ocaType = 3, da sie standardmaessig aus LMT + LOC Exits bestehen.
+        if order.orderType in ("LOC", "MOC") or order_row.bracket_role == "EXIT":
+            order.ocaType = 3
+        else:
+            order.ocaType = 1
 
     return order

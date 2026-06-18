@@ -191,11 +191,11 @@ async def _save_settlement(
             (
                 account_id,
                 trade_group_id,
-                float(outputs.avg_entry_price),
-                float(outputs.avg_exit_price),
-                float(outputs.price_diff_slippage),
-                float(total_commissions),
-                float(outputs.net_profit_loss),
+                str(outputs.avg_entry_price),
+                str(outputs.avg_exit_price),
+                str(outputs.price_diff_slippage),
+                str(total_commissions),
+                str(outputs.net_profit_loss),
             ),
         )
         await db.execute("COMMIT")

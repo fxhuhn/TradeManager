@@ -8,6 +8,7 @@ hoher Ausführungs-Slippage und Abgleich offener TWS-Order-Zustände.
 import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import aiosqlite
@@ -175,20 +176,20 @@ async def check_high_slippage(
         async with db.execute(query) as cursor:
             async for row in cursor:
                 trade_group_id = row["trade_group_id"]
-                price_diff_slippage = row["price_diff_slippage"]
-                avg_entry_price = row["avg_entry_price"]
+                price_diff_slippage = Decimal(str(row["price_diff_slippage"]))
+                avg_entry_price = Decimal(str(row["avg_entry_price"]))
                 symbol = row["symbol"]
 
                 # Prämisse: ABS(price_diff_slippage) > avg_entry_price * max_slippage_pct
-                if avg_entry_price > 0:
-                    slippage_limit = avg_entry_price * max_slippage_pct
+                if avg_entry_price > Decimal("0"):
+                    slippage_limit = avg_entry_price * Decimal(str(max_slippage_pct))
                     if abs(price_diff_slippage) > slippage_limit:
                         if not state.is_group_reported(trade_group_id):
                             message_content = f"📉 SLIPPAGE: {symbol} | {price_diff_slippage:.4f} | Trade: {trade_group_id}"
                             logger.warning(
                                 "Hohe Slippage erkannt",
                                 trade_group_id=trade_group_id,
-                                slippage=price_diff_slippage,
+                                slippage=float(price_diff_slippage),
                             )
 
                             if await notifier.send_message(message_content):

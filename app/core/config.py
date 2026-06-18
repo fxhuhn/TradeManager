@@ -6,6 +6,7 @@ aus .env-Dateien in typsichere Konfigurations-Klassen.
 """
 
 import os
+import re
 
 # Da tomllib ab Python 3.11 in der Standardbibliothek ist
 import tomllib
@@ -76,21 +77,95 @@ class Config:
     strategy_limits: dict[str, float] = field(default_factory=dict)
 
 
+VALID_ENV_KEY_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+
+
 def load_env(environment_path: Path) -> dict[str, str]:
     """Lädt Schlüssel-Wert-Paare aus einer .env-Datei."""
     environment_variables: dict[str, str] = {}
     if environment_path.exists():
         with open(environment_path, encoding="utf-8") as file_handle:
-            for raw_line in file_handle:
+            for line_number, raw_line in enumerate(file_handle, start=1):
                 line = raw_line.strip()
                 if not line or line.startswith("#"):
                     continue
                 if "=" in line:
                     key, value = line.split("=", 1)
                     key = key.strip()
+                    if not VALID_ENV_KEY_PATTERN.match(key):
+                        raise ValueError(
+                            f"Ungueltiger Schluesselname '{key}' in .env (Zeile {line_number})"
+                        )
                     value = value.strip().strip('"').strip("'")
                     environment_variables[key] = value
     return environment_variables
+
+
+def _parse_tws_config(tws_data: dict[str, object]) -> TwsConfig:
+    return TwsConfig(
+        host=str(tws_data.get("host", "127.0.0.1")),
+        port=int(tws_data.get("port", 7497)),
+        client_id=int(tws_data.get("client_id", 0)),
+        connection_timeout_s=float(tws_data.get("connection_timeout_s", 10.0)),
+        reconnect_initial_delay_s=float(tws_data.get("reconnect_initial_delay_s", 5.0)),
+        reconnect_max_attempts=int(tws_data.get("reconnect_max_attempts", 10)),
+        reconnect_max_delay_s=float(tws_data.get("reconnect_max_delay_s", 120.0)),
+        request_timeout_s=float(tws_data.get("request_timeout_s", 10.0)),
+        completed_orders_timeout_s=float(tws_data.get("completed_orders_timeout_s", 15.0)),
+    )
+
+
+def _parse_app_config(app_data: dict[str, object]) -> AppConfig:
+    return AppConfig(
+        max_retries=int(app_data.get("max_retries", 3)),
+        order_rate_limit_s=float(app_data.get("order_rate_limit_s", 0.02)),
+        dead_order_threshold_minutes=int(app_data.get("dead_order_threshold_minutes", 15)),
+        alert_watcher_interval_s=int(app_data.get("alert_watcher_interval_s", 60)),
+        csv_watcher_interval_s=int(app_data.get("csv_watcher_interval_s", 60)),
+        order_sync_interval_s=int(app_data.get("order_sync_interval_s", 300)),
+        retry_backoff_base_s=float(app_data.get("retry_backoff_base_s", 5.0)),
+        shutdown_join_timeout_s=float(app_data.get("shutdown_join_timeout_s", 15.0)),
+        database_timeout_s=float(app_data.get("database_timeout_s", 30.0)),
+        max_csv_size_bytes=int(app_data.get("max_csv_size_bytes", 5242880)),
+        log_file_path=str(app_data.get("log_file_path", "data/app.log")),
+        log_rotation_backup_count=int(app_data.get("log_rotation_backup_count", 5)),
+    )
+
+
+def _parse_account_config(account_data: dict[str, object]) -> AccountConfig:
+    account_config = AccountConfig(
+        default_limit_pct=float(account_data.get("default_limit_pct", 0.05)),
+        margin_multiplier_factor=float(account_data.get("margin_multiplier_factor", 2.0)),
+        sizing_mode=str(account_data.get("sizing_mode", "margin_adjusted_capital")),
+    )
+
+    if account_config.sizing_mode not in ("margin_adjusted_capital", "total_cash"):
+        raise ValueError(
+            f"Ungueltiger sizing_mode: {account_config.sizing_mode}. "
+            "Erlaubt sind 'margin_adjusted_capital' oder 'total_cash'."
+        )
+    if account_config.margin_multiplier_factor <= 0.0:
+        raise ValueError("margin_multiplier_factor muss groesser als 0 sein.")
+
+    return account_config
+
+
+def _parse_telegram_config(
+    telegram_data: dict[str, object], environment_variables: dict[str, str]
+) -> TelegramConfig:
+    telegram_bot_token = os.environ.get(
+        "TELEGRAM_BOT_TOKEN"
+    ) or environment_variables.get("TELEGRAM_BOT_TOKEN", "")
+    telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID") or environment_variables.get(
+        "TELEGRAM_CHAT_ID", ""
+    )
+
+    return TelegramConfig(
+        bot_token=telegram_bot_token,
+        chat_id=telegram_chat_id,
+        rate_limit_delay_s=float(telegram_data.get("rate_limit_delay_s", 1.5)),
+        request_timeout_s=float(telegram_data.get("request_timeout_s", 10.0)),
+    )
 
 
 def load_config(root_path: Path = Path(".")) -> Config:
@@ -107,74 +182,16 @@ def load_config(root_path: Path = Path(".")) -> Config:
     with open(config_toml_path, "rb") as file_handle:
         toml_data = tomllib.load(file_handle)
 
-    tws_data = toml_data.get("tws", {})
-    app_data = toml_data.get("app", {})
-    account_data = toml_data.get("account", {})
-    strategy_limits = toml_data.get("strategy_limits", {})
-    telegram_data = toml_data.get("telegram", {})
+    tws_config = _parse_tws_config(toml_data.get("tws", {}))
+    app_config = _parse_app_config(toml_data.get("app", {}))
+    account_config = _parse_account_config(toml_data.get("account", {}))
 
-    tws_config = TwsConfig(
-        host=tws_data.get("host", "127.0.0.1"),
-        port=int(tws_data.get("port", 7497)),
-        client_id=int(tws_data.get("client_id", 0)),
-        connection_timeout_s=float(tws_data.get("connection_timeout_s", 10.0)),
-        reconnect_initial_delay_s=float(tws_data.get("reconnect_initial_delay_s", 5.0)),
-        reconnect_max_attempts=int(tws_data.get("reconnect_max_attempts", 10)),
-        reconnect_max_delay_s=float(tws_data.get("reconnect_max_delay_s", 120.0)),
-        request_timeout_s=float(tws_data.get("request_timeout_s", 10.0)),
-        completed_orders_timeout_s=float(
-            tws_data.get("completed_orders_timeout_s", 15.0)
-        ),
-    )
-
-    app_config = AppConfig(
-        max_retries=int(app_data.get("max_retries", 3)),
-        order_rate_limit_s=float(app_data.get("order_rate_limit_s", 0.02)),
-        dead_order_threshold_minutes=int(app_data.get("dead_order_threshold_minutes", 15)),
-        alert_watcher_interval_s=int(app_data.get("alert_watcher_interval_s", 60)),
-        csv_watcher_interval_s=int(app_data.get("csv_watcher_interval_s", 60)),
-        order_sync_interval_s=int(app_data.get("order_sync_interval_s", 300)),
-        retry_backoff_base_s=float(app_data.get("retry_backoff_base_s", 5.0)),
-        shutdown_join_timeout_s=float(app_data.get("shutdown_join_timeout_s", 15.0)),
-        database_timeout_s=float(app_data.get("database_timeout_s", 30.0)),
-        max_csv_size_bytes=int(app_data.get("max_csv_size_bytes", 5242880)),
-        log_file_path=app_data.get("log_file_path", "data/app.log"),
-        log_rotation_backup_count=int(app_data.get("log_rotation_backup_count", 5)),
-    )
-
-    account_config = AccountConfig(
-        default_limit_pct=float(account_data.get("default_limit_pct", 0.05)),
-        margin_multiplier_factor=float(account_data.get("margin_multiplier_factor", 2.0)),
-        sizing_mode=str(account_data.get("sizing_mode", "margin_adjusted_capital")),
-    )
-
-    if account_config.sizing_mode not in ("margin_adjusted_capital", "total_cash"):
-        raise ValueError(
-            f"Ungueltiger sizing_mode: {account_config.sizing_mode}. "
-            "Erlaubt sind 'margin_adjusted_capital' oder 'total_cash'."
-        )
-    if account_config.margin_multiplier_factor <= 0.0:
-        raise ValueError("margin_multiplier_factor muss groesser als 0 sein.")
-
-    # Laden der .env Variablen
     environment_variables = load_env(environment_path)
-
-    # Prämisse: Reale Umgebungsvariablen haben Vorrang vor der .env-Datei
-    telegram_bot_token = os.environ.get(
-        "TELEGRAM_BOT_TOKEN"
-    ) or environment_variables.get("TELEGRAM_BOT_TOKEN", "")
-    telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID") or environment_variables.get(
-        "TELEGRAM_CHAT_ID", ""
+    telegram_config = _parse_telegram_config(
+        toml_data.get("telegram", {}), environment_variables
     )
 
-    telegram_config = TelegramConfig(
-        bot_token=telegram_bot_token,
-        chat_id=telegram_chat_id,
-        rate_limit_delay_s=float(telegram_data.get("rate_limit_delay_s", 1.5)),
-        request_timeout_s=float(telegram_data.get("request_timeout_s", 10.0)),
-    )
-
-    # Strategy limits dict keys must be typed float
+    strategy_limits = toml_data.get("strategy_limits", {})
     typed_strategy_limits = {
         strategy_name: float(limit_value)
         for strategy_name, limit_value in strategy_limits.items()

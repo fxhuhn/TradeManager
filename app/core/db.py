@@ -123,6 +123,9 @@ async def _apply_migration_file(
     """Führt ein einzelnes Migrationsskript aus und verbucht die Version."""
     sql_script = sql_file.read_text(encoding="utf-8")
 
+    # Fremdschlüssel-Prüfungen vorübergehend ausschalten für Tabellen-Rekonstruktion
+    await db.execute("PRAGMA foreign_keys = OFF;")
+
     await db.execute("BEGIN IMMEDIATE")
     try:
         for statement in sql_script.split(";"):
@@ -139,6 +142,9 @@ async def _apply_migration_file(
         await db.execute("ROLLBACK")
         logger.error("Fehler bei Migration", version=version, error=str(exception))
         raise exception
+    finally:
+        # Fremdschlüssel-Prüfungen wieder aktivieren
+        await db.execute("PRAGMA foreign_keys = ON;")
 
 
 async def safe_execute_transaction(

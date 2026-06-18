@@ -67,19 +67,19 @@ class TelegramNotifier:
         await self.limiter.wait()
 
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
-        # Unterstriche fuer den Telegram-Markdown-Parser maskieren
-        safe_text = text.replace("_", "\\_")
 
         payload = {
             "chat_id": self.chat_id,
-            "text": f"🤖 *IBKR Trading System*\n\n{safe_text}",
-            "parse_mode": "Markdown",
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
         }
 
         try:
+            request_timeout = aiohttp.ClientTimeout(total=self.request_timeout_seconds)
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    url, json=payload, timeout=self.request_timeout_seconds
+                    url, json=payload, timeout=request_timeout
                 ) as response:
                     if response.status == 200:
                         logger.info("Telegram Alert gesendet", message=text)
@@ -95,3 +95,103 @@ class TelegramNotifier:
         except Exception as exception:
             logger.error("Fehler beim Senden des Telegram-Alerts", error=str(exception))
             return False
+
+    async def send_system_status(self, title: str, emoji: str = "🚀") -> bool:
+        """Sendet eine System-Status-Nachricht (Start/Stop)."""
+        from datetime import datetime
+
+        now_str = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+        message = (
+            f"{emoji} <b>IBKR: {title}</b>\n"
+            f"🕒 Time: {now_str}"
+        )
+        return await self.send_message(message)
+
+    async def send_order_filled(
+        self,
+        symbol: str,
+        bracket_role: str,
+        action: str,
+        quantity: float,
+        price: float,
+        order_type: str,
+        order_id: int,
+        strategy_name: str,
+    ) -> bool:
+        """Sendet eine Erfolgsmeldung für eine gefüllte Order."""
+        total_val = float(quantity) * float(price) if price else 0.0
+        price_str = f"{float(price):.2f}" if price else "MKT"
+
+        message = (
+            f"🟢 <b>ORDER GEFÜLLT</b> | <code>{symbol}</code>\n"
+            f"├─ <b>Typ:</b> <code>{bracket_role}</code> ({action})\n"
+            f"├─ <b>Menge:</b> <code>{quantity}</code> @ <code>{price_str}</code> ({order_type})\n"
+            f"├─ <b>Wert:</b> <code>$ {total_val:,.2f}</code>\n"
+            f"└─ <b>System:</b> ID: <code>{order_id}</code> • <i>{strategy_name}</i>"
+        )
+        return await self.send_message(message)
+
+    async def send_order_failed(
+        self,
+        order_id: int,
+        tws_code: int,
+        reason: str,
+        symbol: str = "Unbekannt",
+        bracket_role: str = "-",
+        is_fatal: bool = True
+    ) -> bool:
+        """Sendet eine Fehler/Warnmeldung für eine fehlgeschlagene oder stornierte Order."""
+        emoji = "🚨" if is_fatal else "🚫"
+        title = "ORDER FEHLGESCHLAGEN" if is_fatal else "ORDER CANCELED"
+
+        message = (
+            f"{emoji} <b>{title}</b> | <code>ID: {order_id}</code>\n"
+            f"├─ <b>Symbol/Typ:</b> <code>{symbol}</code> ({bracket_role})\n"
+            f"├─ <b>TWS-Code:</b> <code>{tws_code}</code>\n"
+            f"└─ <b>Grund:</b> <i>{reason}</i>"
+        )
+        return await self.send_message(message)
+
+    async def send_importer_info(self, file_name: str, status: str, details: str, emoji: str = "📁", title: str = "DATEN IMPORT") -> bool:
+        """Sendet eine Info-Meldung über importierte Daten oder Validierungsfehler."""
+        message = (
+            f"{emoji} <b>{title}</b> | <code>{file_name}</code>\n"
+            f"├─ <b>Status:</b> <code>{status}</code>\n"
+            f"└─ <b>Details:</b> <i>{details}</i>"
+        )
+        return await self.send_message(message)
+
+    async def send_bracket_order_submitted(
+        self,
+        symbol: str,
+        trade_group_id: str,
+        strategy_name: str,
+        orders: list[dict]
+    ) -> bool:
+        """
+        Sendet eine Zusammenfassung einer Trade-Gruppe (Bracket/OCA).
+        orders erwartet dicts mit keys: role, action, quantity, price, order_type
+        """
+        if not orders:
+            return False
+
+        if len(orders) == 1:
+            title = "ORDER GESENDET"
+        else:
+            title = "BRACKET ORDER GESENDET"
+
+        lines = [f"📤 <b>{title}</b> | <code>{symbol}</code>"]
+
+        for order in orders:
+            price_str = f"{float(order['price']):.2f}" if order.get('price') else "MKT"
+            lines.append(
+                f"├─ <b>{order['role']}:</b> <code>{order['action']} {order['quantity']}</code> @ <code>{price_str}</code> ({order['order_type']})"
+            )
+
+        if trade_group_id:
+            lines.append(f"└─ <b>System:</b> Group: <code>{trade_group_id}</code> • <i>{strategy_name}</i>")
+        else:
+            lines.append(f"└─ <b>System:</b> <i>{strategy_name}</i>")
+
+        message = "\n".join(lines)
+        return await self.send_message(message)

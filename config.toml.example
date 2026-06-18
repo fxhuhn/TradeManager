@@ -1,0 +1,41 @@
+# config.toml
+# Strukturelle Parameter für das IBKR Equities Trading System
+
+[tws]
+host = "127.0.0.1"
+port = 7497                       # 7497 für Paper-Trading, 7496 für Live-Trading
+client_id = 0                     # 0 ermöglicht automatisches Binding manueller Orders
+connection_timeout_s = 10.0       # Timeout beim Verbindungsaufbau zu TWS
+reconnect_initial_delay_s = 5.0   # Initiale Wartezeit bei Verbindungsabbruch
+reconnect_max_attempts = 10       # Maximale Versuche für Reconnects
+reconnect_max_delay_s = 120.0     # Obergrenze für exponentiellen Backoff bei Reconnects
+request_timeout_s = 10.0          # Timeout für reguläre TWS API-Requests (z. B. reqOpenOrdersAsync)
+completed_orders_timeout_s = 15.0 # Timeout beim Abrufen abgeschlossener Orders (reqCompletedOrdersAsync)
+
+[app]
+max_retries = 3                   # Maximale Retry-Versuche bei transienten API-Fehlern
+order_rate_limit_s = 0.02         # 0.02 Sekunden Pause zwischen Orders (50 req/s)
+dead_order_threshold_minutes = 15     # Zeitspanne in Minuten, nach der hängende Orders gemeldet werden
+alert_watcher_interval_s = 60     # Intervall in Sekunden für den Alert Watcher Loop
+csv_watcher_interval_s = 60       # Intervall in Sekunden für den CSV Directory Watcher Loop
+order_sync_interval_s = 300       # Intervall in Sekunden für den periodischen Order-Zustandsabgleich
+retry_backoff_base_s = 5.0        # Basiswert in Sekunden für exponentiellen Retry-Backoff (5s, 10s, 20s...)
+shutdown_join_timeout_s = 15.0    # Maximale Zeit in Sekunden, um beim Shutdown auf das Leeren der Queue zu warten
+database_timeout_s = 30.0         # Verhindert Lockouts bei hoher paralleler DB-Last (SQLite timeout)
+max_csv_size_bytes = 5242880      # 5 MB Sicherheitslimit für CSV-Import zur DoS-Abwehr
+log_file_path = "data/app.log"              # Pfad zur zentralen Logdatei
+log_rotation_backup_count = 5               # Anzahl der rotierenden Backup-Dateien
+
+[account]
+default_limit_pct = 0.05          # Standard-Kapitalallokation (5% des verfügbaren Kapitals)
+margin_multiplier_factor = 2.0     # Hebel-Faktor für Margin-Konten
+sizing_mode = "margin_adjusted_capital" # "margin_adjusted_capital" oder "total_cash"
+
+[strategy_limits]
+# Überschreibt default_limit_pct pro Strategie-Name aus der CSV
+Momentum = 0.10                   # Beispiel: 10% Allokation für Momentum-Strategie
+MeanReversion = 0.05
+
+[telegram]
+rate_limit_delay_s = 1.5          # Rate-Limit-Intervall in Sekunden zur Einhaltung der Telegram API-Vorgaben
+request_timeout_s = 10.0          # HTTP-Request-Timeout für Telegram sendMessage Calls

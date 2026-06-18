@@ -181,17 +181,22 @@ class TwsCallbacksManager:
             if not order_row:
                 return
 
-            price_str = (
-                f" @ {order_row['target_price']:.2f}"
-                if order_row["target_price"] and order_row["target_price"] > 0
-                else ""
+            raw_target_price = order_row["target_price"]
+            target_price_decimal = (
+                Decimal(str(raw_target_price))
+                if raw_target_price is not None
+                else None
             )
-            message = (
-                f"✅ ORDER GEFÜLLT: {order_row['symbol']} | {order_row['bracket_role']} | "
-                f"{order_row['action']} {order_row['quantity']}{price_str} ({order_row['order_type']}) | "
-                f"ID: {order_id} ({order_row['strategy_name']})"
+            await self.notifier.send_order_filled(
+                symbol=order_row["symbol"],
+                bracket_role=order_row["bracket_role"],
+                action=order_row["action"],
+                quantity=float(order_row["quantity"]),
+                price=float(target_price_decimal) if target_price_decimal else 0.0,
+                order_type=order_row["order_type"],
+                order_id=order_id,
+                strategy_name=order_row["strategy_name"],
             )
-            await self.notifier.send_message(message)
 
             bracket_role = order_row["bracket_role"]
             trade_group_id = order_row["trade_group_id"]
@@ -262,8 +267,8 @@ class TwsCallbacksManager:
                 (
                     exec_id,
                     order_id,
-                    float(price),
-                    float(qty),
+                    str(price),
+                    str(qty),
                     currency,
                     executed_at,
                 ),
@@ -312,7 +317,7 @@ class TwsCallbacksManager:
         try:
             await db.execute(
                 "UPDATE executions SET commission = ?, currency = ? WHERE exec_id = ?",
-                (float(commission), currency, exec_id),
+                (str(commission), currency, exec_id),
             )
             await db.execute("COMMIT")
             logger.debug(
@@ -406,9 +411,11 @@ class TwsCallbacksManager:
         finally:
             await db.close()
 
-        await self.notifier.send_message(
-            f"🚫 ORDER CANCELED: Order {request_id} wurde storniert "
-            f"(TWS-Code {error_code}): {error_string}"
+        await self.notifier.send_order_failed(
+            order_id=request_id,
+            tws_code=error_code,
+            reason=error_string,
+            is_fatal=False,
         )
 
     async def _fail_order_in_db(
@@ -434,18 +441,20 @@ class TwsCallbacksManager:
         finally:
             await db.close()
 
-        await self.notifier.send_message(
-            f"🚨 SYSTEM-FEHLER (FATAL): Order {request_id} schlug fehl "
-            f"(TWS-Code {error_code}): {error_string}"
+        await self.notifier.send_order_failed(
+            order_id=request_id,
+            tws_code=error_code,
+            reason=error_string,
+            is_fatal=True,
         )
 
     def on_disconnected(self) -> None:
         """Loggt Verbindungsverlust zu TWS und alarmiert den Betreiber."""
         logger.error("Verbindung zur Interactive Brokers TWS wurde getrennt!")
         asyncio.create_task(
-            self.notifier.send_message(
-                "🚨 VERBINDUNGSABBRUCH: Die TCP-Verbindung zur Interactive Brokers "
-                "TWS ist abgebrochen! Es wird versucht, die Verbindung wiederherzustellen."
+            self.notifier.send_system_status(
+                title="VERBINDUNGSABBRUCH",
+                emoji="🚨",
             )
         )
         asyncio.create_task(self.run_reconnect_callback())

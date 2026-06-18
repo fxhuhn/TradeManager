@@ -143,9 +143,12 @@ async def _process_daily_csv_file(
             file=csv_file.name,
             backup=backup_path.name,
         )
-        await notifier.send_message(
-            f"✅ DATEI IMPORTIERT: Die Datei `{csv_file.name}` wurde erfolgreich "
-            f"eingelesen und nach `.bak` archiviert."
+        await notifier.send_importer_info(
+            file_name=csv_file.name,
+            status="Erfolgreich",
+            details="Eingelesen und nach .bak archiviert.",
+            emoji="📁",
+            title="DATEI IMPORTIERT"
         )
 
     except Exception as exception:
@@ -163,9 +166,12 @@ async def _process_daily_csv_file(
                 file=csv_file.name,
                 error_file=error_path.name,
             )
-            await notifier.send_message(
-                f"🚨 IMPORT-FEHLER: Die Datei `{csv_file.name}` schlug fehl und wurde nach `.err` umbenannt. "
-                f"Fehler: {str(exception)}"
+            await notifier.send_importer_info(
+                file_name=csv_file.name,
+                status="Fehler",
+                details=f"Nach .err umbenannt. Fehler: {str(exception)}",
+                emoji="🚨",
+                title="IMPORT-FEHLER"
             )
         except Exception as rename_exception:
             logger.critical(
@@ -190,9 +196,12 @@ async def _check_csv_dos_limits(
             size=file_size_bytes,
             max_size=config.app.max_csv_size_bytes,
         )
-        await notifier.send_message(
-            f"❌ INTEGRITÄTS-FEHLER: CSV-Datei ({file_size_bytes} Bytes) überschreitet das "
-            f"Sicherheitslimit von {config.app.max_csv_size_bytes} Bytes. Import abgelehnt."
+        await notifier.send_importer_info(
+            file_name=csv_path.name,
+            status="Abgelehnt (DoS-Schutz)",
+            details=f"Überschreitet Limit ({file_size_bytes} > {config.app.max_csv_size_bytes} Bytes)",
+            emoji="❌",
+            title="INTEGRITÄTS-FEHLER"
         )
         return False
     return True
@@ -215,8 +224,12 @@ async def _process_and_upsert_group(
             trade_group_id=trade_group_id,
             error=error_message,
         )
-        await notifier.send_message(
-            f"❌ VALIDIERUNGSFEHLER ({trade_group_id}): {error_message}. Gruppe wurde uebersprungen."
+        await notifier.send_importer_info(
+            file_name=trade_group_id,
+            status="Übersprungen",
+            details=error_message,
+            emoji="❌",
+            title="VALIDIERUNGSFEHLER"
         )
         return
 
@@ -257,9 +270,12 @@ async def _process_and_upsert_group(
                 "Kein verfuegbares Allokations-Kapital vorhanden. Überspringe Gruppe.",
                 trade_group_id=trade_group_id,
             )
-            await notifier.send_message(
-                f"⚠️ KAPITAL-FEHLER ({trade_group_id}): Kein verfuegbares Allokations-Kapital fuer Account {account_id}. "
-                f"Gruppe uebersprungen."
+            await notifier.send_importer_info(
+                file_name=trade_group_id,
+                status="Übersprungen",
+                details=f"Kein verfuegbares Allokations-Kapital fuer Account {account_id}.",
+                emoji="⚠️",
+                title="KAPITAL-FEHLER"
             )
             return
 
@@ -278,9 +294,12 @@ async def _process_and_upsert_group(
                 if entry_leg.target_price
                 else 0.0,
             )
-            await notifier.send_message(
-                f"⚠️ SIZING-FEHLER ({trade_group_id}): Erforderliches Kapital überschreitet Limit "
-                f"({float(maximum_capital_allocation):.2f}). Reduzierte Menge = 0. Gruppe uebersprungen."
+            await notifier.send_importer_info(
+                file_name=trade_group_id,
+                status="Reduziert auf 0",
+                details=f"Erforderliches Kapital überschreitet Limit ({float(maximum_capital_allocation):.2f}).",
+                emoji="⚠️",
+                title="SIZING-FEHLER"
             )
             return
 
@@ -357,7 +376,7 @@ async def _upsert_trade_group_legs(
                             entry_leg.action,
                             target_quantity,
                             entry_leg.order_type,
-                            float(entry_leg.target_price)
+                            str(entry_leg.target_price)
                             if entry_leg.target_price is not None
                             else None,
                             entry_leg.tif,
@@ -395,7 +414,7 @@ async def _upsert_trade_group_legs(
                     entry_leg.action,
                     target_quantity,
                     entry_leg.order_type,
-                    float(entry_leg.target_price)
+                    str(entry_leg.target_price)
                     if entry_leg.target_price is not None
                     else None,
                     entry_leg.tif,
@@ -408,8 +427,12 @@ async def _upsert_trade_group_legs(
                 trade_group_id=trade_group_id,
             )
             await db.execute("ROLLBACK")
-            await notifier.send_message(
-                f"❌ IMPORT-FEHLER ({trade_group_id}): Exit-Order importiert, aber kein passender ENTRY-Auftrag in der DB gefunden."
+            await notifier.send_importer_info(
+                file_name=trade_group_id,
+                status="Abgebrochen",
+                details="Exit-Order importiert, aber kein passender ENTRY-Auftrag in der DB gefunden.",
+                emoji="❌",
+                title="IMPORT-FEHLER"
             )
             return
 
@@ -418,15 +441,15 @@ async def _upsert_trade_group_legs(
                 continue
 
             async with db.execute(
-                "SELECT order_id, status FROM orders WHERE account_id = ? AND trade_group_id = ? AND bracket_role = ?",
-                (account_id, trade_group_id, leg.bracket_role),
+                "SELECT order_id, status FROM orders WHERE account_id = ? AND trade_group_id = ? AND bracket_role = ? AND order_type = ?",
+                (account_id, trade_group_id, leg.bracket_role, leg.order_type),
             ) as cursor:
                 child_row = await cursor.fetchone()
 
             if child_row:
                 child_order_id = child_row["order_id"]
                 existing_status = child_row["status"]
-                if existing_status in ("Created", "Error"):
+                if existing_status in ("Created", "Error", "Cancelled"):
                     await db.execute(
                         """
                         UPDATE orders SET
@@ -443,7 +466,7 @@ async def _upsert_trade_group_legs(
                             leg.action,
                             target_quantity,
                             leg.order_type,
-                            float(leg.target_price)
+                            str(leg.target_price)
                             if leg.target_price is not None
                             else None,
                             leg.tif,
@@ -477,7 +500,7 @@ async def _upsert_trade_group_legs(
                         leg.action,
                         target_quantity,
                         leg.order_type,
-                        float(leg.target_price)
+                        str(leg.target_price)
                         if leg.target_price is not None
                         else None,
                         leg.tif,
@@ -499,8 +522,12 @@ async def _upsert_trade_group_legs(
             trade_group_id=trade_group_id,
             error=str(exception),
         )
-        await notifier.send_message(
-            f"❌ DB-FEHLER ({trade_group_id}): Import fehlgeschlagen. Error: {str(exception)}"
+        await notifier.send_importer_info(
+            file_name=trade_group_id,
+            status="Fehlgeschlagen",
+            details=f"Error: {str(exception)}",
+            emoji="❌",
+            title="DB-FEHLER"
         )
         raise exception
 

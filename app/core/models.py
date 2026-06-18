@@ -9,6 +9,17 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 
+def decimal_from_db(value: object) -> Decimal | None:
+    """Converts a nullable database value (TEXT or legacy REAL) to Decimal.
+
+    Handles backward compatibility with legacy float-stored values and new
+    TEXT-stored Decimal strings. Returns None for NULL database values.
+    """
+    if value is None:
+        return None
+    return Decimal(str(value))
+
+
 @dataclass(frozen=True)
 class LegRow:
     """Repräsentiert ein einzelnes Leg (Order-Leg) aus der CSV-Datei.
@@ -57,6 +68,30 @@ class OrderRow:
     status: str  # Created, Submitted, PreSubmitted, Filled, Cancelled, Error
     retry_count: int = 0
     transmitted_at: str | None = None
+
+
+def order_row_from_db_row(row: object) -> OrderRow:
+    """Centralized OrderRow construction from an aiosqlite database row."""
+    return OrderRow(
+        order_id=row["order_id"],
+        perm_id=row["perm_id"],
+        parent_id=row["parent_id"],
+        trade_group_id=row["trade_group_id"],
+        account_id=row["account_id"],
+        bracket_role=row["bracket_role"],
+        symbol=row["symbol"],
+        sec_type=row["sec_type"],
+        exchange=row["exchange"],
+        action=row["action"],
+        quantity=row["quantity"],
+        order_type=row["order_type"],
+        target_price=decimal_from_db(row["target_price"]),
+        tif=row["tif"],
+        strategy_name=row["strategy_name"],
+        status=row["status"],
+        retry_count=row["retry_count"],
+        transmitted_at=row["transmitted_at"],
+    )
 
 
 @dataclass(frozen=True)

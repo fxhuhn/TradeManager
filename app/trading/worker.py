@@ -17,7 +17,7 @@ import structlog
 from ib_async import IB
 
 from app.core.config import Config
-from app.core.models import OrderRow
+from app.core.models import OrderRow, order_row_from_db_row
 from app.services.notifier import TelegramNotifier
 from app.trading.order_builder import build_order, make_stock_contract
 
@@ -99,6 +99,7 @@ async def process_trade_group(
         return
 
     is_post_fill: Final[bool] = entry_order.status == "Filled"
+    placed_orders: list[OrderRow] = []
 
     if entry_order.status == "Created":
         logger.info(
@@ -106,7 +107,7 @@ async def process_trade_group(
             trade_group_id=trade_group_id,
         )
         await _process_entry_order(
-            db, interactive_brokers, entry_order, child_orders, notifier, config
+            db, interactive_brokers, entry_order, child_orders, notifier, config, placed_orders
         )
 
     if entry_order.status == "Error":
@@ -124,7 +125,30 @@ async def process_trade_group(
         is_post_fill,
         notifier,
         config,
+        placed_orders,
     )
+
+    if placed_orders:
+        order_dicts = [
+            {
+                "role": o.bracket_role,
+                "action": o.action,
+                "quantity": o.quantity,
+                "price": o.target_price,
+                "order_type": o.order_type,
+            }
+            for o in placed_orders
+        ]
+
+        # Sortiere: ENTRY zuerst, dann TP, dann SL
+        order_dicts.sort(key=lambda x: {"ENTRY": 0, "TP": 1, "SL": 2}.get(x["role"], 3))
+
+        await notifier.send_bracket_order_submitted(
+            symbol=entry_order.symbol,
+            trade_group_id=trade_group_id,
+            strategy_name=entry_order.strategy_name,
+            orders=order_dicts,
+        )
 
 
 async def _load_trade_group_orders(
@@ -141,28 +165,7 @@ async def _load_trade_group_orders(
     """
     async with db.execute(query, (trade_group_id,)) as cursor:
         async for row in cursor:
-            orders.append(
-                OrderRow(
-                    order_id=row["order_id"],
-                    perm_id=row["perm_id"],
-                    parent_id=row["parent_id"],
-                    trade_group_id=row["trade_group_id"],
-                    account_id=row["account_id"],
-                    bracket_role=row["bracket_role"],
-                    symbol=row["symbol"],
-                    sec_type=row["sec_type"],
-                    exchange=row["exchange"],
-                    action=row["action"],
-                    quantity=row["quantity"],
-                    order_type=row["order_type"],
-                    target_price=row["target_price"],
-                    tif=row["tif"],
-                    strategy_name=row["strategy_name"],
-                    status=row["status"],
-                    retry_count=row["retry_count"],
-                    transmitted_at=row["transmitted_at"],
-                )
-            )
+            orders.append(order_row_from_db_row(row))
     return orders
 
 
@@ -173,6 +176,7 @@ async def _process_entry_order(
     child_orders: list[OrderRow],
     notifier: TelegramNotifier,
     config: Config,
+    placed_orders: list[OrderRow],
 ) -> None:
     """Weist dem Entry eine TWS Order-ID zu, aktualisiert die DB und übermittelt an TWS."""
     async with ORDER_ID_LOCK:
@@ -196,6 +200,7 @@ async def _process_entry_order(
     )
     if not success:
         return
+    placed_orders.append(entry_order)
 
     await asyncio.sleep(config.app.order_rate_limit_s)
 
@@ -230,12 +235,13 @@ async def _process_child_orders(
     is_post_fill: bool,
     notifier: TelegramNotifier,
     config: Config,
+    placed_orders: list[OrderRow],
 ) -> None:
     """Verarbeitet die verbleibenden untergeordneten Orders (SL, TP, EXIT)."""
     created_children = [child for child in child_orders if child.status == "Created"]
     for iteration_index, child in enumerate(created_children):
         is_last = iteration_index == len(created_children) - 1
-        await _place_single_child_order(
+        success = await _place_single_child_order(
             db,
             interactive_brokers,
             child,
@@ -245,6 +251,8 @@ async def _process_child_orders(
             notifier,
             config,
         )
+        if success:
+            placed_orders.append(child)
 
 
 async def _place_single_child_order(
@@ -256,7 +264,7 @@ async def _place_single_child_order(
     is_last: bool,
     notifier: TelegramNotifier,
     config: Config,
-) -> None:
+) -> bool:
     """Bereitet eine einzelne untergeordnete Order vor und übermittelt sie an TWS."""
     logger.info(
         "Verarbeite Child-Order",
@@ -269,7 +277,7 @@ async def _place_single_child_order(
             db, interactive_brokers, child, notifier
         )
         if not should_continue:
-            return
+            return False
 
     async with ORDER_ID_LOCK:
         tws_order_id = await _get_next_non_colliding_order_id(db, interactive_brokers)
@@ -284,18 +292,26 @@ async def _place_single_child_order(
     if not is_post_fill:
         ib_child_order.parentId = entry_order.order_id
 
-    ib_child_order.transmit = is_last
+    # Post-Fill-Exits haben keinen parentId (kein Bracket). Ohne parentId löst
+    # transmit=True der letzten Order NICHT die Übermittlung der vorherigen aus.
+    # Jede Post-Fill-Order muss daher einzeln übermittelt werden (transmit=True).
+    # Die gegenseitige Stornierung erfolgt ausschließlich über die OCA-Gruppe.
+    if is_post_fill:
+        ib_child_order.transmit = True
+    else:
+        ib_child_order.transmit = is_last
 
     logger.info(
         "Sende Child-Order an TWS",
         order_id=tws_order_id,
         role=child.bracket_role,
     )
-    await _place_and_verify_order(
+    success = await _place_and_verify_order(
         db, interactive_brokers, contract, ib_child_order, child, tws_order_id, notifier
     )
 
     await asyncio.sleep(config.app.order_rate_limit_s)
+    return success
 
 
 async def _place_and_verify_order(
@@ -360,27 +376,25 @@ async def _place_and_verify_order(
                 logger.error("Fehler beim DB-Update (Error)", error=str(exception))
 
             if "Read-Only mode" in error_msg or "321" in error_msg:
-                await notifier.send_message(
-                    f"🚨 IBKR API READ-ONLY MODUS: Order {tws_order_id} ({order_row.symbol}) "
-                    f"wurde abgewiesen! Bitte API-Einstellungen prüfen.\nDetails: {error_msg}"
+                await notifier.send_order_failed(
+                    order_id=tws_order_id,
+                    tws_code=321,
+                    reason=f"API im READ-ONLY Modus. Details: {error_msg}",
+                    symbol=order_row.symbol,
+                    bracket_role=order_row.bracket_role,
+                    is_fatal=True
                 )
             else:
-                await notifier.send_message(
-                    f"🚫 ORDER FEHLGESCHLAGEN: {order_row.symbol} | {order_row.bracket_role} | "
-                    f"ID: {tws_order_id}\nStatus: {trade.orderStatus.status}\nGrund: {error_msg}"
+                await notifier.send_order_failed(
+                    order_id=tws_order_id,
+                    tws_code=0,
+                    reason=error_msg,
+                    symbol=order_row.symbol,
+                    bracket_role=order_row.bracket_role,
+                    is_fatal=False
                 )
             return False
 
-    price_str = (
-        f" @ {order_row.target_price:.2f}"
-        if order_row.target_price and order_row.target_price > 0
-        else ""
-    )
-    await notifier.send_message(
-        f"📤 ORDER GESENDET: {order_row.symbol} | {order_row.bracket_role} | "
-        f"{order_row.action} {order_row.quantity}{price_str} ({order_row.order_type}) | "
-        f"ID: {tws_order_id} ({order_row.strategy_name})"
-    )
     return True
 
 
@@ -443,9 +457,12 @@ async def _cancel_empty_exit_order(
             error=str(exception),
         )
 
-    await notifier.send_message(
-        f"⚠️ EXIT ABGEBROCHEN ({child.trade_group_id}): Keine offene Position für {child.symbol} "
-        f"vorhanden (Depotbestand: {float(live_position)}). Order wurde storniert."
+    await notifier.send_importer_info(
+        title="EXIT ABGEBROCHEN",
+        file_name=child.trade_group_id,
+        status="Storniert",
+        details=f"Keine offene Position für {child.symbol} vorhanden (Depotbestand: {float(live_position)}).",
+        emoji="⚠️"
     )
 
 
@@ -480,9 +497,12 @@ async def _reduce_exit_order_quantity(
             error=str(exception),
         )
 
-    await notifier.send_message(
-        f"⚠️ EXIT MENGE ANGEPASST ({child.trade_group_id}): Stückzahl für {child.symbol} von "
-        f"{float(intended_quantity)} auf {float(available_quantity)} reduziert, um dem realen Depotbestand zu entsprechen."
+    await notifier.send_importer_info(
+        title="EXIT MENGE ANGEPASST",
+        file_name=child.trade_group_id,
+        status="Reduziert",
+        details=f"Stückzahl für {child.symbol} von {float(intended_quantity)} auf {float(available_quantity)} reduziert.",
+        emoji="⚠️"
     )
 
 
