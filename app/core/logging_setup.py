@@ -7,7 +7,7 @@ import structlog
 
 
 def configure_logging(
-    log_file_path: Path = Path("data/app.log"), backup_count: int = 5
+    log_file_path: Path = Path("data/logs/app.log"), backup_count: int = 5
 ) -> None:
     """
     Konfiguriert structlog in Kombination mit dem Python-Standard-logging-Modul.
