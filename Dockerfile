@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Anwendungsdateien kopieren
 COPY app/ app/
 COPY migrations/ migrations/
-COPY config.toml .
+COPY config.toml.example config.toml
 
 # Verzeichnis für persistente SQLite-Daten und Log-Exporte erstellen
 RUN mkdir -p /app/data

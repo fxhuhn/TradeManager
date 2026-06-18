@@ -101,10 +101,7 @@ class TelegramNotifier:
         from datetime import datetime
 
         now_str = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-        message = (
-            f"{emoji} <b>IBKR: {title}</b>\n"
-            f"🕒 Time: {now_str}"
-        )
+        message = f"{emoji} <b>IBKR: {title}</b>\n🕒 Time: {now_str}"
         return await self.send_message(message)
 
     async def send_order_filled(
@@ -138,7 +135,7 @@ class TelegramNotifier:
         reason: str,
         symbol: str = "Unbekannt",
         bracket_role: str = "-",
-        is_fatal: bool = True
+        is_fatal: bool = True,
     ) -> bool:
         """Sendet eine Fehler/Warnmeldung für eine fehlgeschlagene oder stornierte Order."""
         emoji = "🚨" if is_fatal else "🚫"
@@ -152,7 +149,14 @@ class TelegramNotifier:
         )
         return await self.send_message(message)
 
-    async def send_importer_info(self, file_name: str, status: str, details: str, emoji: str = "📁", title: str = "DATEN IMPORT") -> bool:
+    async def send_importer_info(
+        self,
+        file_name: str,
+        status: str,
+        details: str,
+        emoji: str = "📁",
+        title: str = "DATEN IMPORT",
+    ) -> bool:
         """Sendet eine Info-Meldung über importierte Daten oder Validierungsfehler."""
         message = (
             f"{emoji} <b>{title}</b> | <code>{file_name}</code>\n"
@@ -162,11 +166,7 @@ class TelegramNotifier:
         return await self.send_message(message)
 
     async def send_bracket_order_submitted(
-        self,
-        symbol: str,
-        trade_group_id: str,
-        strategy_name: str,
-        orders: list[dict]
+        self, symbol: str, trade_group_id: str, strategy_name: str, orders: list[dict]
     ) -> bool:
         """
         Sendet eine Zusammenfassung einer Trade-Gruppe (Bracket/OCA).
@@ -183,13 +183,15 @@ class TelegramNotifier:
         lines = [f"📤 <b>{title}</b> | <code>{symbol}</code>"]
 
         for order in orders:
-            price_str = f"{float(order['price']):.2f}" if order.get('price') else "MKT"
+            price_str = f"{float(order['price']):.2f}" if order.get("price") else "MKT"
             lines.append(
                 f"├─ <b>{order['role']}:</b> <code>{order['action']} {order['quantity']}</code> @ <code>{price_str}</code> ({order['order_type']})"
             )
 
         if trade_group_id:
-            lines.append(f"└─ <b>System:</b> Group: <code>{trade_group_id}</code> • <i>{strategy_name}</i>")
+            lines.append(
+                f"└─ <b>System:</b> Group: <code>{trade_group_id}</code> • <i>{strategy_name}</i>"
+            )
         else:
             lines.append(f"└─ <b>System:</b> <i>{strategy_name}</i>")
 

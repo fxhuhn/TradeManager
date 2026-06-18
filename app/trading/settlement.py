@@ -233,7 +233,6 @@ async def _send_settlement_notification(
     )
 
 
-
 async def get_settlement_lock(trade_group_id: str) -> asyncio.Lock:
     """Holt oder erzeugt ein asyncio.Lock für eine bestimmte Trade-Gruppe."""
     async with SETTLEMENT_LOCKS_LOCK:

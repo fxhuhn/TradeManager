@@ -38,7 +38,9 @@ def test_determine_maximum_capital_allocation_margin_adjusted() -> None:
     assert allocation == Decimal("10000.0")
 
 
-def test_determine_maximum_capital_allocation_margin_adjusted_limited_by_funds() -> None:
+def test_determine_maximum_capital_allocation_margin_adjusted_limited_by_funds() -> (
+    None
+):
     """Prüft, dass bei unzureichendem AvailableFunds das Limit durch AvailableFunds * Margin gedeckelt wird."""
     allocation = determine_maximum_capital_allocation(
         net_liquidation_value=Decimal("100000.0"),
@@ -57,9 +59,27 @@ async def test_fetch_account_balance_metrics_from_cache() -> None:
     """Prüft das Laden der Kontowerte aus dem Cache."""
     mock_ib = MagicMock()
     mock_ib.accountValues.return_value = [
-        AccountValue(account="U123", tag="NetLiquidation", value="80000.00", currency="EUR", modelCode=""),
-        AccountValue(account="U123", tag="AvailableFunds", value="50000.00", currency="EUR", modelCode=""),
-        AccountValue(account="U123", tag="TotalCashValue", value="35000.00", currency="EUR", modelCode=""),
+        AccountValue(
+            account="U123",
+            tag="NetLiquidation",
+            value="80000.00",
+            currency="EUR",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U123",
+            tag="AvailableFunds",
+            value="50000.00",
+            currency="EUR",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U123",
+            tag="TotalCashValue",
+            value="35000.00",
+            currency="EUR",
+            modelCode="",
+        ),
     ]
 
     metrics = await fetch_account_balance_metrics(mock_ib, "U123")
@@ -78,6 +98,7 @@ async def test_fetch_account_balance_metrics_from_summary() -> None:
 
     # Callback registrieren simulieren
     registered_callback = None
+
     def mock_connect(callback):
         nonlocal registered_callback
         registered_callback = callback
@@ -92,7 +113,9 @@ async def test_fetch_account_balance_metrics_from_summary() -> None:
             registered_callback(1, "U123", "AvailableFunds", "60000.0", "EUR")
             registered_callback(1, "U123", "TotalCashValue", "40000.0", "EUR")
 
-    mock_ib.reqAccountSummary.side_effect = lambda: asyncio.create_task(mock_req_summary())
+    mock_ib.reqAccountSummary.side_effect = lambda: asyncio.create_task(
+        mock_req_summary()
+    )
 
     metrics = await fetch_account_balance_metrics(mock_ib, "U123")
     assert metrics.net_liquidation_value == Decimal("90000.0")

@@ -94,7 +94,10 @@ class TwsCallbacksManager:
                     return
 
                 # Ein Fehler-Status (z. B. durch ValidationError-Warnung) darf einen aktiven Zustand nicht überschreiben
-                if status == "Error" and current_status in ("PreSubmitted", "Submitted"):
+                if status == "Error" and current_status in (
+                    "PreSubmitted",
+                    "Submitted",
+                ):
                     logger.info(
                         "Ignoriere Error-Status-Update für aktive Order (vermutlich Warnung/ValidationError)",
                         order_id=order_id,
@@ -183,9 +186,7 @@ class TwsCallbacksManager:
 
             raw_target_price = order_row["target_price"]
             target_price_decimal = (
-                Decimal(str(raw_target_price))
-                if raw_target_price is not None
-                else None
+                Decimal(str(raw_target_price)) if raw_target_price is not None else None
             )
             await self.notifier.send_order_filled(
                 symbol=order_row["symbol"],
@@ -241,9 +242,7 @@ class TwsCallbacksManager:
         )
 
         asyncio.create_task(
-            self._save_execution(
-                exec_id, order_id, price, qty, currency, executed_at
-            )
+            self._save_execution(exec_id, order_id, price, qty, currency, executed_at)
         )
 
     async def _save_execution(
@@ -274,9 +273,7 @@ class TwsCallbacksManager:
                 ),
             )
             await db.execute("COMMIT")
-            logger.debug(
-                "Teilausfuehrung idempotent in DB verbucht", exec_id=exec_id
-            )
+            logger.debug("Teilausfuehrung idempotent in DB verbucht", exec_id=exec_id)
         except Exception as exception:
             await db.execute("ROLLBACK")
             logger.error(
@@ -375,9 +372,7 @@ class TwsCallbacksManager:
             return
 
         if error_class == ErrorClass.RETRIABLE:
-            asyncio.create_task(
-                self.handle_retriable_error_callback(request_id)
-            )
+            asyncio.create_task(self.handle_retriable_error_callback(request_id))
             return
 
         if error_class == ErrorClass.CANCEL:

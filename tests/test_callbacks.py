@@ -106,13 +106,17 @@ async def test_callbacks_filled_notification(db, mock_config: Config) -> None:
 
     try:
         # 3. Statusänderung zu 'Filled' verarbeiten
-        await manager._process_status_change(order_id=42, mapped_status="Filled", perm_id=9876)
+        await manager._process_status_change(
+            order_id=42, mapped_status="Filled", perm_id=9876
+        )
     finally:
         db.close = original_close
 
     # 4. Assertions
     # DB-Status prüfen
-    async with db.execute("SELECT status, perm_id FROM orders WHERE order_id = 42") as cursor:
+    async with db.execute(
+        "SELECT status, perm_id FROM orders WHERE order_id = 42"
+    ) as cursor:
         row = await cursor.fetchone()
         assert row is not None
         assert row["status"] == "Filled"
@@ -215,7 +219,9 @@ async def test_callbacks_exit_settlement_trigger(db, mock_config: Config) -> Non
     )
 
     try:
-        await manager._process_status_change(order_id=43, mapped_status="Filled", perm_id=9877)
+        await manager._process_status_change(
+            order_id=43, mapped_status="Filled", perm_id=9877
+        )
     finally:
         db.close = original_close
 

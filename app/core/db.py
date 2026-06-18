@@ -133,9 +133,7 @@ async def _apply_migration_file(
             if statement_clean:
                 await db.execute(statement_clean)
 
-        await db.execute(
-            "INSERT INTO schema_version (version) VALUES (?)", (version,)
-        )
+        await db.execute("INSERT INTO schema_version (version) VALUES (?)", (version,))
         await db.execute("COMMIT")
         logger.info("Migration erfolgreich angewendet", version=version)
     except Exception as exception:
@@ -161,4 +159,3 @@ async def safe_execute_transaction(
     except Exception as exception:
         await db.execute("ROLLBACK")
         raise exception
-

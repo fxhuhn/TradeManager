@@ -120,7 +120,10 @@ async def test_process_trade_group_exit_cancelled_if_no_position(
     # IB placeOrder darf nicht aufgerufen worden sein
     mock_ib.placeOrder.assert_not_called()
     mock_notifier.send_importer_info.assert_called_once()
-    assert "Keine offene Position" in mock_notifier.send_importer_info.call_args[1]["details"]
+    assert (
+        "Keine offene Position"
+        in mock_notifier.send_importer_info.call_args[1]["details"]
+    )
 
 
 @pytest.mark.asyncio

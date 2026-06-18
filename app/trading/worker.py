@@ -107,7 +107,13 @@ async def process_trade_group(
             trade_group_id=trade_group_id,
         )
         await _process_entry_order(
-            db, interactive_brokers, entry_order, child_orders, notifier, config, placed_orders
+            db,
+            interactive_brokers,
+            entry_order,
+            child_orders,
+            notifier,
+            config,
+            placed_orders,
         )
 
     if entry_order.status == "Error":
@@ -196,7 +202,13 @@ async def _process_entry_order(
         "Sende ENTRY-Order an TWS", order_id=tws_order_id, symbol=entry_order.symbol
     )
     success = await _place_and_verify_order(
-        db, interactive_brokers, contract, ib_entry_order, entry_order, tws_order_id, notifier
+        db,
+        interactive_brokers,
+        contract,
+        ib_entry_order,
+        entry_order,
+        tws_order_id,
+        notifier,
     )
     if not success:
         return
@@ -332,7 +344,12 @@ async def _place_and_verify_order(
             break
         await asyncio.sleep(0.1)
 
-    if trade.orderStatus.status in ("Inactive", "Cancelled", "ValidationError", "Error"):
+    if trade.orderStatus.status in (
+        "Inactive",
+        "Cancelled",
+        "ValidationError",
+        "Error",
+    ):
         log_errors = [
             entry
             for entry in trade.log
@@ -382,7 +399,7 @@ async def _place_and_verify_order(
                     reason=f"API im READ-ONLY Modus. Details: {error_msg}",
                     symbol=order_row.symbol,
                     bracket_role=order_row.bracket_role,
-                    is_fatal=True
+                    is_fatal=True,
                 )
             else:
                 await notifier.send_order_failed(
@@ -391,7 +408,7 @@ async def _place_and_verify_order(
                     reason=error_msg,
                     symbol=order_row.symbol,
                     bracket_role=order_row.bracket_role,
-                    is_fatal=False
+                    is_fatal=False,
                 )
             return False
 
@@ -462,7 +479,7 @@ async def _cancel_empty_exit_order(
         file_name=child.trade_group_id,
         status="Storniert",
         details=f"Keine offene Position für {child.symbol} vorhanden (Depotbestand: {float(live_position)}).",
-        emoji="⚠️"
+        emoji="⚠️",
     )
 
 
@@ -502,7 +519,7 @@ async def _reduce_exit_order_quantity(
         file_name=child.trade_group_id,
         status="Reduziert",
         details=f"Stückzahl für {child.symbol} von {float(intended_quantity)} auf {float(available_quantity)} reduziert.",
-        emoji="⚠️"
+        emoji="⚠️",
     )
 
 

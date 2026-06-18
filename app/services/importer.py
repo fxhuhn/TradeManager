@@ -150,7 +150,7 @@ async def _process_daily_csv_file(
             status="Erfolgreich",
             details="Eingelesen und nach .bak archiviert.",
             emoji="📁",
-            title="DATEI IMPORTIERT"
+            title="DATEI IMPORTIERT",
         )
 
     except Exception as exception:
@@ -175,7 +175,7 @@ async def _process_daily_csv_file(
                 status="Fehler",
                 details=f"Nach .err umbenannt. Fehler: {str(exception)}",
                 emoji="🚨",
-                title="IMPORT-FEHLER"
+                title="IMPORT-FEHLER",
             )
         except Exception as rename_exception:
             logger.critical(
@@ -205,7 +205,7 @@ async def _check_csv_dos_limits(
             status="Abgelehnt (DoS-Schutz)",
             details=f"Überschreitet Limit ({file_size_bytes} > {config.app.max_csv_size_bytes} Bytes)",
             emoji="❌",
-            title="INTEGRITÄTS-FEHLER"
+            title="INTEGRITÄTS-FEHLER",
         )
         return False
     return True
@@ -233,7 +233,7 @@ async def _process_and_upsert_group(
             status="Übersprungen",
             details=error_message,
             emoji="❌",
-            title="VALIDIERUNGSFEHLER"
+            title="VALIDIERUNGSFEHLER",
         )
         return
 
@@ -243,18 +243,24 @@ async def _process_and_upsert_group(
 
     target_quantity = first_leg.quantity
     if entry_leg:
-        balance_metrics = await fetch_account_balance_metrics(interactive_brokers, account_id)
+        balance_metrics = await fetch_account_balance_metrics(
+            interactive_brokers, account_id
+        )
 
         strategy_limit_percentage = Decimal(str(config.account.default_limit_pct))
         strategy_name = entry_leg.strategy_name
         if strategy_name and strategy_name in config.strategy_limits:
-            strategy_limit_percentage = Decimal(str(config.strategy_limits[strategy_name]))
+            strategy_limit_percentage = Decimal(
+                str(config.strategy_limits[strategy_name])
+            )
 
         maximum_capital_allocation = determine_maximum_capital_allocation(
             net_liquidation_value=balance_metrics.net_liquidation_value,
             available_funds_value=balance_metrics.available_funds_value,
             total_cash_value=balance_metrics.total_cash_value,
-            margin_multiplier_factor=Decimal(str(config.account.margin_multiplier_factor)),
+            margin_multiplier_factor=Decimal(
+                str(config.account.margin_multiplier_factor)
+            ),
             sizing_mode=config.account.sizing_mode,
             allocation_limit_percentage=strategy_limit_percentage,
         )
@@ -279,7 +285,7 @@ async def _process_and_upsert_group(
                 status="Übersprungen",
                 details=f"Kein verfuegbares Allokations-Kapital fuer Account {account_id}.",
                 emoji="⚠️",
-                title="KAPITAL-FEHLER"
+                title="KAPITAL-FEHLER",
             )
             return
 
@@ -303,7 +309,7 @@ async def _process_and_upsert_group(
                 status="Reduziert auf 0",
                 details=f"Erforderliches Kapital überschreitet Limit ({float(maximum_capital_allocation):.2f}).",
                 emoji="⚠️",
-                title="SIZING-FEHLER"
+                title="SIZING-FEHLER",
             )
             return
 
@@ -436,7 +442,7 @@ async def _upsert_trade_group_legs(
                 status="Abgebrochen",
                 details="Exit-Order importiert, aber kein passender ENTRY-Auftrag in der DB gefunden.",
                 emoji="❌",
-                title="IMPORT-FEHLER"
+                title="IMPORT-FEHLER",
             )
             return
 
@@ -504,9 +510,7 @@ async def _upsert_trade_group_legs(
                         leg.action,
                         target_quantity,
                         leg.order_type,
-                        str(leg.target_price)
-                        if leg.target_price is not None
-                        else None,
+                        str(leg.target_price) if leg.target_price is not None else None,
                         leg.tif,
                         leg.strategy_name,
                     ),
@@ -531,7 +535,7 @@ async def _upsert_trade_group_legs(
             status="Fehlgeschlagen",
             details=f"Error: {str(exception)}",
             emoji="❌",
-            title="DB-FEHLER"
+            title="DB-FEHLER",
         )
         raise exception
 
@@ -551,7 +555,11 @@ async def fetch_account_balance_metrics(
     cache_values: dict[str, Decimal] = {}
     for account_value in interactive_brokers.accountValues():
         if not account_id or account_value.account == account_id:
-            if account_value.tag in ("NetLiquidation", "AvailableFunds", "TotalCashValue"):
+            if account_value.tag in (
+                "NetLiquidation",
+                "AvailableFunds",
+                "TotalCashValue",
+            ):
                 try:
                     cache_values[account_value.tag] = Decimal(str(account_value.value))
                 except ValueError as exception:
@@ -609,9 +617,15 @@ async def fetch_account_balance_metrics(
         logger.info(
             "Kontowerte via reqAccountSummary geladen",
             account=account_id,
-            net_liquidation=float(retrieved_values.get("NetLiquidation", Decimal("0.0"))),
-            available_funds=float(retrieved_values.get("AvailableFunds", Decimal("0.0"))),
-            total_cash_value=float(retrieved_values.get("TotalCashValue", Decimal("0.0"))),
+            net_liquidation=float(
+                retrieved_values.get("NetLiquidation", Decimal("0.0"))
+            ),
+            available_funds=float(
+                retrieved_values.get("AvailableFunds", Decimal("0.0"))
+            ),
+            total_cash_value=float(
+                retrieved_values.get("TotalCashValue", Decimal("0.0"))
+            ),
         )
     except TimeoutError:
         logger.warning(
@@ -622,8 +636,12 @@ async def fetch_account_balance_metrics(
         interactive_brokers.cancelAccountSummary()
 
     return AccountBalanceMetrics(
-        net_liquidation_value=retrieved_values.get("NetLiquidation", net_liquidation_value),
-        available_funds_value=retrieved_values.get("AvailableFunds", available_funds_value),
+        net_liquidation_value=retrieved_values.get(
+            "NetLiquidation", net_liquidation_value
+        ),
+        available_funds_value=retrieved_values.get(
+            "AvailableFunds", available_funds_value
+        ),
         total_cash_value=retrieved_values.get("TotalCashValue", total_cash_value),
     )
 

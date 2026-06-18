@@ -38,16 +38,13 @@ async def run_recovery(
     """
     logger.info("Starte Recovery-Phase")
 
-    await fetch_active_orders(
-        interactive_brokers_session, config.tws.request_timeout_s
-    )
+    await fetch_active_orders(interactive_brokers_session, config.tws.request_timeout_s)
     await fetch_completed_orders(
         interactive_brokers_session, config.tws.completed_orders_timeout_s
     )
 
     tws_active_orders = {
-        trade.order.orderId: trade
-        for trade in interactive_brokers_session.openTrades()
+        trade.order.orderId: trade for trade in interactive_brokers_session.openTrades()
     }
     tws_completed_orders = {
         trade.order.orderId: trade
@@ -78,9 +75,7 @@ async def run_recovery(
     logger.info("Recovery-Phase abgeschlossen")
 
 
-async def fetch_active_orders(
-    interactive_brokers: IB, timeout_seconds: float
-) -> None:
+async def fetch_active_orders(interactive_brokers: IB, timeout_seconds: float) -> None:
     """Ruft offene Orders aktiv von TWS ab."""
     try:
         await asyncio.wait_for(
@@ -176,9 +171,7 @@ async def _recover_submitted_order(
     if tws_active:
         perm_id = tws_active.order.permId
         tws_status = tws_active.orderStatus.status
-        mapped_status = (
-            "PreSubmitted" if tws_status == "PreSubmitted" else "Submitted"
-        )
+        mapped_status = "PreSubmitted" if tws_status == "PreSubmitted" else "Submitted"
 
         if order.perm_id == perm_id and order.status == mapped_status:
             return
@@ -216,7 +209,9 @@ async def _recover_submitted_order(
             await database_connection.execute("ROLLBACK")
             raise
 
-        await _save_missing_executions(database_connection, order, interactive_brokers_session)
+        await _save_missing_executions(
+            database_connection, order, interactive_brokers_session
+        )
 
         asyncio.create_task(
             trigger_settlement_callback(order.trade_group_id, order.account_id)
@@ -251,7 +246,9 @@ async def _recover_submitted_order(
                 raise
 
             # Fehlende Ausführungen sichern
-            await _save_missing_executions(database_connection, order, interactive_brokers_session)
+            await _save_missing_executions(
+                database_connection, order, interactive_brokers_session
+            )
             return
 
     # Recovery Szenario 3: Ghost Order
@@ -286,9 +283,7 @@ async def _recover_created_order(
     if tws_active:
         perm_id = tws_active.order.permId
         tws_status = tws_active.orderStatus.status
-        mapped_status = (
-            "PreSubmitted" if tws_status == "PreSubmitted" else "Submitted"
-        )
+        mapped_status = "PreSubmitted" if tws_status == "PreSubmitted" else "Submitted"
 
         logger.info(
             f"Recovery Szenario 4: Mid-Crash erkannt (Created in DB, aktiv in TWS). Setze auf {mapped_status}.",
@@ -315,9 +310,7 @@ async def _recover_created_order(
         groups_to_requeue.add(order.trade_group_id)
 
 
-def _has_live_position(
-    interactive_brokers: IB, account_id: str, symbol: str
-) -> bool:
+def _has_live_position(interactive_brokers: IB, account_id: str, symbol: str) -> bool:
     """Prüft, ob für das Symbol eine offene Position im Depot vorhanden ist."""
     for position in interactive_brokers.positions():
         if (

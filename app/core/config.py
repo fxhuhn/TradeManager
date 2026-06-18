@@ -111,7 +111,9 @@ def _parse_tws_config(tws_data: dict[str, object]) -> TwsConfig:
         reconnect_max_attempts=int(tws_data.get("reconnect_max_attempts", 10)),
         reconnect_max_delay_s=float(tws_data.get("reconnect_max_delay_s", 120.0)),
         request_timeout_s=float(tws_data.get("request_timeout_s", 10.0)),
-        completed_orders_timeout_s=float(tws_data.get("completed_orders_timeout_s", 15.0)),
+        completed_orders_timeout_s=float(
+            tws_data.get("completed_orders_timeout_s", 15.0)
+        ),
     )
 
 
@@ -119,7 +121,9 @@ def _parse_app_config(app_data: dict[str, object]) -> AppConfig:
     return AppConfig(
         max_retries=int(app_data.get("max_retries", 3)),
         order_rate_limit_s=float(app_data.get("order_rate_limit_s", 0.02)),
-        dead_order_threshold_minutes=int(app_data.get("dead_order_threshold_minutes", 15)),
+        dead_order_threshold_minutes=int(
+            app_data.get("dead_order_threshold_minutes", 15)
+        ),
         alert_watcher_interval_s=int(app_data.get("alert_watcher_interval_s", 60)),
         csv_watcher_interval_s=int(app_data.get("csv_watcher_interval_s", 60)),
         order_sync_interval_s=int(app_data.get("order_sync_interval_s", 300)),
@@ -135,7 +139,9 @@ def _parse_app_config(app_data: dict[str, object]) -> AppConfig:
 def _parse_account_config(account_data: dict[str, object]) -> AccountConfig:
     account_config = AccountConfig(
         default_limit_pct=float(account_data.get("default_limit_pct", 0.05)),
-        margin_multiplier_factor=float(account_data.get("margin_multiplier_factor", 2.0)),
+        margin_multiplier_factor=float(
+            account_data.get("margin_multiplier_factor", 2.0)
+        ),
         sizing_mode=str(account_data.get("sizing_mode", "margin_adjusted_capital")),
     )
 
