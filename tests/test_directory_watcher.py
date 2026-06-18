@@ -108,7 +108,7 @@ async def test_csv_directory_watcher_success_rename(
         assert not test_csv.exists()
 
         # Die Backup-Datei sollte existieren
-        backup_csv = data_directory / "orders_2026_06_01.csv.bak"
+        backup_csv = data_directory / "archive" / "orders_2026_06_01.csv.bak"
         assert backup_csv.exists()
         assert backup_csv.read_text(encoding="utf-8") == "dummy,content"
 
@@ -174,7 +174,7 @@ async def test_csv_directory_watcher_error_rename(
         assert not test_csv.exists()
 
         # Die Fehler-Datei sollte existieren
-        error_csv = data_directory / "orders_2026_06_01.csv.err"
+        error_csv = data_directory / "archive" / "orders_2026_06_01.csv.err"
         assert error_csv.exists()
 
         # Notifier sollte alarmiert haben

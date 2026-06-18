@@ -135,7 +135,9 @@ async def _process_daily_csv_file(
             database_connection, interactive_brokers, csv_file, queue, notifier, config
         )
 
-        backup_path = csv_file.with_name(csv_file.name + ".bak")
+        archive_dir = csv_file.parent / "archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        backup_path = archive_dir / (csv_file.name + ".bak")
         csv_file.rename(backup_path)
 
         logger.info(
@@ -158,7 +160,9 @@ async def _process_daily_csv_file(
             error=str(exception),
         )
 
-        error_path = csv_file.with_name(csv_file.name + ".err")
+        archive_dir = csv_file.parent / "archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        error_path = archive_dir / (csv_file.name + ".err")
         try:
             csv_file.rename(error_path)
             logger.warning(

@@ -93,7 +93,7 @@ async def test_upsert_idempotency(db):
             order_id, parent_id, trade_group_id, account_id, bracket_role,
             symbol, sec_type, exchange, action, quantity, order_type, target_price, status
         ) VALUES (1, NULL, 'G1', 'A1', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 200, 'LMT', 185.0, 'Created')
-        ON CONFLICT(account_id, trade_group_id, bracket_role) DO UPDATE SET
+        ON CONFLICT(account_id, trade_group_id, bracket_role, order_type) DO UPDATE SET
             quantity = excluded.quantity,
             target_price = excluded.target_price
         """
@@ -130,7 +130,7 @@ async def test_upsert_protects_submitted(db):
             order_id, parent_id, trade_group_id, account_id, bracket_role,
             symbol, sec_type, exchange, action, quantity, order_type, target_price, status
         ) VALUES (1, NULL, 'G1', 'A1', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 200, 'LMT', 185.0, 'Created')
-        ON CONFLICT(account_id, trade_group_id, bracket_role) DO UPDATE SET
+        ON CONFLICT(account_id, trade_group_id, bracket_role, order_type) DO UPDATE SET
             quantity = excluded.quantity,
             target_price = excluded.target_price
         WHERE status IN ('Created', 'Error')

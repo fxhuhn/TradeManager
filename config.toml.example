@@ -23,7 +23,7 @@ retry_backoff_base_s = 5.0        # Basiswert in Sekunden für exponentiellen Re
 shutdown_join_timeout_s = 15.0    # Maximale Zeit in Sekunden, um beim Shutdown auf das Leeren der Queue zu warten
 database_timeout_s = 30.0         # Verhindert Lockouts bei hoher paralleler DB-Last (SQLite timeout)
 max_csv_size_bytes = 5242880      # 5 MB Sicherheitslimit für CSV-Import zur DoS-Abwehr
-log_file_path = "data/app.log"              # Pfad zur zentralen Logdatei
+log_file_path = "data/logs/app.log"              # Pfad zur zentralen Logdatei
 log_rotation_backup_count = 5               # Anzahl der rotierenden Backup-Dateien
 
 [account]
