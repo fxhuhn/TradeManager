@@ -213,10 +213,16 @@ async def _send_settlement_notification(
     profit_loss_emoji = (
         "🟢 Profit" if outputs.net_profit_loss >= Decimal("0.0") else "🔴 Loss"
     )
-    pnl_val = float(outputs.net_profit_loss)
-    await notifier.send_message(
-        f"✅ <b>TRADE SETTLEMENT</b> | <code>{trade_group_id}</code> | *Netto-PnL:* {pnl_val:+.2f} USD ({profit_loss_emoji})"
+    message = (
+        f"✅ <b>TRADE SETTLEMENT</b> | <code>{trade_group_id}</code>\n"
+        f"├─ <b>Symbol:</b> <code>{entry_action}</code> Position\n"
+        f"├─ <b>Entry:</b> <code>{float(outputs.avg_entry_price):.2f}</code> (Target: {float(entry_target_price):.2f})\n"
+        f"├─ <b>Exit:</b> <code>{float(outputs.avg_exit_price):.2f}</code>\n"
+        f"├─ <b>Slippage:</b> <code>{float(outputs.price_diff_slippage):+.2f}</code>\n"
+        f"├─ <b>Gebühren:</b> <code>{float(total_commissions):.2f} USD</code>\n"
+        f"└─ <b>Netto-PnL:</b> <b>{float(outputs.net_profit_loss):+.2f} USD</b> ({profit_loss_emoji})"
     )
+    await notifier.send_message(message)
 
 
 async def get_settlement_lock(trade_group_id: str) -> asyncio.Lock:

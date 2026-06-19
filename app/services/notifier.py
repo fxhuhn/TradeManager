@@ -122,7 +122,16 @@ class TelegramNotifier:
         strategy_name: str,
     ) -> bool:
         """Sendet eine Erfolgsmeldung für eine gefüllte Order."""
-        message = f"🟢 <b>ORDER FILLED</b> | <code>{symbol}</code> ({bracket_role})"
+        total_val = float(quantity) * float(price) if price else 0.0
+        price_str = f"{float(price):.2f}" if price else "MKT"
+
+        message = (
+            f"🟢 <b>ORDER GEFÜLLT</b> | <code>{symbol}</code>\n"
+            f"├─ <b>Typ:</b> <code>{bracket_role}</code> ({action})\n"
+            f"├─ <b>Menge:</b> <code>{quantity}</code> @ <code>{price_str}</code> ({order_type})\n"
+            f"├─ <b>Wert:</b> <code>$ {total_val:,.2f}</code>\n"
+            f"└─ <b>System:</b> ID: <code>{order_id}</code> • <i>{strategy_name}</i>"
+        )
         return await self.send_message(message)
 
     async def send_order_failed(
@@ -136,8 +145,14 @@ class TelegramNotifier:
     ) -> bool:
         """Sendet eine Fehler/Warnmeldung für eine fehlgeschlagene oder stornierte Order."""
         emoji = "🚨" if is_fatal else "🚫"
-        title = "ORDER FAILED" if is_fatal else "ORDER CANCELED"
-        message = f"{emoji} <b>{title}</b> | <code>{symbol}</code> ({bracket_role})"
+        title = "ORDER FEHLGESCHLAGEN" if is_fatal else "ORDER CANCELED"
+
+        message = (
+            f"{emoji} <b>{title}</b> | <code>ID: {order_id}</code>\n"
+            f"├─ <b>Symbol/Typ:</b> <code>{symbol}</code> ({bracket_role})\n"
+            f"├─ <b>TWS-Code:</b> <code>{tws_code}</code>\n"
+            f"└─ <b>Grund:</b> <i>{reason}</i>"
+        )
         return await self.send_message(message)
 
     async def send_importer_info(
@@ -149,7 +164,11 @@ class TelegramNotifier:
         title: str = "DATEN IMPORT",
     ) -> bool:
         """Sendet eine Info-Meldung über importierte Daten oder Validierungsfehler."""
-        message = f"{emoji} <b>{title}</b> | <code>{file_name}</code> ({status})"
+        message = (
+            f"{emoji} <b>{title}</b> | <code>{file_name}</code>\n"
+            f"├─ <b>Status:</b> <code>{status}</code>\n"
+            f"└─ <b>Details:</b> <i>{details}</i>"
+        )
         return await self.send_message(message)
 
     async def send_bracket_order_submitted(
@@ -163,9 +182,24 @@ class TelegramNotifier:
             return False
 
         if len(orders) == 1:
-            title = "ORDER SUBMITTED"
+            title = "ORDER GESENDET"
         else:
-            title = "BRACKET ORDER SUBMITTED"
+            title = "BRACKET ORDER GESENDET"
 
-        message = f"📤 <b>{title}</b> | <code>{symbol}</code>"
+        lines = [f"📤 <b>{title}</b> | <code>{symbol}</code>"]
+
+        for order in orders:
+            price_str = f"{float(order['price']):.2f}" if order.get("price") else "MKT"
+            lines.append(
+                f"├─ <b>{order['role']}:</b> <code>{order['action']} {order['quantity']}</code> @ <code>{price_str}</code> ({order['order_type']})"
+            )
+
+        if trade_group_id:
+            lines.append(
+                f"└─ <b>System:</b> Group: <code>{trade_group_id}</code> • <i>{strategy_name}</i>"
+            )
+        else:
+            lines.append(f"└─ <b>System:</b> <i>{strategy_name}</i>")
+
+        message = "\n".join(lines)
         return await self.send_message(message)

@@ -340,16 +340,6 @@ async def _place_and_verify_order(
         if not is_success:
             return False
 
-    price_str = (
-        f" @ {order_row.target_price:.2f}"
-        if order_row.target_price and order_row.target_price > Decimal("0")
-        else ""
-    )
-    await notifier.send_message(
-        f"📤 ORDER GESENDET: {order_row.symbol} | {order_row.bracket_role} | "
-        f"{order_row.action} {order_row.quantity}{price_str} ({order_row.order_type}) | "
-        f"ID: {tws_order_id} ({order_row.strategy_name})"
-    )
     return True
 
 
