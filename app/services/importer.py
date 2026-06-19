@@ -214,6 +214,29 @@ async def _check_csv_dos_limits(
     return True
 
 
+def resolve_account_id(interactive_brokers: IB, account_id: str) -> str:
+    """
+    Validiert die Account-ID gegen die in TWS verwalteten Konten.
+
+    Falls die Account-ID ein Platzhalter ist oder nicht existiert, wird auf
+    den ersten verfügbaren verwalteten Account ausgewichen.
+    """
+    managed_accounts = interactive_brokers.managedAccounts()
+    if not isinstance(managed_accounts, list) or not managed_accounts:
+        return account_id
+    if account_id in managed_accounts:
+        return account_id
+
+    fallback_account = managed_accounts[0]
+    logger.warning(
+        "Account ID from CSV not found in TWS managed accounts. Falling back.",
+        csv_account_id=account_id,
+        fallback_account_id=fallback_account,
+        managed_accounts=managed_accounts,
+    )
+    return fallback_account
+
+
 async def _process_and_upsert_group(
     db: aiosqlite.Connection,
     interactive_brokers: IB,
@@ -243,6 +266,7 @@ async def _process_and_upsert_group(
     entry_leg = next((leg for leg in raw_legs if leg.bracket_role == "ENTRY"), None)
     first_leg = raw_legs[0]
     account_id = entry_leg.account_id if entry_leg else first_leg.account_id
+    account_id = resolve_account_id(interactive_brokers, account_id)
 
     target_quantity = first_leg.quantity
     if entry_leg:
@@ -537,7 +561,7 @@ async def fetch_account_balance_metrics(
     """
     Fragt die wichtigsten Kontowerte (NetLiquidation, AvailableFunds, TotalCashValue)
     von Interactive Brokers ab. Versucht es zuerst aus dem Cache (accountValues()) und fällt bei Bedarf
-    auf einen reqAccountSummary()-Aufruf zurück.
+    auf einen accountSummaryAsync()-Aufruf zurück.
     """
     net_liquidation_value = Decimal("0.0")
     available_funds_value = Decimal("0.0")
@@ -576,37 +600,33 @@ async def fetch_account_balance_metrics(
         )
 
     logger.info(
-        "Some account values not in cache. Calling reqAccountSummary.",
+        "Some account values not in cache. Calling accountSummaryAsync.",
         account=account_id,
     )
-    summary_event = asyncio.Event()
     retrieved_values: dict[str, Decimal] = {}
 
-    def on_account_summary(
-        request_id: int, account: str, tag: str, value: str, currency: str
-    ) -> None:
-        if tag in ("NetLiquidation", "AvailableFunds", "TotalCashValue") and (
-            not account_id or account == account_id
-        ):
-            try:
-                retrieved_values[tag] = Decimal(str(value))
-                if len(retrieved_values) == 3:
-                    summary_event.set()
-            except ValueError as exception:
-                logger.warning(
-                    "Invalid value found in Account Summary callback",
-                    tag=tag,
-                    raw_value=value,
-                    error=str(exception),
-                )
-
-    interactive_brokers.accountSummaryEvent.connect(on_account_summary)
-    interactive_brokers.reqAccountSummary()
-
     try:
-        await asyncio.wait_for(summary_event.wait(), timeout=10.0)
+        summary_values = await interactive_brokers.accountSummaryAsync(account_id)
+        for account_value in summary_values:
+            if account_value.tag in (
+                "NetLiquidation",
+                "AvailableFunds",
+                "TotalCashValue",
+            ):
+                try:
+                    retrieved_values[account_value.tag] = Decimal(
+                        str(account_value.value)
+                    )
+                except ValueError as exception:
+                    logger.warning(
+                        "Invalid value found in Account Summary response",
+                        tag=account_value.tag,
+                        raw_value=account_value.value,
+                        error=str(exception),
+                    )
+
         logger.info(
-            "Account values loaded via reqAccountSummary",
+            "Account values loaded via accountSummaryAsync",
             account=account_id,
             net_liquidation=float(
                 retrieved_values.get("NetLiquidation", Decimal("0.0"))
@@ -618,13 +638,11 @@ async def fetch_account_balance_metrics(
                 retrieved_values.get("TotalCashValue", Decimal("0.0"))
             ),
         )
-    except TimeoutError:
+    except Exception as exception:
         logger.warning(
-            "Timeout waiting for reqAccountSummary. Using incomplete or default values."
+            "Error loading account summary asynchronously",
+            error=str(exception),
         )
-    finally:
-        interactive_brokers.accountSummaryEvent.disconnect(on_account_summary)
-        interactive_brokers.cancelAccountSummary()
 
     return AccountBalanceMetrics(
         net_liquidation_value=retrieved_values.get(
