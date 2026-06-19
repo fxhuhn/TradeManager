@@ -1,4 +1,3 @@
-import asyncio
 from decimal import Decimal
 from unittest.mock import MagicMock
 
@@ -91,36 +90,40 @@ async def test_fetch_account_balance_metrics_from_cache() -> None:
 
 @pytest.mark.asyncio
 async def test_fetch_account_balance_metrics_from_summary() -> None:
-    """Prüft das Laden der Kontowerte per Fallback via reqAccountSummary."""
+    """Prüft das Laden der Kontowerte per Fallback via accountSummaryAsync."""
     mock_ib = MagicMock()
     # Leerer Cache
     mock_ib.accountValues.return_value = []
 
-    # Callback registrieren simulieren
-    registered_callback = None
+    # Mock für accountSummaryAsync
+    async def mock_account_summary(account: str = "") -> list[AccountValue]:
+        return [
+            AccountValue(
+                account="U123",
+                tag="NetLiquidation",
+                value="90000.0",
+                currency="EUR",
+                modelCode="",
+            ),
+            AccountValue(
+                account="U123",
+                tag="AvailableFunds",
+                value="60000.0",
+                currency="EUR",
+                modelCode="",
+            ),
+            AccountValue(
+                account="U123",
+                tag="TotalCashValue",
+                value="40000.0",
+                currency="EUR",
+                modelCode="",
+            ),
+        ]
 
-    def mock_connect(callback):
-        nonlocal registered_callback
-        registered_callback = callback
-
-    mock_ib.accountSummaryEvent.connect = mock_connect
-
-    async def mock_req_summary():
-        # Simuliere TWS Callback asynchron nach kurzer Zeit
-        await asyncio.sleep(0.01)
-        if registered_callback:
-            registered_callback(1, "U123", "NetLiquidation", "90000.0", "EUR")
-            registered_callback(1, "U123", "AvailableFunds", "60000.0", "EUR")
-            registered_callback(1, "U123", "TotalCashValue", "40000.0", "EUR")
-
-    mock_ib.reqAccountSummary.side_effect = lambda: asyncio.create_task(
-        mock_req_summary()
-    )
+    mock_ib.accountSummaryAsync = mock_account_summary
 
     metrics = await fetch_account_balance_metrics(mock_ib, "U123")
     assert metrics.net_liquidation_value == Decimal("90000.0")
     assert metrics.available_funds_value == Decimal("60000.0")
     assert metrics.total_cash_value == Decimal("40000.0")
-
-    mock_ib.reqAccountSummary.assert_called_once()
-    mock_ib.cancelAccountSummary.assert_called_once()
