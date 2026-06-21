@@ -27,6 +27,8 @@ class TwsConfig:
     reconnect_max_delay_s: float
     request_timeout_s: float
     completed_orders_timeout_s: float
+    heartbeat_interval_s: float = 60.0
+    heartbeat_timeout_s: float = 15.0
 
 
 @dataclass(frozen=True)
@@ -54,6 +56,8 @@ class AccountConfig:
     default_limit_pct: float
     margin_multiplier_factor: float = 2.0
     sizing_mode: str = "margin_adjusted_capital"
+    max_margin_usage_pct: float = 0.80
+    min_cushion_pct: float = 0.10
 
 
 @dataclass(frozen=True)
@@ -114,6 +118,8 @@ def _parse_tws_config(tws_data: dict[str, object]) -> TwsConfig:
         completed_orders_timeout_s=float(
             tws_data.get("completed_orders_timeout_s", 15.0)
         ),
+        heartbeat_interval_s=float(tws_data.get("heartbeat_interval_s", 60.0)),
+        heartbeat_timeout_s=float(tws_data.get("heartbeat_timeout_s", 15.0)),
     )
 
 
@@ -143,6 +149,8 @@ def _parse_account_config(account_data: dict[str, object]) -> AccountConfig:
             account_data.get("margin_multiplier_factor", 2.0)
         ),
         sizing_mode=str(account_data.get("sizing_mode", "margin_adjusted_capital")),
+        max_margin_usage_pct=float(account_data.get("max_margin_usage_pct", 0.80)),
+        min_cushion_pct=float(account_data.get("min_cushion_pct", 0.10)),
     )
 
     if account_config.sizing_mode not in ("margin_adjusted_capital", "total_cash"):
@@ -152,6 +160,10 @@ def _parse_account_config(account_data: dict[str, object]) -> AccountConfig:
         )
     if account_config.margin_multiplier_factor <= 0.0:
         raise ValueError("margin_multiplier_factor muss groesser als 0 sein.")
+    if not (0.0 <= account_config.max_margin_usage_pct <= 1.0):
+        raise ValueError("max_margin_usage_pct muss zwischen 0.0 und 1.0 liegen.")
+    if not (0.0 <= account_config.min_cushion_pct <= 1.0):
+        raise ValueError("min_cushion_pct muss zwischen 0.0 und 1.0 liegen.")
 
     return account_config
 
