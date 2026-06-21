@@ -62,6 +62,6 @@ venv.bak/
 
 # custom
 /data
-/doc
+/doc/*.pdf
 /.agent
 /scripts
