@@ -434,11 +434,27 @@ class TwsCallbacksManager:
 
     def on_disconnected(self) -> None:
         """Loggt Verbindungsverlust zu TWS und alarmiert den Betreiber."""
-        logger.error("Connection to Interactive Brokers TWS lost!")
-        asyncio.create_task(
-            self.notifier.send_system_status(
-                title="VERBINDUNGSABBRUCH",
-                emoji="🚨",
+        from datetime import datetime
+
+        now = datetime.now()
+        is_planned = now.hour == 12 and 0 <= now.minute < 5
+
+        if is_planned:
+            logger.info(
+                "Planned daily Gateway restart detected. Suppressing fatal alerts."
             )
-        )
+            asyncio.create_task(
+                self.notifier.send_system_status(
+                    title="GEPLANTER NEUSTART (Gateway wird neu gestartet)",
+                    emoji="⏳",
+                )
+            )
+        else:
+            logger.error("Connection to Interactive Brokers TWS lost unexpectedly!")
+            asyncio.create_task(
+                self.notifier.send_system_status(
+                    title="VERBINDUNGSABBRUCH",
+                    emoji="🚨",
+                )
+            )
         asyncio.create_task(self.run_reconnect_callback())

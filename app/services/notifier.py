@@ -203,3 +203,58 @@ class TelegramNotifier:
 
         message = "\n".join(lines)
         return await self.send_message(message)
+
+    async def send_margin_limit_exceeded(
+        self,
+        symbol: str,
+        account_id: str,
+        init_margin_after: float,
+        limit_value: float,
+        cushion_pct: float,
+    ) -> bool:
+        """Sendet eine Meldung bei Überschreitung des Margin-Limits."""
+        message = (
+            f"🚨 <b>MARGIN-LIMIT ÜBERSCHRITTEN</b> | <code>{symbol}</code>\n"
+            f"├─ <b>Konto:</b> <code>{account_id}</code>\n"
+            f"├─ <b>Erforderliche Margin:</b> <code>$ {init_margin_after:,.2f}</code>\n"
+            f"├─ <b>Limit:</b> <code>$ {limit_value:,.2f}</code>\n"
+            f"├─ <b>Konto-Cushion:</b> <code>{cushion_pct:.1f}%</code>\n"
+            f"└─ <b>Status:</b> Order blockiert (nicht an TWS gesendet)."
+        )
+        return await self.send_message(message)
+
+    async def send_margin_utilization_warning(
+        self,
+        symbol: str,
+        account_id: str,
+        purchase_value: float,
+        total_cash: float,
+        margin_needed: float,
+    ) -> bool:
+        """Sendet eine Meldung, wenn für einen Kauf Margin (Fremdkapital) genutzt wird."""
+        message = (
+            f"ℹ️ <b>MARGIN-NUTZUNG ERFORDERLICH</b> | <code>{symbol}</code>\n"
+            f"├─ <b>Konto:</b> <code>{account_id}</code>\n"
+            f"├─ <b>Kaufwert:</b> <code>$ {purchase_value:,.2f}</code>\n"
+            f"├─ <b>Verfügbares Cash:</b> <code>$ {total_cash:,.2f}</code>\n"
+            f"└─ <b>Info:</b> Zusätzliche Margin von <code>$ {margin_needed:,.2f}</code> wird beansprucht."
+        )
+        return await self.send_message(message)
+
+    async def send_high_margin_usage_warning(
+        self,
+        symbol: str,
+        account_id: str,
+        usage_pct: float,
+        init_margin_after: float,
+        net_liquidation: float,
+    ) -> bool:
+        """Sendet eine Warnung bei einer Margin-Auslastung über 50%."""
+        message = (
+            f"⚠️ <b>HOHE MARGIN-AUSLASTUNG (>50%)</b> | <code>{symbol}</code>\n"
+            f"├─ <b>Konto:</b> <code>{account_id}</code>\n"
+            f"├─ <b>Margin-Auslastung:</b> <code>{usage_pct:.1f}%</code>\n"
+            f"├─ <b>Initial Margin (Neu):</b> <code>$ {init_margin_after:,.2f}</code>\n"
+            f"└─ <b>Netto-Liquidationswert:</b> <code>$ {net_liquidation:,.2f}</code>"
+        )
+        return await self.send_message(message)

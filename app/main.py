@@ -157,7 +157,15 @@ class TradingSystemOrchestrator:
             )
         )
 
-        self.tasks = (importer_task, worker_task, watcher_task, sync_task)
+        heartbeat_task = asyncio.create_task(self.heartbeat_loop())
+
+        self.tasks = (
+            importer_task,
+            worker_task,
+            watcher_task,
+            sync_task,
+            heartbeat_task,
+        )
 
     async def graceful_shutdown(self) -> None:
         """Führt eine geordnete Shutdown-Sequenz des gesamten Systems aus."""
@@ -261,6 +269,62 @@ class TradingSystemOrchestrator:
                 error=str(exception),
             )
             return False
+
+    async def heartbeat_loop(self) -> None:
+        """
+        Sendet periodisch einen Ping (reqCurrentTime) an das Gateway,
+        um Verbindungs-Hänger zu erkennen.
+        """
+        logger.info(
+            "Starting application-level Heartbeat Keep-Alive",
+            interval_s=self.config.tws.heartbeat_interval_s,
+            timeout_s=self.config.tws.heartbeat_timeout_s,
+        )
+
+        while True:
+            try:
+                # Prüfen, ob wir im geplanten Restart-Fenster (12:00 - 12:05 Uhr) sind.
+                # Wenn ja, pausieren wir den Heartbeat vorübergehend.
+                from datetime import datetime
+
+                now = datetime.now()
+                if now.hour == 12 and 0 <= now.minute < 5:
+                    logger.info(
+                        "Inside daily restart window (12:00-12:05). Pausing heartbeat."
+                    )
+                    await asyncio.sleep(60.0)
+                    continue
+
+                if self.interactive_brokers.isConnected():
+                    try:
+                        await asyncio.wait_for(
+                            self.interactive_brokers.reqCurrentTimeAsync(),
+                            timeout=self.config.tws.heartbeat_timeout_s,
+                        )
+                        logger.debug("Heartbeat ping successful")
+                    except TimeoutError:
+                        logger.error(
+                            "Heartbeat timeout. API connection stalled. Triggering disconnect.",
+                            timeout_s=self.config.tws.heartbeat_timeout_s,
+                        )
+                        await self.notifier.send_message(
+                            "⚠️ <b>HEARTBEAT TIMEOUT</b> | API reagiert nicht. Reconnect wird erzwungen."
+                        )
+                        self.interactive_brokers.disconnect()
+                    except Exception as exception:
+                        logger.warning(
+                            "Error during heartbeat ping", error=str(exception)
+                        )
+                else:
+                    logger.debug("Heartbeat skipped: IB is not connected")
+
+            except asyncio.CancelledError:
+                logger.info("Heartbeat loop was cancelled.")
+                raise
+            except Exception as exception:
+                logger.error("Error in heartbeat loop", error=str(exception))
+
+            await asyncio.sleep(self.config.tws.heartbeat_interval_s)
 
 
 async def main() -> None:

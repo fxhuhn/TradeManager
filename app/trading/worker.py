@@ -47,6 +47,14 @@ async def execution_worker(
         try:
             trade_group_id = await queue.get()
 
+            # Wenn die Verbindung getrennt ist, warten wir, bis sie wieder steht
+            while not interactive_brokers.isConnected():
+                logger.warning(
+                    "Interactive Brokers not connected. Waiting for reconnection before placing order.",
+                    trade_group_id=trade_group_id,
+                )
+                await asyncio.sleep(5.0)
+
             db = await db_factory()
             try:
                 await process_trade_group(
@@ -184,6 +192,139 @@ async def _process_entry_order(
     placed_orders: list[OrderRow],
 ) -> None:
     """Weist dem Entry eine TWS Order-ID zu, aktualisiert die DB und übermittelt an TWS."""
+    # --- 1. Cushion Check ---
+    cushion_pct = 100.0
+    cushion_found = False
+    for v in interactive_brokers.accountValues():
+        if v.tag == "Cushion" and (
+            not entry_order.account_id or v.account == entry_order.account_id
+        ):
+            try:
+                cushion_pct = float(v.value) * 100.0
+                cushion_found = True
+                break
+            except ValueError:
+                pass
+
+    if cushion_found and (cushion_pct / 100.0) < config.account.min_cushion_pct:
+        logger.error(
+            "Cushion check failed. Order blocked.",
+            symbol=entry_order.symbol,
+            account=entry_order.account_id,
+            cushion=f"{cushion_pct:.1f}%",
+            limit=f"{config.account.min_cushion_pct * 100.0:.1f}%",
+        )
+        entry_order.status = "Error"
+        async with transaction(db):
+            await db.execute(
+                "UPDATE orders SET status = 'Error' WHERE order_id = ?",
+                (entry_order.order_id,),
+            )
+        await notifier.send_margin_limit_exceeded(
+            symbol=entry_order.symbol,
+            account_id=entry_order.account_id,
+            init_margin_after=0.0,
+            limit_value=0.0,
+            cushion_pct=cushion_pct,
+        )
+        return
+
+    # --- 2. What-If Margin Check & Simulation ---
+    contract = make_stock_contract(entry_order.symbol)
+    sim_order = build_order(entry_order)
+    sim_order.whatIf = True
+
+    sim_trade = interactive_brokers.placeOrder(contract, sim_order)
+    # Kurz warten, bis TWS die Simulation beantwortet
+    for _ in range(20):
+        if sim_trade.whatIfInfo:
+            break
+        await asyncio.sleep(0.1)
+
+    if sim_trade.whatIfInfo:
+        init_margin_after = float(sim_trade.whatIfInfo.initMarginAfter or 0.0)
+        equity_with_loan = float(sim_trade.whatIfInfo.equityWithLoanAfter or 0.0)
+        limit_value = equity_with_loan * config.account.max_margin_usage_pct
+
+        if init_margin_after > limit_value:
+            logger.error(
+                "Order blocked due to margin limit violation.",
+                required_margin=init_margin_after,
+                limit=limit_value,
+                equity=equity_with_loan,
+            )
+            entry_order.status = "Error"
+            async with transaction(db):
+                await db.execute(
+                    "UPDATE orders SET status = 'Error' WHERE order_id = ?",
+                    (entry_order.order_id,),
+                )
+            await notifier.send_margin_limit_exceeded(
+                symbol=entry_order.symbol,
+                account_id=entry_order.account_id,
+                init_margin_after=init_margin_after,
+                limit_value=limit_value,
+                cushion_pct=cushion_pct,
+            )
+            return
+
+        # Margin-Nutzung Warnung (Kaufwert übersteigt Cash)
+        total_cash = 0.0
+        for v in interactive_brokers.accountValues():
+            if v.tag == "TotalCashValue" and (
+                not entry_order.account_id or v.account == entry_order.account_id
+            ):
+                try:
+                    total_cash = float(v.value)
+                    break
+                except ValueError:
+                    pass
+
+        if entry_order.target_price is not None:
+            purchase_value = float(entry_order.quantity) * float(
+                entry_order.target_price
+            )
+            if purchase_value > total_cash:
+                margin_needed = purchase_value - total_cash
+                logger.info(
+                    "Trade requires margin usage.",
+                    purchase_value=purchase_value,
+                    available_cash=total_cash,
+                    margin_needed=margin_needed,
+                )
+                await notifier.send_margin_utilization_warning(
+                    symbol=entry_order.symbol,
+                    account_id=entry_order.account_id,
+                    purchase_value=purchase_value,
+                    total_cash=total_cash,
+                    margin_needed=margin_needed,
+                )
+
+        # Hohe Margin-Auslastung Warnung (>50%)
+        margin_usage_pct = 0.0
+        if equity_with_loan > 0.0:
+            margin_usage_pct = (init_margin_after / equity_with_loan) * 100.0
+        if margin_usage_pct > 50.0:
+            logger.warning(
+                "High margin usage warning.",
+                margin_utilization=f"{margin_usage_pct:.1f}%",
+                init_margin=init_margin_after,
+                net_liquidation=equity_with_loan,
+            )
+            await notifier.send_high_margin_usage_warning(
+                symbol=entry_order.symbol,
+                account_id=entry_order.account_id,
+                usage_pct=margin_usage_pct,
+                init_margin_after=init_margin_after,
+                net_liquidation=equity_with_loan,
+            )
+    else:
+        logger.warning(
+            "What-If simulation did not return info in time. Skipping simulation checks.",
+            symbol=entry_order.symbol,
+        )
+
+    # --- 3. Order-ID zuweisen und senden ---
     async with ORDER_ID_LOCK:
         tws_order_id = await _get_next_non_colliding_order_id(db, interactive_brokers)
         await _assign_order_id_in_db(db, entry_order.order_id, tws_order_id)
@@ -191,7 +332,7 @@ async def _process_entry_order(
     entry_order.order_id = tws_order_id
     entry_order.status = "Submitted"
 
-    contract = make_stock_contract(entry_order.symbol)
+    # Neues ib_entry_order-Objekt mit der echten ID aufbauen
     ib_entry_order = build_order(entry_order)
 
     has_unsent_children = any(child.status == "Created" for child in child_orders)
