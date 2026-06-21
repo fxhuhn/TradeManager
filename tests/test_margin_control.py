@@ -95,7 +95,7 @@ async def test_cushion_check_blocks_order(db, test_config: Config) -> None:
         account_id="ACC_1",
         init_margin_after=0.0,
         limit_value=0.0,
-        cushion_pct=5.0,
+        cushion_percentage=5.0,
     )
 
 
@@ -147,7 +147,7 @@ async def test_what_if_limit_exceeded(db, test_config: Config) -> None:
         account_id="ACC_1",
         init_margin_after=90000.0,
         limit_value=80000.0,
-        cushion_pct=20.0,
+        cushion_percentage=20.0,
     )
 
 
@@ -265,7 +265,7 @@ async def test_high_margin_usage_warning(db, test_config: Config) -> None:
     mock_notifier.send_high_margin_usage_warning.assert_called_once_with(
         symbol="AAPL",
         account_id="ACC_1",
-        usage_pct=60.0,
+        usage_percentage=60.0,
         init_margin_after=60000.0,
         net_liquidation=100000.0,
     )

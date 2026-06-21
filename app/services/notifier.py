@@ -210,7 +210,7 @@ class TelegramNotifier:
         account_id: str,
         init_margin_after: float,
         limit_value: float,
-        cushion_pct: float,
+        cushion_percentage: float,
     ) -> bool:
         """Sendet eine Meldung bei Überschreitung des Margin-Limits."""
         message = (
@@ -218,7 +218,7 @@ class TelegramNotifier:
             f"├─ <b>Konto:</b> <code>{account_id}</code>\n"
             f"├─ <b>Erforderliche Margin:</b> <code>$ {init_margin_after:,.2f}</code>\n"
             f"├─ <b>Limit:</b> <code>$ {limit_value:,.2f}</code>\n"
-            f"├─ <b>Konto-Cushion:</b> <code>{cushion_pct:.1f}%</code>\n"
+            f"├─ <b>Konto-Cushion:</b> <code>{cushion_percentage:.1f}%</code>\n"
             f"└─ <b>Status:</b> Order blockiert (nicht an TWS gesendet)."
         )
         return await self.send_message(message)
@@ -245,7 +245,7 @@ class TelegramNotifier:
         self,
         symbol: str,
         account_id: str,
-        usage_pct: float,
+        usage_percentage: float,
         init_margin_after: float,
         net_liquidation: float,
     ) -> bool:
@@ -253,7 +253,7 @@ class TelegramNotifier:
         message = (
             f"⚠️ <b>HOHE MARGIN-AUSLASTUNG (>50%)</b> | <code>{symbol}</code>\n"
             f"├─ <b>Konto:</b> <code>{account_id}</code>\n"
-            f"├─ <b>Margin-Auslastung:</b> <code>{usage_pct:.1f}%</code>\n"
+            f"├─ <b>Margin-Auslastung:</b> <code>{usage_percentage:.1f}%</code>\n"
             f"├─ <b>Initial Margin (Neu):</b> <code>$ {init_margin_after:,.2f}</code>\n"
             f"└─ <b>Netto-Liquidationswert:</b> <code>$ {net_liquidation:,.2f}</code>"
         )

@@ -193,25 +193,26 @@ async def _process_entry_order(
 ) -> None:
     """Weist dem Entry eine TWS Order-ID zu, aktualisiert die DB und übermittelt an TWS."""
     # --- 1. Cushion Check ---
-    cushion_pct = 100.0
+    cushion_percentage = 100.0
     cushion_found = False
-    for v in interactive_brokers.accountValues():
-        if v.tag == "Cushion" and (
-            not entry_order.account_id or v.account == entry_order.account_id
+    for account_value in interactive_brokers.accountValues():
+        if account_value.tag == "Cushion" and (
+            not entry_order.account_id
+            or account_value.account == entry_order.account_id
         ):
             try:
-                cushion_pct = float(v.value) * 100.0
+                cushion_percentage = float(account_value.value) * 100.0
                 cushion_found = True
                 break
             except ValueError:
                 pass
 
-    if cushion_found and (cushion_pct / 100.0) < config.account.min_cushion_pct:
+    if cushion_found and (cushion_percentage / 100.0) < config.account.min_cushion_pct:
         logger.error(
             "Cushion check failed. Order blocked.",
             symbol=entry_order.symbol,
             account=entry_order.account_id,
-            cushion=f"{cushion_pct:.1f}%",
+            cushion=f"{cushion_percentage:.1f}%",
             limit=f"{config.account.min_cushion_pct * 100.0:.1f}%",
         )
         entry_order.status = "Error"
@@ -225,7 +226,7 @@ async def _process_entry_order(
             account_id=entry_order.account_id,
             init_margin_after=0.0,
             limit_value=0.0,
-            cushion_pct=cushion_pct,
+            cushion_percentage=cushion_percentage,
         )
         return
 
@@ -264,18 +265,19 @@ async def _process_entry_order(
                 account_id=entry_order.account_id,
                 init_margin_after=init_margin_after,
                 limit_value=limit_value,
-                cushion_pct=cushion_pct,
+                cushion_percentage=cushion_percentage,
             )
             return
 
         # Margin-Nutzung Warnung (Kaufwert übersteigt Cash)
         total_cash = 0.0
-        for v in interactive_brokers.accountValues():
-            if v.tag == "TotalCashValue" and (
-                not entry_order.account_id or v.account == entry_order.account_id
+        for account_value in interactive_brokers.accountValues():
+            if account_value.tag == "TotalCashValue" and (
+                not entry_order.account_id
+                or account_value.account == entry_order.account_id
             ):
                 try:
-                    total_cash = float(v.value)
+                    total_cash = float(account_value.value)
                     break
                 except ValueError:
                     pass
@@ -301,20 +303,20 @@ async def _process_entry_order(
                 )
 
         # Hohe Margin-Auslastung Warnung (>50%)
-        margin_usage_pct = 0.0
+        margin_usage_percentage = 0.0
         if equity_with_loan > 0.0:
-            margin_usage_pct = (init_margin_after / equity_with_loan) * 100.0
-        if margin_usage_pct > 50.0:
+            margin_usage_percentage = (init_margin_after / equity_with_loan) * 100.0
+        if margin_usage_percentage > 50.0:
             logger.warning(
                 "High margin usage warning.",
-                margin_utilization=f"{margin_usage_pct:.1f}%",
+                margin_utilization=f"{margin_usage_percentage:.1f}%",
                 init_margin=init_margin_after,
                 net_liquidation=equity_with_loan,
             )
             await notifier.send_high_margin_usage_warning(
                 symbol=entry_order.symbol,
                 account_id=entry_order.account_id,
-                usage_pct=margin_usage_pct,
+                usage_percentage=margin_usage_percentage,
                 init_margin_after=init_margin_after,
                 net_liquidation=equity_with_loan,
             )
