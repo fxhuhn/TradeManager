@@ -105,11 +105,33 @@ def load_env(environment_path: Path) -> dict[str, str]:
     return environment_variables
 
 
-def _parse_tws_config(tws_data: dict[str, object]) -> TwsConfig:
+def _parse_tws_config(
+    tws_data: dict[str, object], environment_variables: dict[str, str]
+) -> TwsConfig:
+    tws_host = (
+        os.environ.get("TWS_HOST")
+        or environment_variables.get("TWS_HOST")
+        or str(tws_data.get("host", "127.0.0.1"))
+    )
+
+    tws_port_raw = (
+        os.environ.get("TWS_PORT")
+        or environment_variables.get("TWS_PORT")
+        or tws_data.get("port")
+    )
+    tws_port = int(tws_port_raw) if tws_port_raw is not None else 7497
+
+    tws_client_id_raw = (
+        os.environ.get("TWS_CLIENT_ID")
+        or environment_variables.get("TWS_CLIENT_ID")
+        or tws_data.get("client_id")
+    )
+    tws_client_id = int(tws_client_id_raw) if tws_client_id_raw is not None else 0
+
     return TwsConfig(
-        host=str(tws_data.get("host", "127.0.0.1")),
-        port=int(tws_data.get("port", 7497)),
-        client_id=int(tws_data.get("client_id", 0)),
+        host=tws_host,
+        port=tws_port,
+        client_id=tws_client_id,
         connection_timeout_s=float(tws_data.get("connection_timeout_s", 10.0)),
         reconnect_initial_delay_s=float(tws_data.get("reconnect_initial_delay_s", 5.0)),
         reconnect_max_attempts=int(tws_data.get("reconnect_max_attempts", 10)),
@@ -200,11 +222,11 @@ def load_config(root_path: Path = Path(".")) -> Config:
     with open(config_toml_path, "rb") as file_handle:
         toml_data = tomllib.load(file_handle)
 
-    tws_config = _parse_tws_config(toml_data.get("tws", {}))
+    environment_variables = load_env(environment_path)
+    tws_config = _parse_tws_config(toml_data.get("tws", {}), environment_variables)
     app_config = _parse_app_config(toml_data.get("app", {}))
     account_config = _parse_account_config(toml_data.get("account", {}))
 
-    environment_variables = load_env(environment_path)
     telegram_config = _parse_telegram_config(
         toml_data.get("telegram", {}), environment_variables
     )
