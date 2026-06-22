@@ -110,7 +110,7 @@ def configure_logging(
     shared_pre_processors = [
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
-        structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S.%f", utc=False),
+        structlog.processors.TimeStamper(fmt="%H:%M:%S.%f", utc=False),
         clean_ib_async_warnings_processor,
     ]
 
