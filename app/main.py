@@ -490,6 +490,11 @@ def _initialize_config_and_logging(root_directory_path: Path) -> Config:
     """Lädt die Konfiguration und re-konfiguriert das Logging."""
     try:
         config = load_config(root_directory_path)
+
+        # Sicherstellen, dass das orders-Verzeichnis existiert
+        orders_directory = root_directory_path / "data" / "orders"
+        orders_directory.mkdir(parents=True, exist_ok=True)
+
         configure_logging(
             log_file_path=root_directory_path / config.app.log_file_path,
             backup_count=config.app.log_rotation_backup_count,
