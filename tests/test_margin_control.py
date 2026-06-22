@@ -123,12 +123,9 @@ async def test_what_if_limit_exceeded(db, test_config: Config) -> None:
     mock_what_if_info.maintMarginAfter = "70000.0"
     mock_what_if_info.equityWithLoanAfter = "100000.0"
 
-    mock_sim_trade = MagicMock()
-    mock_sim_trade.whatIfInfo = mock_what_if_info
-
     mock_ib = MagicMock()
     mock_ib.accountValues.return_value = [mock_cushion_value]
-    mock_ib.placeOrder.return_value = mock_sim_trade
+    mock_ib.whatIfOrderAsync = AsyncMock(return_value=mock_what_if_info)
     mock_ib.positions.return_value = []
 
     mock_notifier = MagicMock()
@@ -182,16 +179,14 @@ async def test_margin_utilization_warning(db, test_config: Config) -> None:
     mock_what_if_info.maintMarginAfter = "8000.0"
     mock_what_if_info.equityWithLoanAfter = "100000.0"
 
-    mock_sim_trade = MagicMock()
-    mock_sim_trade.whatIfInfo = mock_what_if_info
-
     # Echte Order Placement Rückgabe
     mock_live_trade = MagicMock()
     mock_live_trade.orderStatus.status = "Submitted"
 
     mock_ib = MagicMock()
     mock_ib.accountValues.return_value = [mock_cushion_value, mock_cash_value]
-    mock_ib.placeOrder.side_effect = [mock_sim_trade, mock_live_trade]
+    mock_ib.whatIfOrderAsync = AsyncMock(return_value=mock_what_if_info)
+    mock_ib.placeOrder.return_value = mock_live_trade
     mock_ib.client.getReqId.return_value = 102
     mock_ib.positions.return_value = []
 
@@ -243,15 +238,13 @@ async def test_high_margin_usage_warning(db, test_config: Config) -> None:
     mock_what_if_info.maintMarginAfter = "45000.0"
     mock_what_if_info.equityWithLoanAfter = "100000.0"
 
-    mock_sim_trade = MagicMock()
-    mock_sim_trade.whatIfInfo = mock_what_if_info
-
     mock_live_trade = MagicMock()
     mock_live_trade.orderStatus.status = "Submitted"
 
     mock_ib = MagicMock()
     mock_ib.accountValues.return_value = [mock_cushion_value, mock_cash_value]
-    mock_ib.placeOrder.side_effect = [mock_sim_trade, mock_live_trade]
+    mock_ib.whatIfOrderAsync = AsyncMock(return_value=mock_what_if_info)
+    mock_ib.placeOrder.return_value = mock_live_trade
     mock_ib.client.getReqId.return_value = 103
     mock_ib.positions.return_value = []
 

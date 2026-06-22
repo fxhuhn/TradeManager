@@ -44,6 +44,7 @@ async def execution_worker(
     logger.info("Starting Execution Worker background service")
 
     while True:
+        trade_group_id = None
         try:
             trade_group_id = await queue.get()
 
@@ -70,6 +71,19 @@ async def execution_worker(
             raise
         except Exception as exception:
             logger.error("Error in Execution Worker loop", error=str(exception))
+            if trade_group_id is not None:
+                try:
+                    await notifier.send_message(
+                        f"⚠️ <b>FEHLER IM EXECUTION WORKER</b>\n"
+                        f"├─ <b>Trade-Gruppe:</b> <code>{trade_group_id}</code>\n"
+                        f"└─ <b>Details:</b> <i>{exception}</i>"
+                    )
+                except Exception as tg_exception:
+                    logger.error(
+                        "Failed to send Telegram error notification",
+                        error=str(tg_exception),
+                    )
+                queue.task_done()
             await asyncio.sleep(1.0)
 
 
@@ -233,18 +247,23 @@ async def _process_entry_order(
     # --- 2. What-If Margin Check & Simulation ---
     contract = make_stock_contract(entry_order.symbol)
     sim_order = build_order(entry_order)
-    sim_order.whatIf = True
 
-    sim_trade = interactive_brokers.placeOrder(contract, sim_order)
-    # Kurz warten, bis TWS die Simulation beantwortet
-    for _ in range(20):
-        if sim_trade.whatIfInfo:
-            break
-        await asyncio.sleep(0.1)
+    order_state = None
+    try:
+        order_state = await asyncio.wait_for(
+            interactive_brokers.whatIfOrderAsync(contract, sim_order),
+            timeout=5.0,
+        )
+    except Exception as exception:
+        logger.warning(
+            "What-If simulation did not return info in time. Skipping simulation checks.",
+            symbol=entry_order.symbol,
+            error=str(exception),
+        )
 
-    if sim_trade.whatIfInfo:
-        init_margin_after = float(sim_trade.whatIfInfo.initMarginAfter or 0.0)
-        equity_with_loan = float(sim_trade.whatIfInfo.equityWithLoanAfter or 0.0)
+    if order_state:
+        init_margin_after = float(order_state.initMarginAfter or 0.0)
+        equity_with_loan = float(order_state.equityWithLoanAfter or 0.0)
         limit_value = equity_with_loan * config.account.max_margin_usage_pct
 
         if init_margin_after > limit_value:
@@ -320,11 +339,6 @@ async def _process_entry_order(
                 init_margin_after=init_margin_after,
                 net_liquidation=equity_with_loan,
             )
-    else:
-        logger.warning(
-            "What-If simulation did not return info in time. Skipping simulation checks.",
-            symbol=entry_order.symbol,
-        )
 
     # --- 3. Order-ID zuweisen und senden ---
     async with ORDER_ID_LOCK:
