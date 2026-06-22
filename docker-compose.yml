@@ -1,9 +1,9 @@
 # docker-compose.yml
-# Orchestriert die Trading-App und Dozzle zur Logüberwachung
+# Orchestriert die Trading-App
 
 services:
   trading-app:
-    build: .
+    image: ghcr.io/fxhuhn/trademanager:latest
     container_name: trading-app
     restart: unless-stopped
     extra_hosts:
@@ -19,11 +19,3 @@ services:
         max-size: '50m'                      # Begrenzung der Logdatei-Größe
         max-file: '5'                        # Rotiert und behält maximal 5 Log-Dateien
 
-  dozzle:
-    image: amir20/dozzle:latest
-    container_name: dozzle-logs
-    restart: unless-stopped
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro  # Zugriff auf Docker socket zum Lesen der Logs
-    ports:
-      - '8080:8080'                          # Dozzle Web-Oberfläche auf Port 8080
