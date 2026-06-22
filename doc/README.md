@@ -16,13 +16,14 @@ Willkommen beim offiziellen **Nutzer- und Wartungshandbuch** für das Interactiv
 5. [CSV-Dateiformat & Beispiele](#5-csv-dateiformat--beispiele)
 6. [Datenbankschema & Datenmodelle](#6-datenbankschema--datenmodelle)
 7. [Detaillierte Systemabläufe (Flows)](#7-detaillierte-systemabläufe-flows)
-8. [Integrierte Hilfsprogramme (Tools)](#8-integrierte-hilfsprogramme-tools)
-9. [Docker-Deployment](#9-docker-deployment)
-10. [Telegram-Benachrichtigungen](#10-telegram-benachrichtigungen)
-11. [Fehlerbehebung (Troubleshooting)](#11-fehlerbehebung-troubleshooting)
-12. [Wartung & Betrieb (Operations)](#12-wartung--betrieb-operations)
-13. [Tests & Qualitätssicherung](#13-tests--qualitätssicherung)
-14. [Glossar](#14-glossar)
+8. [Positionsgrößenbestimmung & Sizing-Workflow](#8-positionsgrößenbestimmung--sizing-workflow)
+9. [Integrierte Hilfsprogramme (Tools)](#9-integrierte-hilfsprogramme-tools)
+10. [Docker-Deployment](#10-docker-deployment)
+11. [Telegram-Benachrichtigungen](#11-telegram-benachrichtigungen)
+12. [Fehlerbehebung (Troubleshooting)](#12-fehlerbehebung-troubleshooting)
+13. [Wartung & Betrieb (Operations)](#13-wartung--betrieb-operations)
+14. [Tests & Qualitätssicherung](#14-tests--qualitätssicherung)
+15. [Glossar](#15-glossar)
 
 ---
 
@@ -34,8 +35,8 @@ Das System wurde als robuster, hochverfügbarer **End-of-Day (EOD) Trading-Robot
 
 *   **Modernes Python 3.12+:** Konsequente Nutzung von modernem Python-Syntax, statischer Typisierung und asynchroner Ausführung mittels `asyncio` (`ib_async`).
 *   **Functional Core, Imperative Shell:** Mathematische Berechnungen und Validierungen (z. B. Positionsgrößenbestimmung, PnL-Berechnung, Validierungen) sind als reine, referenziell transparente Funktionen implementiert (Functional Core). Sämtliche Seiteneffekte wie Datenbankzugriffe (aiosqlite), TWS-API-Interaktionen und Telegram-Notifikationen sind in den äußeren Schichten gekapselt (Imperative Shell).
-*   **Standard Library First:** Minimierung von Drittanbieter-Bibliotheken (Verzicht auf `pydantic`, stattdessen `@dataclass(frozen=True)` und `TypedDict`).
-*   **Robuste Fehlerkontrolle:** Systemkritische Ausfälle (z. B. DB-Korruption) führen zum sofortigen kontrollierten Systemabbruch (Fail-Fast). Datenanomalien oder transiente Netzwerkfehler werden abgefangen, gemeldet und automatisch repariert.
+*   **Standard Library First & Immutability:** Minimierung von Drittanbieter-Bibliotheken (Verzicht auf `pydantic`, stattdessen `@dataclass(frozen=True)` und `TypedDict`). Zustandsänderungen von Kerndatenmodellen wie `OrderRow` erzeugen funktionale Kopien mittels `dataclasses.replace`, wodurch Seiteneffekte und Race-Conditions im asynchronen Betrieb vermieden werden.
+*   **Robuste Fehlerkontrolle & Fail-Closed:** Systemkritische Ausfälle (z. B. DB-Korruption) führen zum sofortigen kontrollierten Systemabbruch (Fail-Fast). Risiko- und Margin-Simulationen schlagen bei Timeout oder API-Fehlern fehl (Fail-Closed). Der Trade-Prozess wird abgebrochen und gesperrt, um unkontrollierte Positionsrisiken zu vermeiden.
 
 ### 1.2 Projektstruktur
 
@@ -214,7 +215,7 @@ Das Verzeichnis `data/` wird automatisch erstellt, wenn es nicht vorhanden ist. 
 python scripts/check_tws.py
 ```
 
-Dieses Skript prüft die Verbindung zur TWS und gibt Kontoinformationen aus (→ [Abschnitt 8.1](#81-check_twspy-konnektivitäts--kapitalschnelltest)).
+Dieses Skript prüft die Verbindung zur TWS und gibt Kontoinformationen aus (→ [Abschnitt 9.1](#91-check_twspy-konnektivitäts--kapitalschnelltest)).
 
 ---
 
@@ -508,6 +509,7 @@ erDiagram
 1. **Fremdschlüssel-Kaskadierung:** `parent_id` referenziert `orders(order_id) ON UPDATE CASCADE`. Wenn während der Orderübermittlung die temporäre negative ID durch eine echte TWS-API-Order-ID ersetzt wird, aktualisiert die DB automatisch alle verknüpften Child-Orders.
 2. **Eindeutigkeit:** Ein Unique Constraint liegt auf `(account_id, trade_group_id, bracket_role)`, was das System unempfindlich gegenüber doppelten Imports macht.
 3. **Teilweiser Index:** Ein Unique Index liegt auf `perm_id` (`WHERE perm_id IS NOT NULL AND perm_id != 0`), um Kollisionen zu verhindern und gleichzeitig beliebig viele Orders im Zustand `Created` (mit `perm_id = NULL`) zu erlauben.
+4. **Datenintegrität über Immutability:** Die Klasse `OrderRow` ist im Code als unveränderliche `@dataclass(frozen=True)` definiert. Modifikationen während des Order-Lebenszyklus erzeugen neue Instanzen mittels `dataclasses.replace` und werden unmittelbar in der SQLite-Datenbank persistiert.
 
 ### 6.3 Order-Status-Lebenszyklus
 
@@ -624,21 +626,17 @@ flowchart TD
 
 ---
 
-### 7.3 CSV-Import & Sizing-Flow (Phase 3)
+### 7.3 CSV-Import & Sizing-Initiierung (Phase 3)
 
-Der CSV-Import liest die Datei `data/orders_YYYY_MM_DD.csv` ein. Er ist mit einem **DoS-Schutz** versehen, der übergroße Dateien blockiert, und berechnet die Positionsgrößen dynamisch basierend auf dem Realtime-Cash-Bestand.
+Der CSV-Import liest die Datei `data/orders_YYYY_MM_DD.csv` ein. Er führt einen DoS-Ressourcenschutz-Check durch und stößt den Sizing-Workflow zur Positionsgrößenbestimmung an.
 
 #### Ablaufschritte:
 
 1. **Dateigrößenprüfung:** Überschreitet die Datei das Limit aus der Konfiguration (`max_csv_size_bytes`, Standard: 5 MB), wird der Import blockiert und ein Telegram-Alarm abgesetzt.
 2. **Validierung:** Die Gruppe wird über `validate_group()` auf Konsistenz geprüft (→ [Abschnitt 5.2](#52-validierungsregeln)).
-3. **Ermittlung des Kapitals:** Über `fetch_total_cash_value()` wird das Echtzeit-Kapital des Kontos aus dem TWS-Cache oder aktiv über `reqAccountSummary()` abgefragt.
-4. **Symmetrisches Downscaling (Positionsgrößenanpassung):**
-    *   Das maximale Kapital für den Trade entspricht 100% des Kontowerts (TotalCashValue).
-    *   Wenn die geplante Positionsgröße (`Quantity × TargetPrice`) das Limit überschreitet, wird die `Quantity` mathematisch exakt so verringert, dass sie ins Limit passt.
-    *   **Symmetrie:** Die verringerte Menge wird automatisch auf alle zugehörigen Legs (SL, TP, EXIT) angewendet. Fällt die Menge auf 0, wird die Gruppe übersprungen.
-5. **Datenbank-Schreiben:** Ein atomarer `BEGIN IMMEDIATE` Block führt einen UPSERT in die Tabelle `orders` durch. Neue Orders erhalten temporär eine **negative ID** (z. B. `-1`, `-2`), um Überschneidungen mit echten TWS-IDs auszuschließen.
-6. **Queue:** Die `trade_group_id` wird in die `asyncio.Queue` für den Execution Worker eingereiht.
+3. **Sizing & Downscaling:** Der Importer fragt die Echtzeit-Kontowerte ab und ruft den Sizing-Workflow auf, um die endgültige Order-Stückzahl zu berechnen (Details siehe [Abschnitt 8: Positionsgrößenbestimmung & Sizing-Workflow](#8-positionsgrößenbestimmung--sizing-workflow)).
+4. **Datenbank-Schreiben:** Ein atomarer `BEGIN IMMEDIATE` Block führt einen UPSERT in die Tabelle `orders` durch. Neue Orders erhalten temporär eine **negative ID** (z. B. `-1`, `-2`), um Überschneidungen mit echten TWS-IDs auszuschließen.
+5. **Queue:** Die `trade_group_id` wird in die `asyncio.Queue` für den Execution Worker eingereiht.
 
 ```mermaid
 sequenceDiagram
@@ -867,6 +865,7 @@ Vor der Übermittlung jeder neuen `ENTRY`-Order führt das System eine automatis
    * Über das zurückgegebene `whatIfInfo` werden die prognostizierten Werte für die Initial Margin (`initMarginAfter`) und den Netto-Liquidationswert (`equityWithLoanAfter`) ermittelt.
    * Die neue Initial Margin darf die konfigurierte Grenze `equityWithLoanAfter * max_margin_usage_pct` (z. B. 80%) nicht überschreiten.
    * Bei einer Überschreitung wird die Order blockiert, auf `Error` gesetzt und ein Telegram-Alarm ausgelöst.
+   * **Fail-Closed Sicherheit:** Um das Konto vor unkontrollierten Risiken zu schützen, führt ein Timeout (Limit: 5,0 Sekunden) oder ein Fehler bei der What-If-Simulation zum sofortigen Abbruch der Orderübermittlung. Die Order wird auf den Status `Error` gesetzt, und es wird eine Telegram-Warnung versendet (Fail-Closed).
 
 3. **Margin-Nutzung Warnung (Cash-Überdeckung):**
    * Der Kaufwert der Order (`Quantity × TargetPrice`) wird mit dem verfügbaren Barbestand (`TotalCashValue`) abgeglichen.
@@ -965,11 +964,78 @@ stateDiagram-v2
 
 ---
 
-## 8. Integrierte Hilfsprogramme (Tools)
+## 8. Positionsgrößenbestimmung & Sizing-Workflow
+
+Der Sizing-Workflow berechnet vor der Orderübermittlung die maximal zulässige Handelsgröße (Stückzahl) je Trade-Gruppe auf Basis des Kontokapitals, der Kontoeinstellungen und optionaler Strategie-Limits.
+
+### 8.1 Sizing-Modi
+
+Das System unterstützt zwei Modi zur Ermittlung des maximalen Zuteilungskapitals:
+
+1. **Total Cash (`total_cash`):**
+   * Das Limit entspricht dem reinen Echtzeit-Barbestand des Kontos (`TotalCashValue`).
+   * Orders werden zu 100 % bar gedeckt (keine Hebelwirkung).
+
+2. **Margin-Adjusted Capital (`margin_adjusted_capital`):**
+   * Berechnet das theoretische Handelslimit unter Berücksichtigung des Margin-Hebel-Faktors:
+     $$\text{Theoretisches Limit} = \text{NetLiquidationValue} \times \text{margin\_multiplier\_factor} \times \text{allocation\_limit\_percentage}$$
+   * Um TWS-Ablehnungen wegen unzureichender Deckung vorzubeugen, wird dieses Limit zusätzlich durch die verbleibende Buying Power gedeckelt:
+     $$\text{Buying Power Limit} = \text{AvailableFunds} \times \text{margin\_multiplier\_factor}$$
+   * Das finale Zuteilungslimit ist das Minimum beider Werte:
+     $$\text{Maximales Zuteilungslimit} = \min(\text{Theoretisches Limit}, \text{Buying Power Limit})$$
+
+*Hinweis: Der `allocation_limit_percentage` entspricht dem in `config.toml` konfigurierten `default_limit_pct` (z. B. 0.05 für 5 %), es sei denn, er wird für den jeweiligen Strategienamen im Bereich `[strategy_limits]` überschrieben.*
+
+### 8.2 Symmetrisches Downscaling-Verfahren
+
+Stellt das System fest, dass die geplanten Kosten einer Order-Gruppe das berechnete Zuteilungslimit überschreiten, wird ein symmetrisches Downscaling angewendet:
+
+1. **Berechnung der neuen Menge:**
+   * Basierend auf der ENTRY-Order wird die maximal zulässige Menge über eine ganzzahlige Division ermittelt:
+     $$\text{Reduzierte Menge} = \lfloor \text{Maximales Zuteilungslimit} / \text{TargetPrice} \rfloor$$
+2. **Symmetrie-Prinzip:**
+   * Die reduzierte Menge wird auf **alle Legs** der Trade-Gruppe (ENTRY, Stop-Loss, Take-Profit, EXIT) angewendet. Dadurch bleiben Absicherungen und Gewinnmitnahmen mengenmäßig perfekt synchronisiert.
+3. **Mindestmenge:**
+   * Sinkt die berechnete Menge auf 0, wird die gesamte Trade-Gruppe übersprungen. Es wird eine Telegram-Benachrichtigung gesendet und ein Log-Eintrag erstellt.
+
+### 8.3 Mathematische Präzision (Decimal Space)
+
+Sämtliche Geldbeträge, Limits, Multiplikatoren und mathematische Divisionen im Sizing-Workflow werden ausnahmslos in **`Decimal`-Arithmetik** (statt Binär-Floats) durchgeführt. Dies garantiert:
+* Keine IEEE-754 Rundungsfehler bei Preis- oder Mengenberechnungen.
+* Perfekten Abgleich mit den von IBKR gelieferten Kontowerten.
+
+### 8.4 Pre-Trade Risikoanalyse (What-If-Simulation)
+
+Vor der tatsächlichen Übermittlung einer ENTRY-Order an den Markt führt das System eine automatisierte Risikoüberprüfung durch, um das Konto vor Überhebelung oder Margin-Calls zu schützen:
+
+1. **Konto-Cushion Prüfung:**
+   * Vor jeder Risiko-Simulation wird der aktuelle Konto-Cushion (freies Margin-Polster) abgefragt.
+   * Liegt dieser Wert unter `min_cushion_pct` (z. B. 10 %), wird die Order sofort blockiert (Status `Error`) und nicht an die TWS übermittelt.
+
+2. **What-If Pre-Trade Simulation:**
+   * Es wird eine simulierte Order mit dem Flag `whatIf = True` an Interactive Brokers übermittelt. Die TWS führt daraufhin eine hypothetische Margin-Berechnung durch, ohne die Order auszuführen.
+   * Das System extrahiert aus der TWS-Simulation:
+     * Prognostizierte Initial Margin nach Ausführung (`initMarginAfter`)
+     * Prognostizierter Netto-Liquidationswert (`equityWithLoanAfter`)
+   * Die Order wird freigegeben, wenn:
+     $$\text{initMarginAfter} \le \text{equityWithLoanAfter} \times \text{max\_margin\_usage\_pct}$$
+   * Übersteigt die prognostizierte Margin dieses Limit (z. B. 80 %), wird die Order blockiert, als `Error` markiert und per Telegram gemeldet.
+
+3. **Fail-Closed Sicherheit bei Timeout/API-Fehlern:**
+   * Die What-If-Simulation wird mit einem strikten Timeout von **5,0 Sekunden** ausgeführt.
+   * Sollte die TWS nicht rechtzeitig antworten oder die Simulation fehlschlagen, verhält sich das System **fail-closed**: Die Order wird blockiert, in der DB als `Error` markiert und der Trade abgebrochen. Es erfolgt keine Marktübermittlung auf Basis unvollständiger Risikodaten.
+
+4. **Risiko- und Margin-Warnungen:**
+   * **Margin-Nutzung:** Wenn der geplante Kaufwert (`Quantity × TargetPrice`) das verfügbare Cash (`TotalCashValue`) übersteigt, wird eine informative Telegram-Warnung gesendet, dass Fremdkapital (Margin) beansprucht wird.
+   * **Hohe Margin-Auslastung:** Beträgt die prognostizierte Margin-Auslastung mehr als 50 %, wird eine Warnmeldung im Log und per Telegram abgesetzt.
+
+---
+
+## 9. Integrierte Hilfsprogramme (Tools)
 
 Zur Absicherung des Live-Betriebs stehen vier Kommandozeilenwerkzeuge bereit:
 
-### 8.1 `check_tws.py` (Konnektivitäts- & Kapitalschnelltest)
+### 9.1 `check_tws.py` (Konnektivitäts- & Kapitalschnelltest)
 
 Dieses Tool verifiziert die API-Konfiguration und fragt die Kontodaten ab.
 
@@ -1005,7 +1071,7 @@ Available Funds                |       85,000.00 | EUR      | U19605236
 
 ---
 
-### 8.2 `dry_run_today.py` (Gefahrenfreier Importsimulator)
+### 9.2 `dry_run_today.py` (Gefahrenfreier Importsimulator)
 
 Dieses Skript simuliert den täglichen Order-Import für den aktuellen Handelstag, **ohne reale Orders an die TWS zu senden oder in die Live-Datenbank zu schreiben**.
 
@@ -1025,7 +1091,7 @@ python scripts/dry_run_today.py
 
 ---
 
-### 8.3 `run_dry_run_today.py` (Trockenübung mit Produktions-DB)
+### 9.3 `run_dry_run_today.py` (Trockenübung mit Produktions-DB)
 
 Dieses Skript ist eine erweiterte Variante des Dry Runs, die eine **Kopie der Produktionsdatenbank** erstellt und den Import-Prozess mit einer Mock-TWS durchspielt.
 
@@ -1047,7 +1113,7 @@ python scripts/run_dry_run_today.py
 
 ---
 
-### 8.4 `run_simulation.py` (End-to-End Mock-Systemtest)
+### 9.4 `run_simulation.py` (End-to-End Mock-Systemtest)
 
 Dieses Skript führt eine **vollständige System-Simulation** mit einer Mock-TWS durch — inklusive Order-Ausführung, Teilfüllungen, Gebühren und Settlement.
 
@@ -1070,9 +1136,9 @@ Ohne Argument wird `data/orders.csv` verwendet.
 
 ---
 
-## 9. Docker-Deployment
+## 10. Docker-Deployment
 
-### 9.1 Architektur
+### 10.1 Architektur
 
 Das Docker-Setup besteht aus zwei Services:
 
@@ -1081,7 +1147,7 @@ Das Docker-Setup besteht aus zwei Services:
 | `trading-app`   | Benutzerdefiniert (Dockerfile) | —   | Das Trading-System                     |
 | `dozzle`        | `amir20/dozzle:latest`       | 8080  | Web-basierte Echtzeit-Log-Ansicht      |
 
-### 9.2 Starten mit Docker Compose
+### 10.2 Starten mit Docker Compose
 
 ```bash
 # Image bauen und Container starten
@@ -1094,7 +1160,7 @@ docker-compose logs -f trading-app
 open http://localhost:8080
 ```
 
-### 9.3 Volumes & Persistenz
+### 10.3 Volumes & Persistenz
 
 | Host-Pfad           | Container-Pfad        | Modus   | Inhalt                              |
 |:---------------------|:----------------------|:--------|:------------------------------------|
@@ -1102,7 +1168,7 @@ open http://localhost:8080
 | `./config.toml`      | `/app/config.toml`    | ro      | Konfiguration (Read-Only)           |
 | `.env`               | (env_file)            | —       | Secrets werden als Umgebung geladen |
 
-### 9.4 TWS-Verbindung aus Docker heraus
+### 10.4 TWS-Verbindung aus Docker heraus
 
 Da die TWS auf dem Host läuft, verbindet sich der Container über `host.docker.internal`:
 
@@ -1112,7 +1178,7 @@ Da die TWS auf dem Host läuft, verbindet sich der Container über `host.docker.
 host = "host.docker.internal"  # anstatt "127.0.0.1"
 ```
 
-### 9.5 Stoppen und Aufräumen
+### 10.5 Stoppen und Aufräumen
 
 ```bash
 # Container stoppen
@@ -1124,9 +1190,9 @@ docker-compose down --rmi all
 
 ---
 
-## 10. Telegram-Benachrichtigungen
+## 11. Telegram-Benachrichtigungen
 
-### 10.1 Nachrichtentypen
+### 11.1 Nachrichtentypen
 
 Das System sendet folgende kategorisierte Telegram-Nachrichten:
 
@@ -1149,11 +1215,11 @@ Das System sendet folgende kategorisierte Telegram-Nachrichten:
 | ⚠️    | Shutdown               | `Trading System wird heruntergefahren...`                          |
 | 🛑    | Shutdown abgeschlossen | `Trading System geordnet heruntergefahren.`                        |
 
-### 10.2 Rate-Limiting
+### 11.2 Rate-Limiting
 
 Zur Einhaltung der Telegram-API-Limits (max. 30 Nachrichten/Sek. pro Bot) ist ein **asynchroner Rate-Limiter** implementiert. Standardmäßig wird mindestens **1,5 Sekunden** zwischen aufeinanderfolgenden Nachrichten gewartet.
 
-### 10.3 Telegram-Bot einrichten
+### 11.3 Telegram-Bot einrichten
 
 1. Öffnen Sie Telegram und suchen Sie `@BotFather`
 2. Senden Sie `/newbot` und folgen Sie den Anweisungen
@@ -1162,7 +1228,7 @@ Zur Einhaltung der Telegram-API-Limits (max. 30 Nachrichten/Sek. pro Bot) ist ei
 5. Ermitteln Sie die **Chat-ID** (z. B. über die `getUpdates`-API)
 6. Tragen Sie die Chat-ID in die `.env`-Datei ein
 
-### 10.4 Detaillierte HTML-Meldungslayouts (Vollständige Referenz)
+### 11.4 Detaillierte HTML-Meldungslayouts (Vollständige Referenz)
 
 Um kritische und informative Ereignisse schnell zu erfassen, sind alle vom System gesendeten Nachrichten strukturiert formatiert. Die folgende Übersicht zeigt die genauen HTML-Layouts für jeden Nachrichtentyp:
 
@@ -1295,9 +1361,9 @@ Wird gesendet, sobald ein Trade komplett geschlossen wurde (Schließen der Exit-
 
 ---
 
-## 11. Fehlerbehebung (Troubleshooting)
+## 12. Fehlerbehebung (Troubleshooting)
 
-### 11.1 Häufige Probleme
+### 12.1 Häufige Probleme
 
 | Problem | Ursache | Lösung |
 |:--------|:--------|:-------|
@@ -1310,7 +1376,7 @@ Wird gesendet, sobald ein Trade komplett geschlossen wurde (Schließen der Exit-
 | `Ghost Order erkannt` | Order war in DB als Submitted markiert, existiert aber nicht in TWS | System hat automatisch auf `Cancelled` gesetzt; ggf. manuell in TWS prüfen |
 | `Retry-Limit erreicht` | Order schlug nach 3 Versuchen fehl | Logdatei prüfen (`data/app.log`); TWS-Fehlercodes analysieren |
 
-### 11.2 Logdatei analysieren
+### 12.2 Logdatei analysieren
 
 Die zentrale Logdatei befindet sich unter `data/app.log`. Ältere Logs werden als `data/app.log.YYYY-MM-DD` rotiert (max. 5 Backups).
 
@@ -1336,7 +1402,7 @@ grep "Recovery Szenario" data/app.log
 grep "Telegram" data/app.log
 ```
 
-### 11.3 Datenbank-Diagnose
+### 12.3 Datenbank-Diagnose
 
 Direkte Abfrage der SQLite-Datenbank:
 
@@ -1365,7 +1431,7 @@ PRAGMA integrity_check;
 PRAGMA journal_mode;
 ```
 
-### 11.4 Notfall-Maßnahmen
+### 12.4 Notfall-Maßnahmen
 
 | Situation | Sofortmaßnahme |
 |:----------|:---------------|
@@ -1376,9 +1442,9 @@ PRAGMA journal_mode;
 
 ---
 
-## 12. Wartung & Betrieb (Operations)
+## 13. Wartung & Betrieb (Operations)
 
-### 12.1 Regelmäßige Wartungsaufgaben
+### 13.1 Regelmäßige Wartungsaufgaben
 
 | Aufgabe                          | Häufigkeit    | Beschreibung                                                     |
 |:---------------------------------|:--------------|:-----------------------------------------------------------------|
@@ -1391,7 +1457,7 @@ PRAGMA journal_mode;
 | `.csv.bak`-Dateien aufräumen    | Monatlich     | Alte Backups aus `data/` löschen: `rm data/orders_*.csv.bak`    |
 | Telegram-Bot-Token rotieren     | Jährlich      | Neuen Token bei @BotFather erstellen und `.env` aktualisieren   |
 
-### 12.2 Backup-Strategie
+### 13.2 Backup-Strategie
 
 **Datenbank-Backup (empfohlen: täglich):**
 
@@ -1410,7 +1476,7 @@ cp config.toml backups/config_$(date +%Y%m%d).toml
 cp .env backups/env_$(date +%Y%m%d)
 ```
 
-### 12.3 Datenbank-Schema erweitern (neue Migration)
+### 13.3 Datenbank-Schema erweitern (neue Migration)
 
 So fügen Sie eine neue Migration hinzu:
 
@@ -1429,7 +1495,7 @@ So fügen Sie eine neue Migration hinzu:
 
 > **Vorsicht:** Migrationen sind irreversibel. Testen Sie neue Migrationen immer zuerst mit der Simulation (`run_simulation.py`).
 
-### 12.4 Monitoring-Checkliste (tägliche Überprüfung)
+### 13.4 Monitoring-Checkliste (tägliche Überprüfung)
 
 ```text
 ☐  Telegram-Startmeldung erhalten (🚀)?
@@ -1440,7 +1506,7 @@ So fügen Sie eine neue Migration hinzu:
 ☐  Shutdown-Meldung erhalten (🛑)?
 ```
 
-### 12.5 Codebase-Architektur für Wartungsentwickler
+### 13.5 Codebase-Architektur für Wartungsentwickler
 
 Für Wartungsarbeiten ist es wichtig, die Abhängigkeitskette zu verstehen:
 
@@ -1484,9 +1550,9 @@ graph TD
 
 ---
 
-## 13. Tests & Qualitätssicherung
+## 14. Tests & Qualitätssicherung
 
-### 13.1 Unittests ausführen
+### 14.1 Unittests ausführen
 
 ```bash
 # Alle Tests ausführen
@@ -1499,7 +1565,7 @@ pytest --cov=app --cov-report=term-missing
 pytest tests/test_trading_system.py -v
 ```
 
-### 13.2 Verfügbare Test-Suites
+### 14.2 Verfügbare Test-Suites
 
 | Testdatei                      | Beschreibung                                           |
 |:-------------------------------|:-------------------------------------------------------|
@@ -1512,7 +1578,7 @@ pytest tests/test_trading_system.py -v
 | `tests/test_heartbeat.py`      | Tests des Keep-Alive Heartbeats und planned/unplanned Gateway-Neustarts |
 
 
-### 13.3 Code-Style & Linting (Ruff)
+### 14.3 Code-Style & Linting (Ruff)
 
 ```bash
 # Linter ausführen
@@ -1531,7 +1597,7 @@ ruff format .
 - Anführungszeichen: Doppelt (`""`)
 - Aktivierte Regelsätze: E, F, W, I, N, UP, B, A, C4, PL
 
-### 13.4 CI/CD Pipeline
+### 14.4 CI/CD Pipeline
 
 Die Qualitätssicherung läuft automatisiert über GitHub Actions bei jedem Push und Pull Request:
 
@@ -1541,7 +1607,7 @@ Die Qualitätssicherung läuft automatisiert über GitHub Actions bei jedem Push
 
 ---
 
-## 14. Glossar
+## 15. Glossar
 
 | Begriff              | Bedeutung                                                                |
 |:---------------------|:-------------------------------------------------------------------------|
