@@ -116,7 +116,7 @@ class TradingSystemOrchestrator:
             csv_directory_watcher(
                 db_factory=self.create_database_connection,
                 interactive_brokers=self.interactive_brokers,
-                directory_path=self.root_directory_path / "data",
+                directory_path=self.root_directory_path / "data" / "orders",
                 queue=self.queue,
                 notifier=self.notifier,
                 config=self.config,
