@@ -8,6 +8,7 @@ die entsprechenden ENTRY und Child-Orders (SL, TP, EXIT) an die TWS.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from collections.abc import Awaitable, Callable
 from decimal import Decimal
 from typing import Final
@@ -127,7 +128,7 @@ async def process_trade_group(
             "Normal entry: Processing ENTRY order",
             trade_group_id=trade_group_id,
         )
-        await _process_entry_order(
+        entry_order = await _process_entry_order(
             db,
             interactive_brokers,
             entry_order,
@@ -137,7 +138,7 @@ async def process_trade_group(
             placed_orders,
         )
 
-    if entry_order.status == "Error":
+    if not entry_order or entry_order.status == "Error":
         logger.warning(
             "ENTRY order failed. Skipping child orders.",
             trade_group_id=trade_group_id,
@@ -168,7 +169,11 @@ async def process_trade_group(
         ]
 
         # Sortiere: ENTRY zuerst, dann TP, dann SL
-        order_dicts.sort(key=lambda x: {"ENTRY": 0, "TP": 1, "SL": 2}.get(x["role"], 3))
+        order_dicts.sort(
+            key=lambda order_dict: {"ENTRY": 0, "TP": 1, "SL": 2}.get(
+                order_dict["role"], 3
+            )
+        )
 
         await notifier.send_bracket_order_submitted(
             symbol=entry_order.symbol,
@@ -196,40 +201,50 @@ async def _load_trade_group_orders(
     return orders
 
 
-async def _process_entry_order(
+def _get_account_value(
+    interactive_brokers: IB, account_id: str, tag: str
+) -> Decimal | None:
+    """Ermittelt einen bestimmten Kontowert von IBKR."""
+    for account_value in interactive_brokers.accountValues():
+        if account_value.tag == tag and (
+            not account_id or account_value.account == account_id
+        ):
+            try:
+                return Decimal(str(account_value.value))
+            except ValueError:
+                pass
+    return None
+
+
+async def _verify_margin_and_cushion(
     db: aiosqlite.Connection,
     interactive_brokers: IB,
     entry_order: OrderRow,
-    child_orders: list[OrderRow],
-    notifier: TelegramNotifier,
     config: Config,
-    placed_orders: list[OrderRow],
-) -> None:
-    """Weist dem Entry eine TWS Order-ID zu, aktualisiert die DB und übermittelt an TWS."""
-    # --- 1. Cushion Check ---
-    cushion_percentage = 100.0
-    cushion_found = False
-    for account_value in interactive_brokers.accountValues():
-        if account_value.tag == "Cushion" and (
-            not entry_order.account_id
-            or account_value.account == entry_order.account_id
-        ):
-            try:
-                cushion_percentage = float(account_value.value) * 100.0
-                cushion_found = True
-                break
-            except ValueError:
-                pass
+    notifier: TelegramNotifier,
+) -> tuple[bool, OrderRow]:
+    """
+    Führt die What-If Simulation und Cushion-Checks aus.
+    Gibt (True, entry_order) bei Erfolg zurück, andernfalls (False, updated_entry_order).
+    """
+    # 1. Cushion Check
+    cushion_percentage = Decimal("100.0")
+    cushion_value = _get_account_value(
+        interactive_brokers, entry_order.account_id, "Cushion"
+    )
+    if cushion_value is not None:
+        cushion_percentage = cushion_value * Decimal("100.0")
 
-    if cushion_found and (cushion_percentage / 100.0) < config.account.min_cushion_pct:
+    min_cushion = Decimal(str(config.account.min_cushion_pct))
+    if cushion_value is not None and cushion_value < min_cushion:
         logger.error(
             "Cushion check failed. Order blocked.",
             symbol=entry_order.symbol,
             account=entry_order.account_id,
             cushion=f"{cushion_percentage:.1f}%",
-            limit=f"{config.account.min_cushion_pct * 100.0:.1f}%",
+            limit=f"{min_cushion * Decimal('100.0'):.1f}%",
         )
-        entry_order.status = "Error"
+        entry_order = dataclasses.replace(entry_order, status="Error")
         async with transaction(db):
             await db.execute(
                 "UPDATE orders SET status = 'Error' WHERE order_id = ?",
@@ -238,42 +253,58 @@ async def _process_entry_order(
         await notifier.send_margin_limit_exceeded(
             symbol=entry_order.symbol,
             account_id=entry_order.account_id,
-            init_margin_after=0.0,
-            limit_value=0.0,
+            init_margin_after=Decimal("0.0"),
+            limit_value=Decimal("0.0"),
             cushion_percentage=cushion_percentage,
         )
-        return
+        return False, entry_order
 
-    # --- 2. What-If Margin Check & Simulation ---
+    # 2. What-If Margin Check & Simulation
     contract = make_stock_contract(entry_order.symbol)
-    sim_order = build_order(entry_order)
+    simulated_order = build_order(entry_order)
 
-    order_state = None
     try:
         order_state = await asyncio.wait_for(
-            interactive_brokers.whatIfOrderAsync(contract, sim_order),
+            interactive_brokers.whatIfOrderAsync(contract, simulated_order),
             timeout=5.0,
         )
     except Exception as exception:
-        logger.warning(
-            "What-If simulation did not return info in time. Skipping simulation checks.",
+        logger.error(
+            "What-If simulation timed out or failed. Aborting order execution to fail closed.",
             symbol=entry_order.symbol,
             error=str(exception),
         )
+        entry_order = dataclasses.replace(entry_order, status="Error")
+        async with transaction(db):
+            await db.execute(
+                "UPDATE orders SET status = 'Error' WHERE order_id = ?",
+                (entry_order.order_id,),
+            )
+        await notifier.send_order_failed(
+            order_id=entry_order.order_id,
+            tws_code=0,
+            reason="Risk validation simulation failed/timed out (Fail-Closed).",
+            symbol=entry_order.symbol,
+            bracket_role=entry_order.bracket_role,
+            is_fatal=True,
+        )
+        return False, entry_order
 
     if order_state:
-        init_margin_after = float(order_state.initMarginAfter or 0.0)
-        equity_with_loan = float(order_state.equityWithLoanAfter or 0.0)
-        limit_value = equity_with_loan * config.account.max_margin_usage_pct
+        init_margin_after = Decimal(str(order_state.initMarginAfter or "0.0"))
+        equity_with_loan = Decimal(str(order_state.equityWithLoanAfter or "0.0"))
+        limit_value = equity_with_loan * Decimal(
+            str(config.account.max_margin_usage_pct)
+        )
 
         if init_margin_after > limit_value:
             logger.error(
                 "Order blocked due to margin limit violation.",
-                required_margin=init_margin_after,
-                limit=limit_value,
-                equity=equity_with_loan,
+                required_margin=float(init_margin_after),
+                limit=float(limit_value),
+                equity=float(equity_with_loan),
             )
-            entry_order.status = "Error"
+            entry_order = dataclasses.replace(entry_order, status="Error")
             async with transaction(db):
                 await db.execute(
                     "UPDATE orders SET status = 'Error' WHERE order_id = ?",
@@ -286,32 +317,24 @@ async def _process_entry_order(
                 limit_value=limit_value,
                 cushion_percentage=cushion_percentage,
             )
-            return
+            return False, entry_order
 
         # Margin-Nutzung Warnung (Kaufwert übersteigt Cash)
-        total_cash = 0.0
-        for account_value in interactive_brokers.accountValues():
-            if account_value.tag == "TotalCashValue" and (
-                not entry_order.account_id
-                or account_value.account == entry_order.account_id
-            ):
-                try:
-                    total_cash = float(account_value.value)
-                    break
-                except ValueError:
-                    pass
+        total_cash = _get_account_value(
+            interactive_brokers, entry_order.account_id, "TotalCashValue"
+        ) or Decimal("0.0")
 
         if entry_order.target_price is not None:
-            purchase_value = float(entry_order.quantity) * float(
-                entry_order.target_price
+            purchase_value = (
+                Decimal(str(entry_order.quantity)) * entry_order.target_price
             )
             if purchase_value > total_cash:
                 margin_needed = purchase_value - total_cash
                 logger.info(
                     "Trade requires margin usage.",
-                    purchase_value=purchase_value,
-                    available_cash=total_cash,
-                    margin_needed=margin_needed,
+                    purchase_value=float(purchase_value),
+                    available_cash=float(total_cash),
+                    margin_needed=float(margin_needed),
                 )
                 await notifier.send_margin_utilization_warning(
                     symbol=entry_order.symbol,
@@ -322,15 +345,17 @@ async def _process_entry_order(
                 )
 
         # Hohe Margin-Auslastung Warnung (>50%)
-        margin_usage_percentage = 0.0
-        if equity_with_loan > 0.0:
-            margin_usage_percentage = (init_margin_after / equity_with_loan) * 100.0
-        if margin_usage_percentage > 50.0:
+        margin_usage_percentage = Decimal("0.0")
+        if equity_with_loan > Decimal("0.0"):
+            margin_usage_percentage = (init_margin_after / equity_with_loan) * Decimal(
+                "100.0"
+            )
+        if margin_usage_percentage > Decimal("50.0"):
             logger.warning(
                 "High margin usage warning.",
-                margin_utilization=f"{margin_usage_percentage:.1f}%",
-                init_margin=init_margin_after,
-                net_liquidation=equity_with_loan,
+                margin_utilization=f"{float(margin_usage_percentage):.1f}%",
+                init_margin=float(init_margin_after),
+                net_liquidation=float(equity_with_loan),
             )
             await notifier.send_high_margin_usage_warning(
                 symbol=entry_order.symbol,
@@ -340,15 +365,30 @@ async def _process_entry_order(
                 net_liquidation=equity_with_loan,
             )
 
-    # --- 3. Order-ID zuweisen und senden ---
+    return True, entry_order
+
+
+async def _transmit_entry_order(
+    db: aiosqlite.Connection,
+    interactive_brokers: IB,
+    entry_order: OrderRow,
+    child_orders: list[OrderRow],
+    notifier: TelegramNotifier,
+    config: Config,
+    placed_orders: list[OrderRow],
+) -> OrderRow | None:
+    """Weist dem Entry eine TWS Order-ID zu, aktualisiert die DB und übermittelt an TWS."""
     async with ORDER_ID_LOCK:
         tws_order_id = await _get_next_non_colliding_order_id(db, interactive_brokers)
         await _assign_order_id_in_db(db, entry_order.order_id, tws_order_id)
 
-    entry_order.order_id = tws_order_id
-    entry_order.status = "Submitted"
+    entry_order = dataclasses.replace(
+        entry_order,
+        order_id=tws_order_id,
+        status="Submitted",
+    )
 
-    # Neues ib_entry_order-Objekt mit der echten ID aufbauen
+    contract = make_stock_contract(entry_order.symbol)
     ib_entry_order = build_order(entry_order)
 
     has_unsent_children = any(child.status == "Created" for child in child_orders)
@@ -367,10 +407,38 @@ async def _process_entry_order(
         notifier,
     )
     if not success:
-        return
-    placed_orders.append(entry_order)
+        return dataclasses.replace(entry_order, status="Error")
 
+    placed_orders.append(entry_order)
     await asyncio.sleep(config.app.order_rate_limit_s)
+    return entry_order
+
+
+async def _process_entry_order(
+    db: aiosqlite.Connection,
+    interactive_brokers: IB,
+    entry_order: OrderRow,
+    child_orders: list[OrderRow],
+    notifier: TelegramNotifier,
+    config: Config,
+    placed_orders: list[OrderRow],
+) -> OrderRow | None:
+    """Valideiert Cushion und Margin, weist dem Entry eine TWS Order-ID zu und übermittelt an TWS."""
+    success, entry_order = await _verify_margin_and_cushion(
+        db, interactive_brokers, entry_order, config, notifier
+    )
+    if not success:
+        return entry_order
+
+    return await _transmit_entry_order(
+        db,
+        interactive_brokers,
+        entry_order,
+        child_orders,
+        notifier,
+        config,
+        placed_orders,
+    )
 
 
 async def _assign_order_id_in_db(
@@ -398,7 +466,7 @@ async def _process_child_orders(
     created_children = [child for child in child_orders if child.status == "Created"]
     for iteration_index, child in enumerate(created_children):
         is_last = iteration_index == len(created_children) - 1
-        success = await _place_single_child_order(
+        success, updated_child = await _place_single_child_order(
             db,
             interactive_brokers,
             child,
@@ -409,7 +477,7 @@ async def _process_child_orders(
             config,
         )
         if success:
-            placed_orders.append(child)
+            placed_orders.append(updated_child)
 
 
 async def _place_single_child_order(
@@ -421,7 +489,7 @@ async def _place_single_child_order(
     is_last: bool,
     notifier: TelegramNotifier,
     config: Config,
-) -> bool:
+) -> tuple[bool, OrderRow]:
     """Bereitet eine einzelne untergeordnete Order vor und übermittelt sie an TWS."""
     logger.info(
         "Processing child order",
@@ -430,18 +498,21 @@ async def _place_single_child_order(
     )
 
     if is_post_fill and child.bracket_role in ("SL", "TP", "EXIT"):
-        should_continue = await _adjust_exit_order_quantity(
+        should_continue, child = await _adjust_exit_order_quantity(
             db, interactive_brokers, child, notifier
         )
         if not should_continue:
-            return False
+            return False, child
 
     async with ORDER_ID_LOCK:
         tws_order_id = await _get_next_non_colliding_order_id(db, interactive_brokers)
         await _assign_order_id_in_db(db, child.order_id, tws_order_id)
 
-    child.order_id = tws_order_id
-    child.status = "Submitted"
+    child = dataclasses.replace(
+        child,
+        order_id=tws_order_id,
+        status="Submitted",
+    )
 
     contract = make_stock_contract(child.symbol)
     ib_child_order = build_order(child)
@@ -466,9 +537,11 @@ async def _place_single_child_order(
     success = await _place_and_verify_order(
         db, interactive_brokers, contract, ib_child_order, child, tws_order_id, notifier
     )
+    if not success:
+        child = dataclasses.replace(child, status="Error")
 
     await asyncio.sleep(config.app.order_rate_limit_s)
-    return success
+    return success, child
 
 
 async def _place_and_verify_order(
@@ -547,7 +620,6 @@ async def _handle_order_rejection(
         error=error_msg,
     )
 
-    order_row.status = "Error"
     async with transaction(db):
         await db.execute(
             "UPDATE orders SET status = 'Error' WHERE order_id = ?",
@@ -580,7 +652,7 @@ async def _adjust_exit_order_quantity(
     interactive_brokers: IB,
     child: OrderRow,
     notifier: TelegramNotifier,
-) -> bool:
+) -> tuple[bool, OrderRow]:
     """Gleicht Depotbestand ab und passt die Order-Menge an oder storniert sie."""
     live_position = _get_live_position_quantity(
         interactive_brokers, child.account_id, child.symbol
@@ -594,15 +666,16 @@ async def _adjust_exit_order_quantity(
 
     if available_quantity <= Decimal("0.0"):
         await _cancel_empty_exit_order(db, child, live_position, notifier)
-        return False
+        return False, dataclasses.replace(child, status="Cancelled")
 
     intended_quantity = Decimal(str(child.quantity))
     if available_quantity < intended_quantity:
+        child = dataclasses.replace(child, quantity=int(available_quantity))
         await _reduce_exit_order_quantity(
             db, child, intended_quantity, available_quantity, notifier
         )
 
-    return True
+    return True, child
 
 
 async def _cancel_empty_exit_order(
@@ -655,7 +728,6 @@ async def _reduce_exit_order_quantity(
         old_qty=float(intended_quantity),
         new_qty=float(available_quantity),
     )
-    child.quantity = int(available_quantity)
 
     try:
         async with transaction(db):

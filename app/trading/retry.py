@@ -35,11 +35,11 @@ async def handle_retriable_error(
 
     db = await db_factory()
     try:
-        order_info = await _fetch_order_retry_info(db, order_id)
-        if not order_info:
+        order_retry_info = await _fetch_order_retry_info(db, order_id)
+        if not order_retry_info:
             return
 
-        trade_group_id, retry_count, bracket_role, symbol = order_info
+        trade_group_id, retry_count, bracket_role, symbol = order_retry_info
         max_retries = config.app.max_retries
 
         if retry_count < max_retries:

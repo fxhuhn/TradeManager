@@ -131,6 +131,20 @@ async def _reconcile_orders(
 
     for order in local_orders:
         order_id = order.order_id
+
+        # Negative IDs sind rein lokale, temporäre Datenbank-IDs.
+        # Sie wurden nie erfolgreich an TWS übertragen (da sie sonst eine echte positive TWS-ID hätten).
+        if order_id < 0:
+            logger.info(
+                "Recovery: Temporäre lokale Order-ID gefunden. Wird als nie gesendet behandelt.",
+                order_id=order_id,
+                trade_group_id=order.trade_group_id,
+                status=order.status,
+            )
+            if order.status in ("Created", "PreSubmitted", "Submitted"):
+                groups_to_requeue.add(order.trade_group_id)
+            continue
+
         tws_active = tws_active_orders.get(order_id)
         tws_completed = tws_completed_orders.get(order_id)
 
@@ -213,8 +227,9 @@ async def _recover_submitted_order(
     # Zusätzliche Prüfung auf indirekt gefüllte Entry-Orders (Szenario 2b)
     if order.bracket_role == "ENTRY":
         has_active_child = any(
-            local_ord.parent_id == order_id and local_ord.order_id in tws_active_orders
-            for local_ord in local_orders
+            local_order.parent_id == order_id
+            and local_order.order_id in tws_active_orders
+            for local_order in local_orders
         )
         has_position = _has_live_position(
             interactive_brokers_session, order.account_id, order.symbol
@@ -352,7 +367,7 @@ async def _save_missing_executions(
             "No TWS execution details found for reconstructed order. Using fallback.",
             order_id=order_id,
         )
-        fallback_exec_id = f"RECOVERED_{order_id}"
+        fallback_execution_id = f"RECOVERED_{order_id}"
         try:
             async with transaction(database_connection):
                 await database_connection.execute(
@@ -361,7 +376,7 @@ async def _save_missing_executions(
                     VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
                     """,
                     (
-                        fallback_exec_id,
+                        fallback_execution_id,
                         order_id,
                         str(order.target_price or Decimal("0.0")),
                         str(order.quantity),

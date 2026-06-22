@@ -68,7 +68,7 @@ class TwsCallbacksManager:
         return self._order_locks[order_id]
 
     async def _update_order_status_db(
-        self, order_id: int, status: str, perm_id: int
+        self, order_id: int, status: str, permanent_id: int
     ) -> None:
         """Schreibt das Status-Update atomar in die Datenbank."""
         db = await self.db_factory()
@@ -103,16 +103,16 @@ class TwsCallbacksManager:
                             order_id=order_id,
                             current_status=current_status,
                         )
-                        if perm_id:
+                        if permanent_id:
                             await db.execute(
                                 "UPDATE orders SET perm_id = ? WHERE order_id = ?",
-                                (perm_id, order_id),
+                                (permanent_id, order_id),
                             )
                         return
 
                 await db.execute(
                     "UPDATE orders SET status = ?, perm_id = ? WHERE order_id = ?",
-                    (status, perm_id, order_id),
+                    (status, permanent_id, order_id),
                 )
                 logger.debug(
                     "Order status updated in database", order_id=order_id, status=status
@@ -134,7 +134,7 @@ class TwsCallbacksManager:
         """
         order_id = trade.order.orderId
         status = trade.orderStatus.status
-        perm_id = trade.orderStatus.permId
+        permanent_id = trade.orderStatus.permId
 
         mapped_status = status
         if status in ("PreSubmitted", "Submitted"):
@@ -154,15 +154,15 @@ class TwsCallbacksManager:
         )
 
         asyncio.create_task(
-            self._process_status_change(order_id, mapped_status, perm_id)
+            self._process_status_change(order_id, mapped_status, permanent_id)
         )
 
     async def _process_status_change(
-        self, order_id: int, mapped_status: str, perm_id: int
+        self, order_id: int, mapped_status: str, permanent_id: int
     ) -> None:
         """Verarbeitet Statusänderung asynchron und triggert ggf. Settlement."""
         async with self._get_order_lock(order_id):
-            await self._update_order_status_db(order_id, mapped_status, perm_id)
+            await self._update_order_status_db(order_id, mapped_status, permanent_id)
 
         if mapped_status != "Filled":
             return

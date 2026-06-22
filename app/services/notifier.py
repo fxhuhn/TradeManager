@@ -1,13 +1,7 @@
-"""
-Telegram-Notifier-Dienst für Systembenachrichtigungen und Alerts.
-
-Stellt einen asynchronen, rate-limitierten Client zur Übermittlung von
-Order-Statusberichten, Handelsabschlüssen und Fehlermeldungen per Telegram bereit.
-"""
-
 import asyncio
 import re
 import time
+from decimal import Decimal
 
 import aiohttp
 import structlog
@@ -88,7 +82,7 @@ class TelegramNotifier:
                     url, json=payload, timeout=request_timeout
                 ) as response:
                     if response.status == 200:
-                        logger.info("Telegram Alert sent", message=_strip_html(text))
+                        logger.info("Telegram Alert sent", length=len(text))
                         return True
                     else:
                         response_text = await response.text()
@@ -115,21 +109,21 @@ class TelegramNotifier:
         symbol: str,
         bracket_role: str,
         action: str,
-        quantity: float,
-        price: float,
+        quantity: Decimal,
+        price: Decimal | None,
         order_type: str,
         order_id: int,
         strategy_name: str,
     ) -> bool:
         """Sendet eine Erfolgsmeldung für eine gefüllte Order."""
-        total_val = float(quantity) * float(price) if price else 0.0
-        price_str = f"{float(price):.2f}" if price else "MKT"
+        total_value = quantity * price if price is not None else Decimal("0.0")
+        price_string = f"{price:.2f}" if price is not None else "MKT"
 
         message = (
             f"🟢 <b>ORDER GEFÜLLT</b> | <code>{symbol}</code>\n"
             f"├─ <b>Typ:</b> <code>{bracket_role}</code> ({action})\n"
-            f"├─ <b>Menge:</b> <code>{quantity}</code> @ <code>{price_str}</code> ({order_type})\n"
-            f"├─ <b>Wert:</b> <code>$ {total_val:,.2f}</code>\n"
+            f"├─ <b>Menge:</b> <code>{quantity}</code> @ <code>{price_string}</code> ({order_type})\n"
+            f"├─ <b>Wert:</b> <code>$ {total_value:,.2f}</code>\n"
             f"└─ <b>System:</b> ID: <code>{order_id}</code> • <i>{strategy_name}</i>"
         )
         return await self.send_message(message)
@@ -189,9 +183,11 @@ class TelegramNotifier:
         lines = [f"📤 <b>{title}</b> | <code>{symbol}</code>"]
 
         for order in orders:
-            price_str = f"{float(order['price']):.2f}" if order.get("price") else "MKT"
+            price_string = (
+                f"{Decimal(str(order['price'])):.2f}" if order.get("price") else "MKT"
+            )
             lines.append(
-                f"├─ <b>{order['role']}:</b> <code>{order['action']} {order['quantity']}</code> @ <code>{price_str}</code> ({order['order_type']})"
+                f"├─ <b>{order['role']}:</b> <code>{order['action']} {order['quantity']}</code> @ <code>{price_string}</code> ({order['order_type']})"
             )
 
         if trade_group_id:
@@ -208,9 +204,9 @@ class TelegramNotifier:
         self,
         symbol: str,
         account_id: str,
-        init_margin_after: float,
-        limit_value: float,
-        cushion_percentage: float,
+        init_margin_after: Decimal,
+        limit_value: Decimal,
+        cushion_percentage: Decimal,
     ) -> bool:
         """Sendet eine Meldung bei Überschreitung des Margin-Limits."""
         message = (
@@ -227,9 +223,9 @@ class TelegramNotifier:
         self,
         symbol: str,
         account_id: str,
-        purchase_value: float,
-        total_cash: float,
-        margin_needed: float,
+        purchase_value: Decimal,
+        total_cash: Decimal,
+        margin_needed: Decimal,
     ) -> bool:
         """Sendet eine Meldung, wenn für einen Kauf Margin (Fremdkapital) genutzt wird."""
         message = (
@@ -245,9 +241,9 @@ class TelegramNotifier:
         self,
         symbol: str,
         account_id: str,
-        usage_percentage: float,
-        init_margin_after: float,
-        net_liquidation: float,
+        usage_percentage: Decimal,
+        init_margin_after: Decimal,
+        net_liquidation: Decimal,
     ) -> bool:
         """Sendet eine Warnung bei einer Margin-Auslastung über 50%."""
         message = (

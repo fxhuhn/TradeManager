@@ -107,7 +107,7 @@ async def test_callbacks_filled_notification(db, mock_config: Config) -> None:
     try:
         # 3. Statusänderung zu 'Filled' verarbeiten
         await manager._process_status_change(
-            order_id=42, mapped_status="Filled", perm_id=9876
+            order_id=42, mapped_status="Filled", permanent_id=9876
         )
     finally:
         db.close = original_close
@@ -220,7 +220,7 @@ async def test_callbacks_exit_settlement_trigger(db, mock_config: Config) -> Non
 
     try:
         await manager._process_status_change(
-            order_id=43, mapped_status="Filled", perm_id=9877
+            order_id=43, mapped_status="Filled", permanent_id=9877
         )
     finally:
         db.close = original_close

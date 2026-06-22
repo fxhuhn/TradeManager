@@ -7,51 +7,51 @@ from pathlib import Path
 import structlog
 
 
-def _simplify_ibkr_warning(msg: str) -> str:
+def _simplify_ibkr_warning(warning_message: str) -> str:
     """Extracts key details from a long raw Trade representation in IBKR warning."""
-    if not msg.startswith("IBKR API validation warning: Trade("):
-        return msg
+    if not warning_message.startswith("IBKR API validation warning: Trade("):
+        return warning_message
 
     # Extract symbol
-    symbol_match = re.search(r"symbol='([^']+)'", msg)
+    symbol_match = re.search(r"symbol='([^']+)'", warning_message)
     symbol = symbol_match.group(1) if symbol_match else "UNKNOWN"
 
     # Extract orderId
-    order_id_match = re.search(r"orderId=(\d+)", msg)
+    order_id_match = re.search(r"orderId=(\d+)", warning_message)
     order_id = order_id_match.group(1) if order_id_match else "UNKNOWN"
 
     # Extract action
-    action_match = re.search(r"action='([^']+)'", msg)
+    action_match = re.search(r"action='([^']+)'", warning_message)
     action = action_match.group(1) if action_match else "UNKNOWN"
 
     # Extract quantity
-    qty_match = re.search(r"totalQuantity=([\d.]+)", msg)
+    qty_match = re.search(r"totalQuantity=([\d.]+)", warning_message)
     qty = qty_match.group(1) if qty_match else "UNKNOWN"
 
     # Extract order type
-    order_type_match = re.search(r"orderType='([^']+)'", msg)
+    order_type_match = re.search(r"orderType='([^']+)'", warning_message)
     order_type = order_type_match.group(1) if order_type_match else "UNKNOWN"
 
     # Extract price (lmtPrice)
-    price_match = re.search(r"lmtPrice=([\d.]+)", msg)
+    price_match = re.search(r"lmtPrice=([\d.]+)", warning_message)
     price = price_match.group(1) if price_match else "UNKNOWN"
 
     # Extract warning/error message from TradeLogEntry
-    messages = re.findall(r"message='([^']*)'", msg)
-    warning_msg = ""
-    for m in reversed(messages):
-        if m.strip():
-            warning_msg = m
+    messages = re.findall(r"message='([^']*)'", warning_message)
+    extracted_warning = ""
+    for message in reversed(messages):
+        if message.strip():
+            extracted_warning = message
             break
 
-    if not warning_msg:
-        why_held_match = re.search(r"whyHeld='([^']*)'", msg)
+    if not extracted_warning:
+        why_held_match = re.search(r"whyHeld='([^']*)'", warning_message)
         if why_held_match and why_held_match.group(1):
-            warning_msg = f"Held: {why_held_match.group(1)}"
+            extracted_warning = f"Held: {why_held_match.group(1)}"
 
     details = f"{action} {qty} {symbol} ({order_type} @ {price})"
-    if warning_msg:
-        return f"IBKR API validation warning: {details} -> {warning_msg} (OrderId: {order_id})"
+    if extracted_warning:
+        return f"IBKR API validation warning: {details} -> {extracted_warning} (OrderId: {order_id})"
     else:
         return f"IBKR API validation warning: {details} (OrderId: {order_id})"
 

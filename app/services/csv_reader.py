@@ -24,13 +24,13 @@ def validate_group(group_id: str, legs: list[LegRow]) -> tuple[bool, str]:
     if not legs:
         return False, "Gruppe enthält keine Legs"
 
-    is_valid, msg = _check_group_structure(legs)
+    is_valid, error_message = _check_group_structure(legs)
     if not is_valid:
-        return False, msg
+        return False, error_message
 
-    is_valid, msg = _validate_leg_attributes(legs)
+    is_valid, error_message = _validate_leg_attributes(legs)
     if not is_valid:
-        return False, msg
+        return False, error_message
 
     return True, ""
 

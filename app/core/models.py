@@ -5,8 +5,10 @@ Definiert die internen Datenstrukturen für Order-Legs, TWS-Orders,
 Order-Ausführungen und Settlements als typsichere Dataclasses.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Any
 
 
 def decimal_from_db(value: object) -> Decimal | None:
@@ -42,12 +44,12 @@ class LegRow:
     strategy_name: str
 
 
-@dataclass
+@dataclass(frozen=True)
 class OrderRow:
     """Repräsentiert eine Zeile der Tabelle 'orders'.
 
-    Diese Klasse bleibt veränderbar, da der Order-Status und die zugewiesenen
-    TWS-OrderIDs während des Übermittlungsprozesses im Arbeitsspeicher aktualisiert werden.
+    Diese Klasse ist unveränderlich (frozen), um Datenintegrität zu gewährleisten.
+    Zustandsänderungen werden über funktionale Kopien (dataclasses.replace) abgebildet.
     """
 
     order_id: int
@@ -70,8 +72,8 @@ class OrderRow:
     transmitted_at: str | None = None
 
 
-def order_row_from_db_row(row: object) -> OrderRow:
-    """Centralized OrderRow construction from an aiosqlite database row."""
+def order_row_from_db_row(row: Mapping[str, Any]) -> OrderRow:
+    """Centralized OrderRow construction from an aiosqlite database row mapping."""
     return OrderRow(
         order_id=row["order_id"],
         perm_id=row["perm_id"],
