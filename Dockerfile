@@ -6,7 +6,11 @@ FROM python:3.12-slim
 # Systemabhängigkeiten installieren (z.B. für SQLite oder Netzwerkanalyse falls nötig)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    tzdata \
     && rm -rf /var/lib/apt/lists/*
+
+# Zeitzone auf Deutschland/Berlin festlegen
+ENV TZ=Europe/Berlin
 
 WORKDIR /app
 

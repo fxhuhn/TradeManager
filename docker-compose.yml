@@ -13,6 +13,8 @@ services:
       - ./config.toml:/app/config.toml:ro    # Read-only Konfiguration
     env_file:
       - .env                                 # Secrets (Telegram API-Keys)
+    environment:
+      - TZ=Europe/Berlin                     # Zeitzone für Deutschland/Berlin
     logging:
       driver: json-file
       options:
