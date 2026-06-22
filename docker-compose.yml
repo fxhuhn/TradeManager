@@ -3,7 +3,7 @@
 
 services:
   trading-app:
-    image: ghcr.io/fxhuhn/trademanager:latest
+    image: ghcr.io/fxhuhn/trademanager:main
     container_name: trading-app
     restart: unless-stopped
     extra_hosts:
