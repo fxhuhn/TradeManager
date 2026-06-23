@@ -59,20 +59,20 @@ async def csv_directory_watcher(
     )
 
     date_pattern = re.compile(r"^orders_\d{4}_\d{2}_\d{2}\.csv$")
+    warned_file_names: set[str] = set()
 
     while True:
         try:
-            if directory_path.exists() and directory_path.is_dir():
-                for csv_file in sorted(directory_path.glob("orders_*.csv")):
-                    if date_pattern.match(csv_file.name):
-                        await _process_daily_csv_file(
-                            db_factory,
-                            interactive_brokers,
-                            csv_file,
-                            queue,
-                            notifier,
-                            config,
-                        )
+            await _scan_and_process_directory(
+                db_factory=db_factory,
+                interactive_brokers=interactive_brokers,
+                directory_path=directory_path,
+                queue=queue,
+                notifier=notifier,
+                config=config,
+                date_pattern=date_pattern,
+                warned_file_names=warned_file_names,
+            )
         except asyncio.CancelledError:
             logger.info("CSV Directory Watcher was cancelled.")
             raise
@@ -80,6 +80,71 @@ async def csv_directory_watcher(
             logger.error("Error in CSV Directory Watcher loop", error=str(exception))
 
         await asyncio.sleep(interval_seconds)
+
+
+async def _scan_and_process_directory(
+    db_factory: Callable[[], Awaitable[aiosqlite.Connection]],
+    interactive_brokers: IB,
+    directory_path: Path,
+    queue: asyncio.Queue,
+    notifier: TelegramNotifier,
+    config: Config,
+    date_pattern: re.Pattern,
+    warned_file_names: set[str],
+) -> None:
+    """Scans the directory for matching CSV files and processes them if connected."""
+    if not (directory_path.exists() and directory_path.is_dir()):
+        return
+
+    # Clean up files that were deleted/archived
+    existing_order_file_names = {
+        file_path.name
+        for file_path in directory_path.glob("orders_*.csv")
+        if date_pattern.match(file_path.name)
+    }
+    warned_file_names &= existing_order_file_names
+
+    for file_path in sorted(directory_path.glob("orders_*.csv")):
+        if not date_pattern.match(file_path.name):
+            continue
+
+        if not interactive_brokers.isConnected():
+            await _handle_disconnected_watcher(
+                file_name=file_path.name,
+                warned_file_names=warned_file_names,
+                notifier=notifier,
+            )
+            continue
+
+        warned_file_names.discard(file_path.name)
+        await _process_daily_csv_file(
+            db_factory=db_factory,
+            interactive_brokers=interactive_brokers,
+            csv_file=file_path,
+            queue=queue,
+            notifier=notifier,
+            config=config,
+        )
+
+
+async def _handle_disconnected_watcher(
+    file_name: str,
+    warned_file_names: set[str],
+    notifier: TelegramNotifier,
+) -> None:
+    """Sends a single Telegram alert when TWS connection is down for an import."""
+    if file_name in warned_file_names:
+        return
+
+    logger.warning("TWS not connected. Postponing CSV import.", file=file_name)
+    await notifier.send_importer_info(
+        file_name=file_name,
+        status="Wartend",
+        details="TWS nicht verbunden. Import pausiert, bis Verbindung steht.",
+        emoji="⏳",
+        title="IMPORT PAUSIERT",
+    )
+    warned_file_names.add(file_name)
 
 
 async def run_csv_import(

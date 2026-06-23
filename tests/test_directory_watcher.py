@@ -182,3 +182,76 @@ async def test_csv_directory_watcher_error_rename(
         kwargs = mock_notifier.send_importer_info.call_args[1]
         assert kwargs["title"] == "IMPORT-FEHLER"
         assert "Sizing ergab Qty" in kwargs["details"]
+
+
+@pytest.mark.asyncio
+async def test_csv_directory_watcher_disconnected_postpones(
+    tmp_path: Path, mock_config: Config
+) -> None:
+    """
+    Prüft, dass der Watcher bei TWS-Verbindungsverlust das Einlesen verschiebt,
+    die Datei nicht anfasst und nur einmalig alarmiert.
+    """
+    # 1. Temporäres Verzeichnis und Test-Datei anlegen
+    data_directory = tmp_path / "data"
+    data_directory.mkdir()
+
+    test_csv = data_directory / "orders_2026_06_01.csv"
+    test_csv.write_text("dummy,content", encoding="utf-8")
+
+    # 2. Mocks erstellen
+    mock_db_conn = AsyncMock()
+    mock_db_conn.close = AsyncMock()
+
+    async def db_factory():
+        return mock_db_conn
+
+    # Verbindung als getrennt simulieren
+    mock_interactive_brokers = MagicMock()
+    mock_interactive_brokers.isConnected.return_value = False
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_importer_info = AsyncMock(return_value=True)
+    mock_queue = asyncio.Queue()
+
+    # 3. Import-Aufruf mocken
+    with patch(
+        "app.services.importer.run_csv_import", new_callable=AsyncMock
+    ) as mock_import:
+        # Start des Watchers mit kurzem Intervall von 1 Sekunde
+        watcher_task = asyncio.create_task(
+            csv_directory_watcher(
+                db_factory=db_factory,
+                interactive_brokers=mock_interactive_brokers,
+                directory_path=data_directory,
+                queue=mock_queue,
+                notifier=mock_notifier,
+                config=mock_config,
+                interval_seconds=1,
+            )
+        )
+
+        # 2.5 Sekunden warten (der Loop läuft ca. 2 bis 3 Mal)
+        await asyncio.sleep(2.5)
+        watcher_task.cancel()
+
+        try:
+            await watcher_task
+        except asyncio.CancelledError:
+            pass
+
+        # 4. Assertions
+        # Import darf niemals aufgerufen worden sein
+        mock_import.assert_not_called()
+
+        # Die Datei darf weder gelöscht noch umbenannt sein
+        assert test_csv.exists()
+
+        # Notifier darf nur exakt EINMAL alarmiert haben (Throttling)
+        mock_notifier.send_importer_info.assert_called_once()
+
+        # Details der gesendeten Meldung prüfen
+        kwargs = mock_notifier.send_importer_info.call_args[1]
+        assert kwargs["title"] == "IMPORT PAUSIERT"
+        assert kwargs["status"] == "Wartend"
+        assert kwargs["emoji"] == "⏳"
