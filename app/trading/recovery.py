@@ -219,6 +219,17 @@ async def _recover_submitted_order(
             database_connection, order, interactive_brokers_session
         )
 
+        await notifier.send_order_filled(
+            symbol=order.symbol,
+            bracket_role=order.bracket_role,
+            action=order.action,
+            quantity=Decimal(order.quantity),
+            price=order.target_price,
+            order_type=order.order_type,
+            order_id=order_id,
+            strategy_name=order.strategy_name or "",
+        )
+
         asyncio.create_task(
             trigger_settlement_callback(order.trade_group_id, order.account_id)
         )
@@ -250,6 +261,17 @@ async def _recover_submitted_order(
             # Fehlende Ausführungen sichern
             await _save_missing_executions(
                 database_connection, order, interactive_brokers_session
+            )
+
+            await notifier.send_order_filled(
+                symbol=order.symbol,
+                bracket_role=order.bracket_role,
+                action=order.action,
+                quantity=Decimal(order.quantity),
+                price=order.target_price,
+                order_type=order.order_type,
+                order_id=order_id,
+                strategy_name=order.strategy_name or "",
             )
             return
 

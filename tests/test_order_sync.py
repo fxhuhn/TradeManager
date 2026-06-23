@@ -1,4 +1,5 @@
 import asyncio
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -247,6 +248,7 @@ async def test_recovery_recovers_filled_entry_with_active_child(
     mock_interactive_brokers.fills.return_value = []
 
     mock_notifier = MagicMock()
+    mock_notifier.send_order_filled = AsyncMock(return_value=True)
     mock_queue = asyncio.Queue()
     mock_trigger_settlement = AsyncMock()
 
@@ -274,6 +276,18 @@ async def test_recovery_recovers_filled_entry_with_active_child(
         assert row["exec_id"] == "RECOVERED_177"
         assert abs(row["price"] - 115.17) < 0.001
         assert row["qty"] == 21.0
+
+    # Assert Telegram Notifier was called for filled trade
+    mock_notifier.send_order_filled.assert_called_once_with(
+        symbol="BG",
+        bracket_role="ENTRY",
+        action="BUY",
+        quantity=Decimal("21"),
+        price=Decimal("115.17"),
+        order_type="LMT",
+        order_id=177,
+        strategy_name="DipBuyer",
+    )
 
 
 @pytest.mark.asyncio
@@ -351,3 +365,91 @@ async def test_recovery_ignores_negative_order_ids(db, mock_config: Config) -> N
     # Aber die Trade-Gruppe muss in der Queue eingereiht worden sein
     assert mock_queue.qsize() == 1
     assert await mock_queue.get() == "918_TurnoverTiming_0.5_MU"
+
+
+@pytest.mark.asyncio
+async def test_recovery_recovers_filled_order_downtime(db, mock_config: Config) -> None:
+    """
+    Prüft, dass eine Submitted Order, die während der Downtime in TWS gefüllt wurde (Szenario 2),
+    korrekt auf 'Filled' gesetzt wird, eine Benachrichtigung sendet und das Settlement triggert.
+    """
+    # 1. Test-Order im Status 'Submitted' in die echte In-Memory-Datenbank einfügen
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            180,
+            48380420,
+            None,
+            "895_DipBuyer_XYZ",
+            "U19605236",
+            "ENTRY",
+            "XYZ",
+            "STK",
+            "SMART",
+            "BUY",
+            10,
+            "LMT",
+            50.0,
+            "DAY",
+            "DipBuyer",
+            "Submitted",
+        ),
+    )
+    await db.commit()
+
+    # 2. IB/TWS Mocking:
+    # Die Order ist in completed trades (nicht in openTrades) mit Status "Filled"
+    mock_trade = MagicMock()
+    mock_trade.order.orderId = 180
+    mock_trade.order.permId = 48380420
+    mock_trade.orderStatus.status = "Filled"
+
+    mock_interactive_brokers = MagicMock()
+    mock_interactive_brokers.reqOpenOrdersAsync = AsyncMock()
+    mock_interactive_brokers.reqCompletedOrdersAsync = AsyncMock()
+    mock_interactive_brokers.openTrades.return_value = []
+    mock_interactive_brokers.trades.return_value = [mock_trade]
+    mock_interactive_brokers.fills.return_value = []
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_filled = AsyncMock(return_value=True)
+    mock_queue = asyncio.Queue()
+    mock_trigger_settlement = AsyncMock()
+
+    # 3. run_recovery ausführen
+    await run_recovery(
+        database_connection=db,
+        interactive_brokers_session=mock_interactive_brokers,
+        queue=mock_queue,
+        notifier=mock_notifier,
+        trigger_settlement_callback=mock_trigger_settlement,
+        config=mock_config,
+    )
+
+    # 4. Assertions:
+    # Status muss auf 'Filled' sein
+    async with db.execute("SELECT status FROM orders WHERE order_id = 180") as cursor:
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row["status"] == "Filled"
+
+    # Notifier muss gerufen worden sein
+    mock_notifier.send_order_filled.assert_called_once_with(
+        symbol="XYZ",
+        bracket_role="ENTRY",
+        action="BUY",
+        quantity=Decimal("10"),
+        price=Decimal("50.0"),
+        order_type="LMT",
+        order_id=180,
+        strategy_name="DipBuyer",
+    )
+
+    # Settlement-Trigger muss asynchron aufgerufen worden sein (wir warten kurz, da mit create_task gestartet)
+    await asyncio.sleep(0.1)
+    mock_trigger_settlement.assert_called_once_with("895_DipBuyer_XYZ", "U19605236")
