@@ -61,6 +61,7 @@ class TradingSystemOrchestrator:
         self.is_reconnecting: bool = False
         self.tasks: tuple[asyncio.Task, ...] = ()
         self.shutdown_event: asyncio.Event = asyncio.Event()
+        self.callbacks_manager: TwsCallbacksManager | None = None
 
     async def create_database_connection(self) -> aiosqlite.Connection:
         """Erstellt eine neue type-safe Verbindung zur Datenbank."""
@@ -414,7 +415,7 @@ def _register_callbacks(
     config: Config,
 ) -> None:
     """Registriert alle TWS Callbacks."""
-    callbacks_manager = TwsCallbacksManager(
+    orchestrator.callbacks_manager = TwsCallbacksManager(
         db_factory=orchestrator.create_database_connection,
         interactive_brokers=interactive_brokers,
         notifier=notifier,
@@ -424,7 +425,7 @@ def _register_callbacks(
         run_recovery_callback=orchestrator.run_recovery_callback,
         run_reconnect_callback=orchestrator.run_reconnect_callback,
     )
-    callbacks_manager.register_all()
+    orchestrator.callbacks_manager.register_all()
 
 
 def _setup_graceful_shutdown(orchestrator: TradingSystemOrchestrator) -> None:
