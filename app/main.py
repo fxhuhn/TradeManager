@@ -210,8 +210,12 @@ class TradingSystemOrchestrator:
         attempt = 1
         max_attempts = self.config.tws.reconnect_max_attempts
 
-        while attempt <= max_attempts:
-            current_delay = delays[min(attempt - 1, len(delays) - 1)]
+        while True:
+            if attempt > max_attempts:
+                current_delay = 3600.0
+            else:
+                current_delay = delays[min(attempt - 1, len(delays) - 1)]
+
             logger.info(
                 "Waiting before reconnection attempt",
                 attempt=attempt,
@@ -234,15 +238,21 @@ class TradingSystemOrchestrator:
                 await self.run_recovery_callback()
                 return
 
-            attempt += 1
+            if attempt == max_attempts:
+                logger.error(
+                    "Reconnection failed after %d attempts. "
+                    "Switching to hourly retry mode.",
+                    max_attempts,
+                )
+                await self.notifier.send_system_status(
+                    title=(
+                        f"WIEDERVERBINDUNG FEHLGESCHLAGEN ({max_attempts} Versuche). "
+                        "Stündlicher Retry-Modus aktiv."
+                    ),
+                    emoji="🚨",
+                )
 
-        logger.critical(
-            f"Reconnection failed after {max_attempts} attempts. Application remains disconnected."
-        )
-        await self.notifier.send_system_status(
-            title=f"WIEDERVERBINDUNG FEHLGESCHLAGEN ({max_attempts} Versuche)",
-            emoji="🚨",
-        )
+            attempt += 1
 
     async def _attempt_single_reconnect(self, attempt: int) -> bool:
         """Führt einen einzelnen Verbindungsversuch zur TWS durch."""
