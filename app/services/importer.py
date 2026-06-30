@@ -11,6 +11,7 @@ import dataclasses
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -330,6 +331,38 @@ async def _process_and_upsert_group(
 
     entry_leg = next((leg for leg in raw_legs if leg.bracket_role == "ENTRY"), None)
     first_leg = raw_legs[0]
+
+    # --- TESTWEISE ANPASSUNG FÜR DIPBUYER ---
+    # Entries für DipBuyer nur an Montag (0) und Dienstag (1) erlauben
+    strategy = entry_leg.strategy_name if entry_leg else first_leg.strategy_name
+    if strategy and strategy.lower() == "dipbuyer" and datetime.now().weekday() > 1:
+        # Entry-Leg entfernen, damit keine neue Position aufgebaut wird
+        raw_legs = [leg for leg in raw_legs if leg.bracket_role != "ENTRY"]
+        entry_leg = None
+        if not raw_legs:
+            logger.info(
+                "Skipping DipBuyer group entirely (no valid legs left after filtering Entry).",
+                trade_group_id=trade_group_id,
+            )
+            return
+
+        # Sicherstellen, dass die verbleibenden Exits keine Short-Positionen erzeugen
+        # Wir prüfen, ob der Entry bereits in der Datenbank existiert (z.B. von Montag/Dienstag).
+        # Falls nicht, ignorieren wir die Exits komplett.
+        temp_account = first_leg.account_id
+        temp_account = resolve_account_id(interactive_brokers, temp_account)
+        async with db.execute(
+            "SELECT order_id FROM orders WHERE account_id = ? AND trade_group_id = ? AND bracket_role = 'ENTRY'",
+            (temp_account, trade_group_id),
+        ) as cursor:
+            if not await cursor.fetchone():
+                logger.info(
+                    "Skipping DipBuyer exits because no ENTRY exists in DB and today is not Mon/Tue.",
+                    trade_group_id=trade_group_id,
+                )
+                return
+    # ----------------------------------------
+
     account_id = entry_leg.account_id if entry_leg else first_leg.account_id
     account_id = resolve_account_id(interactive_brokers, account_id)
 
