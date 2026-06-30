@@ -14,8 +14,14 @@ logger = structlog.get_logger()
 
 
 def make_stock_contract(symbol: str) -> Stock:
-    """Erstellt ein TWS-konformes US-Aktien-Vertragsobjekt via SMART-Routing."""
-    return Stock(symbol.upper(), "SMART", "USD")
+    """Erstellt ein TWS-konformes Aktien-Vertragsobjekt via SMART-Routing."""
+    symbol_upper = symbol.upper()
+
+    if symbol_upper.endswith(".DE"):
+        clean_symbol = symbol_upper[:-3]
+        return Stock(clean_symbol, "SMART", "EUR", primaryExchange="IBIS2")
+
+    return Stock(symbol_upper, "SMART", "USD")
 
 
 def build_order(order_row: OrderRow) -> Order:
