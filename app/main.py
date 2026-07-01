@@ -39,6 +39,11 @@ from app.trading.worker import execution_worker
 configure_logging()
 logger = structlog.get_logger()
 
+# System- und Reconnection-Konstanten
+RECONNECT_DELAYS_SECONDS: tuple[float, ...] = (30.0, 60.0, 120.0, 240.0)
+MAINTENANCE_WINDOW_HOUR: int = 12
+MAINTENANCE_WINDOW_DURATION_MINUTES: int = 5
+
 
 class TradingSystemOrchestrator:
     """Orchestriert das Trading-System, verwaltet Ressourcen, Callbacks und Hintergrund-Tasks."""
@@ -52,6 +57,16 @@ class TradingSystemOrchestrator:
         interactive_brokers: IB,
         queue: asyncio.Queue,
     ) -> None:
+        """Initialisiert den Orchestrator mit allen benötigten Abhängigkeiten.
+
+        Args:
+            root_directory_path: Absolute Pfad-Instanz des Root-Verzeichnisses.
+            database_path: Absolute Pfad-Instanz zur SQLite-Datenbank.
+            config: Die geladene Konfigurations-Instanz.
+            notifier: Der Telegram-Notifier-Dienst.
+            interactive_brokers: Die Interactive Brokers API-Clientinstanz.
+            queue: Die asynchrone Queue für die Abarbeitung von Trade-Gruppen.
+        """
         self.root_directory_path: Path = root_directory_path
         self.database_path: Path = database_path
         self.config: Config = config
@@ -64,19 +79,32 @@ class TradingSystemOrchestrator:
         self.callbacks_manager: TwsCallbacksManager | None = None
 
     async def create_database_connection(self) -> aiosqlite.Connection:
-        """Erstellt eine neue type-safe Verbindung zur Datenbank."""
+        """Erstellt eine neue type-safe Verbindung zur Datenbank.
+
+        Returns:
+            aiosqlite.Connection: Eine geöffnete und konfigurierte Datenbankverbindung.
+        """
         return await get_db(self.database_path)
 
     async def trigger_settlement_callback(
         self, trade_group_id: str, account_id: str
     ) -> None:
-        """Callback für das Abwickeln (Settlement) von geschlossenen Trades."""
+        """Callback für das Abwickeln (Settlement) von geschlossenen Trades.
+
+        Args:
+            trade_group_id: Eindeutige Kennung der Trade-Gruppe.
+            account_id: Eindeutige Kontokennung bei Interactive Brokers.
+        """
         await trigger_settlement(
             self.create_database_connection, trade_group_id, account_id, self.notifier
         )
 
     async def handle_retriable_error_callback(self, order_id: int) -> None:
-        """Callback für die Handhabung transienter/wiederholbarer Orderfehler."""
+        """Callback für die Handhabung transienter/wiederholbarer Orderfehler.
+
+        Args:
+            order_id: Die eindeutige numerische ID der fehlgeschlagenen Order.
+        """
         await handle_retriable_error(
             self.create_database_connection,
             order_id,
@@ -86,7 +114,10 @@ class TradingSystemOrchestrator:
         )
 
     async def run_recovery_callback(self) -> None:
-        """Führt eine Synchronisations- und Recovery-Phase aus."""
+        """Führt eine Synchronisations- und Recovery-Phase aus.
+
+        Gleicht offene Orders und Positionen zwischen der Datenbank und der TWS ab.
+        """
         database_connection_instance = await self.create_database_connection()
         try:
             await run_recovery(
@@ -101,7 +132,10 @@ class TradingSystemOrchestrator:
             await database_connection_instance.close()
 
     async def run_reconnect_callback(self) -> None:
-        """Wrapper für die Wiederverbindungsschleife bei Verbindungsverlust."""
+        """Wrapper für die Wiederverbindungsschleife bei Verbindungsverlust.
+
+        Sorgt dafür, dass nicht mehrere Wiederverbindungsversuche gleichzeitig laufen.
+        """
         if self.is_reconnecting:
             logger.warning("Reconnection loop is already running. Skipping trigger.")
             return
@@ -142,7 +176,7 @@ class TradingSystemOrchestrator:
                 config=self.config,
                 interval_seconds=self.config.app.alert_watcher_interval_s,
                 dead_order_threshold_minutes=self.config.app.dead_order_threshold_minutes,
-                max_slippage_pct=self.config.account.default_limit_pct,
+                max_slippage_percentage=self.config.account.default_limit_pct,
             )
         )
 
@@ -206,7 +240,6 @@ class TradingSystemOrchestrator:
     async def _execute_reconnect_loop(self) -> None:
         """Führt die Wiederverbindungsschleife mit steigenden Intervallen aus."""
         logger.info("Starting automatic reconnection...")
-        delays = [30.0, 60.0, 120.0, 240.0]
         attempt = 1
         max_attempts = self.config.tws.reconnect_max_attempts
 
@@ -214,7 +247,9 @@ class TradingSystemOrchestrator:
             if attempt > max_attempts:
                 current_delay = 3600.0
             else:
-                current_delay = delays[min(attempt - 1, len(delays) - 1)]
+                current_delay = RECONNECT_DELAYS_SECONDS[
+                    min(attempt - 1, len(RECONNECT_DELAYS_SECONDS) - 1)
+                ]
 
             logger.info(
                 "Waiting before reconnection attempt",
@@ -255,7 +290,14 @@ class TradingSystemOrchestrator:
             attempt += 1
 
     async def _attempt_single_reconnect(self, attempt: int) -> bool:
-        """Führt einen einzelnen Verbindungsversuch zur TWS durch."""
+        """Führt einen einzelnen Verbindungsversuch zur TWS durch.
+
+        Args:
+            attempt: Die Nummer des aktuellen Versuchs.
+
+        Returns:
+            bool: True, falls die Verbindung erfolgreich aufgebaut wurde, sonst False.
+        """
         logger.info(
             "Attempting reconnection",
             attempt=attempt,
@@ -282,53 +324,22 @@ class TradingSystemOrchestrator:
             return False
 
     async def heartbeat_loop(self) -> None:
-        """
-        Sendet periodisch einen Ping (reqCurrentTime) an das Gateway,
-        um Verbindungs-Hänger zu erkennen.
+        """Sendet periodisch einen Ping (reqCurrentTime) an das Gateway.
+
+        Überprüft die Verbindung auf Ausfälle und führt Reconnects herbei.
+
+        Raises:
+            asyncio.CancelledError: Falls die Schleife vom System abgebrochen wird.
         """
         logger.info(
             "Starting application-level Heartbeat Keep-Alive",
-            interval_s=self.config.tws.heartbeat_interval_s,
-            timeout_s=self.config.tws.heartbeat_timeout_s,
+            interval_seconds=self.config.tws.heartbeat_interval_s,
+            timeout_seconds=self.config.tws.heartbeat_timeout_s,
         )
 
         while True:
             try:
-                # Prüfen, ob wir im geplanten Restart-Fenster (12:00 - 12:05 Uhr) sind.
-                # Wenn ja, pausieren wir den Heartbeat vorübergehend.
-                from datetime import datetime
-
-                now = datetime.now()
-                if now.hour == 12 and 0 <= now.minute < 5:
-                    logger.info(
-                        "Inside daily restart window (12:00-12:05). Pausing heartbeat."
-                    )
-                    await asyncio.sleep(60.0)
-                    continue
-
-                if self.interactive_brokers.isConnected():
-                    try:
-                        await asyncio.wait_for(
-                            self.interactive_brokers.reqCurrentTimeAsync(),
-                            timeout=self.config.tws.heartbeat_timeout_s,
-                        )
-                        logger.debug("Heartbeat ping successful")
-                    except TimeoutError:
-                        logger.error(
-                            "Heartbeat timeout. API connection stalled. Triggering disconnect.",
-                            timeout_s=self.config.tws.heartbeat_timeout_s,
-                        )
-                        await self.notifier.send_message(
-                            "⚠️ <b>HEARTBEAT TIMEOUT</b> | API reagiert nicht. Reconnect wird erzwungen."
-                        )
-                        self.interactive_brokers.disconnect()
-                    except Exception as exception:
-                        logger.warning(
-                            "Error during heartbeat ping", error=str(exception)
-                        )
-                else:
-                    logger.debug("Heartbeat skipped: IB is not connected")
-
+                await self._execute_heartbeat_cycle()
             except asyncio.CancelledError:
                 logger.info("Heartbeat loop was cancelled.")
                 raise
@@ -336,6 +347,54 @@ class TradingSystemOrchestrator:
                 logger.error("Error in heartbeat loop", error=str(exception))
 
             await asyncio.sleep(self.config.tws.heartbeat_interval_s)
+
+    async def _execute_heartbeat_cycle(self) -> None:
+        """Führt eine einzelne Ausführung des Heartbeat-Pings aus."""
+        if self._is_inside_maintenance_window():
+            logger.info(
+                f"Inside daily restart window ({MAINTENANCE_WINDOW_HOUR}:00-{MAINTENANCE_WINDOW_HOUR}:0{MAINTENANCE_WINDOW_DURATION_MINUTES}). Pausing heartbeat."
+            )
+            await asyncio.sleep(60.0)
+            return
+
+        if not self.interactive_brokers.isConnected():
+            logger.debug("Heartbeat skipped: IB is not connected")
+            return
+
+        await self._send_ping_and_handle_timeout()
+
+    def _is_inside_maintenance_window(self) -> bool:
+        """Prüft, ob die aktuelle Uhrzeit im täglichen Restart-Fenster liegt.
+
+        Returns:
+            bool: True, falls im Wartungsfenster, andernfalls False.
+        """
+        from datetime import datetime
+
+        now = datetime.now()
+        is_hour_matching = now.hour == MAINTENANCE_WINDOW_HOUR
+        is_minute_matching = 0 <= now.minute < MAINTENANCE_WINDOW_DURATION_MINUTES
+        return is_hour_matching and is_minute_matching
+
+    async def _send_ping_and_handle_timeout(self) -> None:
+        """Sendet einen reqCurrentTime Ping und trennt bei Timeout die Verbindung."""
+        try:
+            await asyncio.wait_for(
+                self.interactive_brokers.reqCurrentTimeAsync(),
+                timeout=self.config.tws.heartbeat_timeout_s,
+            )
+            logger.debug("Heartbeat ping successful")
+        except TimeoutError:
+            logger.error(
+                "Heartbeat timeout. API connection stalled. Triggering disconnect.",
+                timeout_seconds=self.config.tws.heartbeat_timeout_s,
+            )
+            await self.notifier.send_message(
+                "⚠️ <b>HEARTBEAT TIMEOUT</b> | API reagiert nicht. Reconnect wird erzwungen."
+            )
+            self.interactive_brokers.disconnect()
+        except Exception as exception:
+            logger.warning("Error during heartbeat ping", error=str(exception))
 
 
 async def main() -> None:
@@ -367,10 +426,45 @@ async def main() -> None:
     # 6. reqAutoOpenOrders aktivieren
     interactive_brokers.reqAutoOpenOrders(True)
 
-    # Asynchrone Queue für Trade-Gruppen initialisieren
-    queue: asyncio.Queue[str] = asyncio.Queue()
+    # 7. Orchestrator initialisieren und Hintergrunddienste starten
+    orchestrator = await _initialize_and_start_orchestrator(
+        root_directory_path=root_directory_path,
+        database_path=database_path,
+        config=config,
+        notifier=notifier,
+        interactive_brokers=interactive_brokers,
+    )
 
-    # Orchestrator instanziieren
+    # 8. Graceful Shutdown Event registrieren
+    _setup_graceful_shutdown(orchestrator)
+
+    # Auf Beendigungssignal warten
+    await orchestrator.shutdown_event.wait()
+
+    # 9. Graceful Shutdown Sequenz ausführen
+    await orchestrator.graceful_shutdown()
+
+
+async def _initialize_and_start_orchestrator(
+    root_directory_path: Path,
+    database_path: Path,
+    config: Config,
+    notifier: TelegramNotifier,
+    interactive_brokers: IB,
+) -> TradingSystemOrchestrator:
+    """Instanziiert den Orchestrator und startet alle Hintergrunddienste und Recovery.
+
+    Args:
+        root_directory_path: Pfad zum Hauptverzeichnis der Anwendung.
+        database_path: Pfad zur SQL-Datenbankdatei.
+        config: Die Systemkonfiguration.
+        notifier: Telegram Notifier Dienst.
+        interactive_brokers: TWS Client-API-Verbindung.
+
+    Returns:
+        TradingSystemOrchestrator: Die initialisierte und gestartete Orchestrator-Instanz.
+    """
+    queue: asyncio.Queue[str] = asyncio.Queue()
     orchestrator = TradingSystemOrchestrator(
         root_directory_path=root_directory_path,
         database_path=database_path,
@@ -379,24 +473,10 @@ async def main() -> None:
         interactive_brokers=interactive_brokers,
         queue=queue,
     )
-
-    # 7. Callbacks in TwsCallbacksManager registrieren
     _register_callbacks(orchestrator, interactive_brokers, notifier, config)
-
-    # 8. Recovery-Phase beim Start ausführen (Zustandsabgleich)
     await orchestrator.run_recovery_callback()
-
-    # 9 & 10. Hintergrunddienste starten
     orchestrator.start_background_tasks()
-
-    # 11. Graceful Shutdown Event registrieren
-    _setup_graceful_shutdown(orchestrator)
-
-    # Auf Beendigungssignal warten
-    await orchestrator.shutdown_event.wait()
-
-    # 12. Graceful Shutdown Sequenz ausführen
-    await orchestrator.graceful_shutdown()
+    return orchestrator
 
 
 async def _run_database_migrations(
@@ -454,47 +534,61 @@ def _setup_graceful_shutdown(orchestrator: TradingSystemOrchestrator) -> None:
 
 
 async def connect_to_tws(interactive_brokers: IB, config: Config) -> bool:
-    """
-    Verbindung zu TWS mit exponentiellem Backoff aufbauen.
+    """Verbindung zu TWS mit exponentiellem Backoff aufbauen.
 
     Nutzt die reconnect_initial_delay_s Parameter aus der Config.
+
+    Args:
+        interactive_brokers: Die Interactive Brokers API-Clientinstanz.
+        config: Die geladene Konfigurations-Instanz.
+
+    Returns:
+        bool: True, falls die Verbindung erfolgreich aufgebaut wurde, sonst False.
     """
-    attempt = 1
     delay = config.tws.reconnect_initial_delay_s
     max_attempts = config.tws.reconnect_max_attempts
 
-    while attempt <= max_attempts:
-        logger.info(
-            "TWS connection establishment started",
-            attempt=attempt,
-            host=config.tws.host,
-            port=config.tws.port,
-            client_id=config.tws.client_id,
-        )
-        try:
-            await asyncio.wait_for(
-                interactive_brokers.connectAsync(
-                    config.tws.host, config.tws.port, clientId=config.tws.client_id
-                ),
-                timeout=config.tws.connection_timeout_s,
-            )
-            logger.info("Successfully connected to TWS platform")
-            _enable_socket_keepalive(interactive_brokers)
+    for attempt in range(1, max_attempts + 1):
+        if await _attempt_connection(interactive_brokers, config, attempt):
             return True
-        except Exception as exception:
-            logger.warning("Connection failed", attempt=attempt, error=str(exception))
-            if attempt == max_attempts:
-                break
 
-            logger.info("Waiting before retry connection attempt", delay_s=delay)
-            await asyncio.sleep(delay)
-            delay = min(delay * 2.0, config.tws.reconnect_max_delay_s)
-            attempt += 1
+        if attempt == max_attempts:
+            break
+
+        logger.info("Waiting before retry connection attempt", delay_seconds=delay)
+        await asyncio.sleep(delay)
+        delay = min(delay * 2.0, config.tws.reconnect_max_delay_s)
 
     logger.critical(
         f"Connection to TWS impossible after {max_attempts} attempts. Terminating application."
     )
     return False
+
+
+async def _attempt_connection(
+    interactive_brokers: IB, config: Config, attempt: int
+) -> bool:
+    """Führt einen einzelnen Verbindungsversuch zur TWS durch."""
+    logger.info(
+        "TWS connection establishment started",
+        attempt=attempt,
+        host=config.tws.host,
+        port=config.tws.port,
+        client_id=config.tws.client_id,
+    )
+    try:
+        await asyncio.wait_for(
+            interactive_brokers.connectAsync(
+                config.tws.host, config.tws.port, clientId=config.tws.client_id
+            ),
+            timeout=config.tws.connection_timeout_s,
+        )
+        logger.info("Successfully connected to TWS platform")
+        _enable_socket_keepalive(interactive_brokers)
+        return True
+    except Exception as exception:
+        logger.warning("Connection failed", attempt=attempt, error=str(exception))
+        return False
 
 
 def _initialize_config_and_logging(root_directory_path: Path) -> Config:
@@ -542,24 +636,26 @@ def _enable_socket_keepalive(interactive_brokers: IB) -> None:
         socket_object = interactive_brokers.client.conn.transport.get_extra_info(
             "socket"
         )
-        if socket_object:
-            socket_object.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        if not socket_object:
+            return
 
-            tcp_keepidle = getattr(socket, "TCP_KEEPALIVE", None) or getattr(
-                socket, "TCP_KEEPIDLE", None
-            )
-            if tcp_keepidle is not None:
-                socket_object.setsockopt(socket.IPPROTO_TCP, tcp_keepidle, 60)
+        socket_object.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
 
-            tcp_keepintvl = getattr(socket, "TCP_KEEPINTVL", None)
-            if tcp_keepintvl is not None:
-                socket_object.setsockopt(socket.IPPROTO_TCP, tcp_keepintvl, 10)
+        tcp_keepidle = getattr(socket, "TCP_KEEPALIVE", None) or getattr(
+            socket, "TCP_KEEPIDLE", None
+        )
+        if tcp_keepidle is not None:
+            socket_object.setsockopt(socket.IPPROTO_TCP, tcp_keepidle, 60)
 
-            tcp_keepcnt = getattr(socket, "TCP_KEEPCNT", None)
-            if tcp_keepcnt is not None:
-                socket_object.setsockopt(socket.IPPROTO_TCP, tcp_keepcnt, 5)
+        tcp_keepintvl = getattr(socket, "TCP_KEEPINTVL", None)
+        if tcp_keepintvl is not None:
+            socket_object.setsockopt(socket.IPPROTO_TCP, tcp_keepintvl, 10)
 
-            logger.info("TCP keep-alive settings successfully applied to socket")
+        tcp_keepcnt = getattr(socket, "TCP_KEEPCNT", None)
+        if tcp_keepcnt is not None:
+            socket_object.setsockopt(socket.IPPROTO_TCP, tcp_keepcnt, 5)
+
+        logger.info("TCP keep-alive settings successfully applied to socket")
     except Exception as exception:
         logger.warning(
             "Error enabling TCP keep-alive on the socket",

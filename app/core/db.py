@@ -92,8 +92,8 @@ async def run_migrations(
 
     for sql_file in sql_files:
         try:
-            version_str = sql_file.name.split("_", 1)[0]
-            version = int(version_str)
+            version_string = sql_file.name.split("_", 1)[0]
+            version = int(version_string)
         except ValueError:
             logger.error("Invalid migration file format", file=sql_file.name)
             continue
@@ -125,11 +125,7 @@ async def _apply_migration_file(
 
     try:
         async with transaction(db):
-            for statement in sql_script.split(";"):
-                statement_clean = statement.strip()
-                if statement_clean:
-                    await db.execute(statement_clean)
-
+            await _execute_migration_statements(db, sql_script)
             await db.execute(
                 "INSERT INTO schema_version (version) VALUES (?)", (version,)
             )
@@ -137,6 +133,16 @@ async def _apply_migration_file(
     finally:
         # Fremdschlüssel-Prüfungen wieder aktivieren
         await db.execute("PRAGMA foreign_keys = ON;")
+
+
+async def _execute_migration_statements(
+    db: aiosqlite.Connection, sql_script: str
+) -> None:
+    """Führt die einzelnen Statements eines SQL-Skripts nacheinander aus."""
+    for statement in sql_script.split(";"):
+        statement_clean = statement.strip()
+        if statement_clean:
+            await db.execute(statement_clean)
 
 
 @asynccontextmanager

@@ -28,7 +28,7 @@ async def alert_watcher(
     config: Config,
     interval_seconds: int = 60,
     dead_order_threshold_minutes: int = 15,
-    max_slippage_pct: float = 0.01,
+    max_slippage_percentage: float = 0.01,
 ) -> None:
     """
     Asynchroner Alert-Watcher-Hauptloop (Hintergrunddienst).
@@ -47,7 +47,7 @@ async def alert_watcher(
                     db, notifier, state, dead_order_threshold_minutes
                 )
                 # 2. Hohe Slippage Check
-                await check_high_slippage(db, notifier, state, max_slippage_pct)
+                await check_high_slippage(db, notifier, state, max_slippage_percentage)
             finally:
                 await db.close()
         except Exception as exception:
@@ -159,11 +159,11 @@ async def check_high_slippage(
     db: aiosqlite.Connection,
     notifier: TelegramNotifier,
     state: "AlertState",
-    max_slippage_pct: float = 0.01,
+    max_slippage_percentage: float = 0.01,
 ) -> None:
     """
     Prüft auf hohe Slippage (Abweichung des realisierten Einstiegspreises vom Target).
-    Vergleicht den absoluten Wert von price_diff_slippage mit dem avg_entry_price * max_slippage_pct.
+    Vergleicht den absoluten Wert von price_diff_slippage mit dem avg_entry_price * max_slippage_percentage.
     """
     query = """
         SELECT ts.trade_group_id, ts.price_diff_slippage, ts.avg_entry_price, o.symbol
@@ -178,9 +178,11 @@ async def check_high_slippage(
                 avg_entry_price = Decimal(str(row["avg_entry_price"]))
                 symbol = row["symbol"]
 
-                # Prämisse: ABS(price_diff_slippage) > avg_entry_price * max_slippage_pct
+                # Prämisse: ABS(price_diff_slippage) > avg_entry_price * max_slippage_percentage
                 if avg_entry_price > Decimal("0"):
-                    slippage_limit = avg_entry_price * Decimal(str(max_slippage_pct))
+                    slippage_limit = avg_entry_price * Decimal(
+                        str(max_slippage_percentage)
+                    )
                     if abs(price_diff_slippage) > slippage_limit:
                         if not state.is_group_reported(trade_group_id):
                             message_content = (
