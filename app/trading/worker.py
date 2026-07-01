@@ -211,13 +211,19 @@ def _get_account_value(
 ) -> Decimal | None:
     """Ermittelt einen bestimmten Kontowert von IBKR."""
     for account_value in interactive_brokers.accountValues():
-        if account_value.tag == tag and (
-            not account_id or account_value.account == account_id
-        ):
-            try:
-                return Decimal(str(account_value.value))
-            except ValueError:
-                pass
+        if account_value.tag != tag:
+            continue
+        if account_id and account_value.account != account_id:
+            continue
+        try:
+            return Decimal(str(account_value.value))
+        except ValueError as exception:
+            logger.warning(
+                "Failed to parse account value as Decimal",
+                tag=tag,
+                value=account_value.value,
+                error=str(exception),
+            )
     return None
 
 

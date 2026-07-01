@@ -1,3 +1,4 @@
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import aiosqlite
@@ -5,7 +6,7 @@ import pytest
 
 
 @pytest.fixture
-async def db():
+async def db() -> AsyncIterator[aiosqlite.Connection]:
     """
     Shared-Cache-URI: Erlaubt mehreren concurrent Connections Zugriff auf dieselbe
     In-Memory-Datenbank. Ideal für asynchrone Integrationstests.

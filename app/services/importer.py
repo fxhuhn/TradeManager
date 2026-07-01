@@ -307,10 +307,11 @@ async def _process_and_upsert_group(
     db: aiosqlite.Connection,
     interactive_brokers: IB,
     trade_group_id: str,
-    raw_legs: list,
+    raw_legs: list[LegRow],
     queue: asyncio.Queue,
     notifier: TelegramNotifier,
     config: Config,
+    current_weekday: int | None = None,
 ) -> None:
     """Validiert eine einzelne Gruppe, berechnet das Sizing und speichert sie in der DB."""
     is_valid, error_message = validate_group(trade_group_id, raw_legs)
@@ -335,7 +336,10 @@ async def _process_and_upsert_group(
     # --- TESTWEISE ANPASSUNG FÜR DIPBUYER ---
     # Entries für DipBuyer nur an Montag (0) und Dienstag (1) erlauben
     strategy = entry_leg.strategy_name if entry_leg else first_leg.strategy_name
-    if strategy and strategy.lower() == "dipbuyer" and datetime.now().weekday() > 1:
+    weekday = (
+        current_weekday if current_weekday is not None else datetime.now().weekday()
+    )
+    if strategy and strategy.lower() == "dipbuyer" and weekday > 1:
         # Entry-Leg entfernen, damit keine neue Position aufgebaut wird
         raw_legs = [leg for leg in raw_legs if leg.bracket_role != "ENTRY"]
         entry_leg = None
@@ -666,22 +670,21 @@ async def fetch_account_balance_metrics(
     total_cash_value = Decimal("0.0")
 
     cache_values: dict[str, Decimal] = {}
+    relevant_tags = {"NetLiquidation", "AvailableFunds", "TotalCashValue"}
     for account_value in interactive_brokers.accountValues():
-        if not account_id or account_value.account == account_id:
-            if account_value.tag in (
-                "NetLiquidation",
-                "AvailableFunds",
-                "TotalCashValue",
-            ):
-                try:
-                    cache_values[account_value.tag] = Decimal(str(account_value.value))
-                except ValueError as exception:
-                    logger.warning(
-                        "Invalid account value found in TWS cache",
-                        tag=account_value.tag,
-                        raw_value=account_value.value,
-                        error=str(exception),
-                    )
+        if account_id and account_value.account != account_id:
+            continue
+        if account_value.tag not in relevant_tags:
+            continue
+        try:
+            cache_values[account_value.tag] = Decimal(str(account_value.value))
+        except ValueError as exception:
+            logger.warning(
+                "Invalid account value found in TWS cache",
+                tag=account_value.tag,
+                raw_value=account_value.value,
+                error=str(exception),
+            )
 
     if len(cache_values) == 3:
         logger.info(
@@ -705,23 +708,19 @@ async def fetch_account_balance_metrics(
 
     try:
         summary_values = await interactive_brokers.accountSummaryAsync(account_id)
+        relevant_tags = {"NetLiquidation", "AvailableFunds", "TotalCashValue"}
         for account_value in summary_values:
-            if account_value.tag in (
-                "NetLiquidation",
-                "AvailableFunds",
-                "TotalCashValue",
-            ):
-                try:
-                    retrieved_values[account_value.tag] = Decimal(
-                        str(account_value.value)
-                    )
-                except ValueError as exception:
-                    logger.warning(
-                        "Invalid value found in Account Summary response",
-                        tag=account_value.tag,
-                        raw_value=account_value.value,
-                        error=str(exception),
-                    )
+            if account_value.tag not in relevant_tags:
+                continue
+            try:
+                retrieved_values[account_value.tag] = Decimal(str(account_value.value))
+            except ValueError as exception:
+                logger.warning(
+                    "Invalid value found in Account Summary response",
+                    tag=account_value.tag,
+                    raw_value=account_value.value,
+                    error=str(exception),
+                )
 
         logger.info(
             "Account values loaded via accountSummaryAsync",
