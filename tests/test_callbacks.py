@@ -128,7 +128,7 @@ async def test_callbacks_filled_notification(db, mock_config: Config) -> None:
     assert kwargs["symbol"] == "AAPL"
     assert kwargs["action"] == "BUY"
     assert kwargs["quantity"] == 100
-    assert kwargs["price"] == 150.00
+    assert kwargs["execution_price"] == 150.00
 
     # Kein Settlement für ENTRY-Order
     mock_trigger_settlement.assert_not_called()

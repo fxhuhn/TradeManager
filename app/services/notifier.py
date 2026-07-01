@@ -1,3 +1,10 @@
+"""
+Telegram-Notifier-Dienst für System- und Orderbenachrichtigungen.
+
+Formatiert und sendet asynchrone Erfolgs-, Warn- und Statusnachrichten an Telegram
+unter Einhaltung der API-Rate-Limits.
+"""
+
 import asyncio
 import re
 import time
@@ -110,14 +117,20 @@ class TelegramNotifier:
         bracket_role: str,
         action: str,
         quantity: Decimal,
-        price: Decimal | None,
+        execution_price: Decimal | None,
         order_type: str,
         order_id: int,
         strategy_name: str,
     ) -> bool:
         """Sendet eine Erfolgsmeldung für eine gefüllte Order."""
-        total_value = quantity * price if price is not None else Decimal("0.0")
-        price_string = f"{price:.2f}" if price is not None else "MKT"
+        total_value = (
+            quantity * execution_price
+            if execution_price is not None
+            else Decimal("0.0")
+        )
+        price_string = (
+            f"{execution_price:.2f}" if execution_price is not None else "MKT"
+        )
 
         message = (
             f"🟢 <b>ORDER GEFÜLLT</b> | <code>{symbol}</code>\n"

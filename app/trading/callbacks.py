@@ -3,6 +3,10 @@ Callback-Manager für TWS-API-Events.
 
 Registriert Event-Handler für Order-Statusaktualisierungen, Ausführungsberichte,
 Kommissionen, Fehlermeldungen und Verbindungsabbrüche der Trader Workstation (TWS).
+Verarbeitet den asynchronen Timing-Ablauf von Teilausführungen (execDetailsEvent) und
+Fills (orderStatusEvent).
+
+Siehe Datenfluss- und Architekturzusammenhang in app.core.models.
 """
 
 from __future__ import annotations
@@ -208,7 +212,7 @@ class TwsCallbacksManager:
                 bracket_role=order_row["bracket_role"],
                 action=order_row["action"],
                 quantity=Decimal(str(order_row["quantity"])),
-                price=price_decimal,
+                execution_price=price_decimal,
                 order_type=order_row["order_type"],
                 order_id=order_id,
                 strategy_name=order_row["strategy_name"],
@@ -272,6 +276,20 @@ class TwsCallbacksManager:
         """Speichert ein Ausführungsdetail in der executions-Tabelle."""
         db = await self.db_factory()
         try:
+            # Überprüfen, ob die Order in unserer DB existiert (verhindert FK-Fehler bei TWS-manuellen Orders)
+            async with db.execute(
+                "SELECT 1 FROM orders WHERE order_id = ?", (order_id,)
+            ) as cursor:
+                exists = await cursor.fetchone()
+
+            if not exists:
+                logger.debug(
+                    "Ignoring execution detail for foreign/manual TWS order (not found in DB)",
+                    order_id=order_id,
+                    exec_id=exec_id,
+                )
+                return
+
             async with transaction(db):
                 await db.execute(
                     """

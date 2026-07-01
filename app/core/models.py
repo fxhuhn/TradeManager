@@ -3,6 +3,17 @@ Datenmodelle und Datenbankschemata.
 
 Definiert die internen Datenstrukturen für Order-Legs, TWS-Orders,
 Order-Ausführungen und Settlements als typsichere Dataclasses.
+
+Architektur & Datenfluss-Zusammenhang:
+- orders: Repräsentiert die Absicht (Order-Intention). Bei Market-Orders ist der `target_price` standardmäßig 0.00.
+- executions: Repräsentiert die Realisierung (Teilausführungen). Hier werden die tatsächlichen Preise (`price`) gespeichert.
+- trades_settlement: Berechnete, konsolidierte Ergebnisse geschlossener Trades (VWAP von Einstieg/Ausstieg und Slippage).
+
+Event-Datenfluss & Timing:
+1. TWS meldet `execDetailsEvent` (Teilausführung) -> Speicherung in `executions` (falls Order in DB vorhanden).
+2. TWS meldet `orderStatusEvent` ('Filled') -> Callback liest `trade.orderStatus.avgFillPrice` (von TWS konsolidierter Schnittkurs) und sendet ihn sofort an Telegram.
+3. Callback aktualisiert Status in `orders` auf 'Filled'.
+4. Callback triggert das Settlement, welches Einstiegs- und Ausstiegspreise aus `executions` berechnet und in `trades_settlement` sichert.
 """
 
 from collections.abc import Mapping

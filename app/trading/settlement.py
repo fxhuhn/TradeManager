@@ -3,6 +3,8 @@ Abwicklung (Settlement) von geschlossenen Trades.
 
 Berechnet nach der Schließung eines Trades (ENTRY und EXIT vollzogen)
 das PnL und die Slippage hochpräzise und speichert die Ergebnisse in der Datenbank.
+
+Siehe Datenfluss- und Architekturzusammenhang in app.core.models.
 """
 
 from __future__ import annotations

@@ -1,8 +1,10 @@
 """
 Wiederherstellungsdienste (Recovery Phase) für das Trading-System.
 
-Wird beim Systemstart ausgeführt, um den Zustand offener Orders in der Datenbank
-mit der Trader Workstation (TWS) abzugleichen (Reconciliation) und Systemabstürze abzufedern.
+Wird beim Systemstart oder nach Verbindungsabbrüchen ausgeführt, um den Zustand offener Orders
+in der Datenbank mit den TWS-Orders abzugleichen (Reconciliation) und Offline-Fills zu verarbeiten.
+
+Siehe Datenfluss- und Architekturzusammenhang in app.core.models.
 """
 
 from __future__ import annotations
@@ -241,7 +243,7 @@ async def _recover_submitted_order(
             bracket_role=order.bracket_role,
             action=order.action,
             quantity=Decimal(order.quantity),
-            price=price_decimal,
+            execution_price=price_decimal,
             order_type=order.order_type,
             order_id=order_id,
             strategy_name=order.strategy_name or "",
@@ -301,7 +303,7 @@ async def _recover_submitted_order(
                 bracket_role=order.bracket_role,
                 action=order.action,
                 quantity=Decimal(order.quantity),
-                price=price_decimal,
+                execution_price=price_decimal,
                 order_type=order.order_type,
                 order_id=order_id,
                 strategy_name=order.strategy_name or "",
