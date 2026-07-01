@@ -262,3 +262,37 @@ async def test_high_margin_usage_warning(db, test_config: Config) -> None:
         init_margin_after=60000.0,
         net_liquidation=100000.0,
     )
+
+
+@pytest.mark.asyncio
+async def test_failed_entry_order_cancels_created_child_orders(
+    db, test_config: Config
+) -> None:
+    """Prüft, dass verbleibende Child-Orders auf Error gesetzt werden, wenn das Entry fehlschlägt/fehlgeschlagen ist."""
+    # Setup: Entry in 'Error' und Exit in 'Created'
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status)
+        VALUES (-14, 'TG_FAILED_ENTRY', 'ACC_1', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 100, 'LMT', 150.0, 'Error')
+        """
+    )
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status)
+        VALUES (-15, 'TG_FAILED_ENTRY', 'ACC_1', 'EXIT', 'AAPL', 'STK', 'SMART', 'SELL', 100, 'MKT', NULL, 'Created')
+        """
+    )
+    await db.commit()
+
+    mock_ib = MagicMock()
+    mock_notifier = MagicMock()
+
+    # Ausführen
+    await process_trade_group(
+        db, mock_ib, "TG_FAILED_ENTRY", mock_notifier, test_config
+    )
+
+    # Verifizieren: Die Exit-Order muss nun ebenfalls den Status 'Error' haben
+    async with db.execute("SELECT status FROM orders WHERE order_id = -15") as cursor:
+        row = await cursor.fetchone()
+        assert row["status"] == "Error"

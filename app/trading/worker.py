@@ -143,6 +143,11 @@ async def process_trade_group(
             "ENTRY order failed. Skipping child orders.",
             trade_group_id=trade_group_id,
         )
+        async with transaction(db):
+            await db.execute(
+                "UPDATE orders SET status = 'Error' WHERE trade_group_id = ? AND status = 'Created'",
+                (trade_group_id,),
+            )
         return
 
     await _process_child_orders(
