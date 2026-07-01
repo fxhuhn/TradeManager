@@ -153,12 +153,20 @@ class TwsCallbacksManager:
             mapped_status=mapped_status,
         )
 
+        avg_fill_price = trade.orderStatus.avgFillPrice if trade.orderStatus else None
+
         asyncio.create_task(
-            self._process_status_change(order_id, mapped_status, permanent_id)
+            self._process_status_change(
+                order_id, mapped_status, permanent_id, avg_fill_price
+            )
         )
 
     async def _process_status_change(
-        self, order_id: int, mapped_status: str, permanent_id: int
+        self,
+        order_id: int,
+        mapped_status: str,
+        permanent_id: int,
+        avg_fill_price: float | None = None,
     ) -> None:
         """Verarbeitet Statusänderung asynchron und triggert ggf. Settlement."""
         async with self._get_order_lock(order_id):
@@ -182,15 +190,25 @@ class TwsCallbacksManager:
                 return
 
             raw_target_price = order_row["target_price"]
-            target_price_decimal = (
-                Decimal(str(raw_target_price)) if raw_target_price is not None else None
-            )
+
+            # Tatsächlichen Kurs bevorzugen (avg_fill_price), falls vorhanden und positiv
+            if (
+                avg_fill_price
+                and isinstance(avg_fill_price, (int, float, Decimal))
+                and avg_fill_price > 0
+            ):
+                price_decimal = Decimal(str(avg_fill_price))
+            elif raw_target_price is not None and float(raw_target_price) > 0:
+                price_decimal = Decimal(str(raw_target_price))
+            else:
+                price_decimal = None
+
             await self.notifier.send_order_filled(
                 symbol=order_row["symbol"],
                 bracket_role=order_row["bracket_role"],
                 action=order_row["action"],
                 quantity=Decimal(str(order_row["quantity"])),
-                price=target_price_decimal,
+                price=price_decimal,
                 order_type=order_row["order_type"],
                 order_id=order_id,
                 strategy_name=order_row["strategy_name"],

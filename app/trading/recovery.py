@@ -156,6 +156,7 @@ async def _reconcile_orders(
                 tws_completed=tws_completed,
                 local_orders=local_orders,
                 tws_active_orders=tws_active_orders,
+                tws_completed_orders=tws_completed_orders,
                 interactive_brokers_session=interactive_brokers_session,
                 notifier=notifier,
                 trigger_settlement_callback=trigger_settlement_callback,
@@ -177,6 +178,7 @@ async def _recover_submitted_order(
     tws_completed: object | None,
     local_orders: list[OrderRow],
     tws_active_orders: dict[int, object],
+    tws_completed_orders: dict[int, object],
     interactive_brokers_session: IB,
     notifier: TelegramNotifier,
     trigger_settlement_callback: Callable[[str, str], Awaitable[None]],
@@ -219,12 +221,27 @@ async def _recover_submitted_order(
             database_connection, order, interactive_brokers_session
         )
 
+        avg_fill_price = (
+            tws_completed.orderStatus.avgFillPrice
+            if tws_completed and tws_completed.orderStatus
+            else None
+        )
+        price_decimal = None
+        if (
+            avg_fill_price
+            and isinstance(avg_fill_price, (int, float, Decimal))
+            and avg_fill_price > 0
+        ):
+            price_decimal = Decimal(str(avg_fill_price))
+        elif order.target_price is not None and float(order.target_price) > 0:
+            price_decimal = Decimal(str(order.target_price))
+
         await notifier.send_order_filled(
             symbol=order.symbol,
             bracket_role=order.bracket_role,
             action=order.action,
             quantity=Decimal(order.quantity),
-            price=order.target_price,
+            price=price_decimal,
             order_type=order.order_type,
             order_id=order_id,
             strategy_name=order.strategy_name or "",
@@ -263,12 +280,28 @@ async def _recover_submitted_order(
                 database_connection, order, interactive_brokers_session
             )
 
+            entry_trade = tws_completed_orders.get(order_id)
+            avg_fill_price = (
+                entry_trade.orderStatus.avgFillPrice
+                if entry_trade and entry_trade.orderStatus
+                else None
+            )
+            price_decimal = None
+            if (
+                avg_fill_price
+                and isinstance(avg_fill_price, (int, float, Decimal))
+                and avg_fill_price > 0
+            ):
+                price_decimal = Decimal(str(avg_fill_price))
+            elif order.target_price is not None and float(order.target_price) > 0:
+                price_decimal = Decimal(str(order.target_price))
+
             await notifier.send_order_filled(
                 symbol=order.symbol,
                 bracket_role=order.bracket_role,
                 action=order.action,
                 quantity=Decimal(order.quantity),
-                price=order.target_price,
+                price=price_decimal,
                 order_type=order.order_type,
                 order_id=order_id,
                 strategy_name=order.strategy_name or "",
