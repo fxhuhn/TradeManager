@@ -132,9 +132,12 @@ async def check_dead_orders(
     market_close_today = current_time_new_york.replace(
         hour=16, minute=0, second=0, microsecond=0
     )
+    # Erweitere das Überwachungsfenster um 30 Minuten, damit MOC-Orders nach
+    # Börsenschluss (16:00 Uhr) geprüft werden können.
+    extended_close_today = market_close_today + timedelta(minutes=30)
 
-    # 2. Keine Prüfung außerhalb der regulären US-Handelszeiten
-    if not (market_open_today <= current_time_new_york <= market_close_today):
+    # 2. Keine Prüfung außerhalb der regulären US-Handelszeiten (inkl. MOC-Puffer)
+    if not (market_open_today <= current_time_new_york <= extended_close_today):
         return
 
     try:
@@ -150,6 +153,7 @@ async def check_dead_orders(
             alert_state=state,
             current_time_new_york=current_time_new_york,
             market_open_today=market_open_today,
+            market_close_today=market_close_today,
             new_york_timezone=new_york_timezone,
             threshold_minutes=threshold_minutes,
         )
@@ -233,7 +237,7 @@ async def _fetch_submitted_orders(
 ) -> list[aiosqlite.Row]:
     """Ruft alle Orders mit dem Status 'Submitted' aus der Datenbank ab."""
     query = """
-        SELECT order_id, trade_group_id, symbol, transmitted_at
+        SELECT order_id, trade_group_id, symbol, order_type, transmitted_at
         FROM orders
         WHERE status = 'Submitted' AND order_type IN ('MKT', 'MOC')
     """
@@ -247,6 +251,7 @@ async def _process_single_potential_dead_order(
     alert_state: AlertState,
     current_time_new_york: datetime,
     market_open_today: datetime,
+    market_close_today: datetime,
     new_york_timezone: ZoneInfo,
     threshold_minutes: int,
 ) -> None:
@@ -254,6 +259,7 @@ async def _process_single_potential_dead_order(
     order_id = order_row["order_id"]
     trade_group_id = order_row["trade_group_id"]
     symbol = order_row["symbol"]
+    order_type = order_row["order_type"]
     transmitted_at_string = order_row["transmitted_at"]
 
     if not transmitted_at_string:
@@ -274,7 +280,10 @@ async def _process_single_potential_dead_order(
 
     transmitted_at_new_york = transmitted_at_utc.astimezone(new_york_timezone)
 
-    if transmitted_at_new_york < market_open_today:
+    if order_type == "MOC":
+        # MOC-Orders werden erst ab Börsenschluss aktiv geschaltet.
+        effective_activation_time = market_close_today
+    elif transmitted_at_new_york < market_open_today:
         effective_activation_time = market_open_today
     else:
         effective_activation_time = transmitted_at_new_york

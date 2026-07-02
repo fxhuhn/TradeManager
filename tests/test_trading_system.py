@@ -261,6 +261,56 @@ async def test_alert_watcher_dead_orders(db):
 
 
 @pytest.mark.asyncio
+async def test_alert_watcher_moc_dead_orders(db):
+    """Alert: MOC-Orders werden tagsüber ignoriert und erst nach 16:00 Uhr gemeldet."""
+    from datetime import UTC, datetime
+
+    # MOC Order eintragen (transmitted_at liegt weit in der Vergangenheit)
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, status, transmitted_at
+        ) VALUES (2, NULL, 'G2', 'A1', 'EXIT', 'SNDK', 'STK', 'SMART', 'SELL', 100, 'MOC', 0.0, 'Submitted', '2026-06-04 08:00:00')
+        """
+    )
+    await db.commit()
+
+    # 1. Test zur Mittagszeit (12:00 Uhr NY-Zeit = 16:00 Uhr UTC)
+    # Zu diesem Zeitpunkt darf kein Alarm gesendet werden.
+    state = AlertState()
+    mock_notifier = MagicMock()
+    mock_notifier.send_message = AsyncMock(return_value=True)
+
+    lunch_time = datetime(2026, 6, 4, 16, 0, 0, tzinfo=UTC)
+    await check_dead_orders(
+        db, mock_notifier, state, threshold_minutes=15, current_time=lunch_time
+    )
+    mock_notifier.send_message.assert_not_called()
+    assert not state.is_order_reported(2)
+
+    # 2. Test nach Börsenschluss vor Ablauf der Frist (16:05 Uhr NY-Zeit = 20:05 Uhr UTC)
+    # Zu diesem Zeitpunkt darf ebenfalls kein Alarm gesendet werden.
+    mock_notifier.reset_mock()
+    close_time_soon = datetime(2026, 6, 4, 20, 5, 0, tzinfo=UTC)
+    await check_dead_orders(
+        db, mock_notifier, state, threshold_minutes=15, current_time=close_time_soon
+    )
+    mock_notifier.send_message.assert_not_called()
+    assert not state.is_order_reported(2)
+
+    # 3. Test nach Börsenschluss nach Ablauf der Frist (16:16 Uhr NY-Zeit = 20:16 Uhr UTC)
+    # Zu diesem Zeitpunkt muss der Alarm gesendet werden.
+    mock_notifier.reset_mock()
+    close_time_late = datetime(2026, 6, 4, 20, 16, 0, tzinfo=UTC)
+    await check_dead_orders(
+        db, mock_notifier, state, threshold_minutes=15, current_time=close_time_late
+    )
+    mock_notifier.send_message.assert_called_once()
+    assert state.is_order_reported(2)
+
+
+@pytest.mark.asyncio
 async def test_order_builder_order_ref():
     """Verify that build_order() correctly sets the TWS orderRef field to the strategy name."""
     from app.trading.order_builder import build_order
