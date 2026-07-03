@@ -1,6 +1,15 @@
 # See https://pre-commit.com for more information
 # See https://pre-commit.com/hooks.html for more hooks
 repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.3.0
+    hooks:
+      - id: ruff
+        name: Ruff Linter (Auto-Fix Imports)
+        args: [--fix, --select=I,F401]
+      - id: ruff-format
+        name: Ruff Formatter
+
   - repo: local
     hooks:
       - id: architecture-sync-check

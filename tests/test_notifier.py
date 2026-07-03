@@ -1,7 +1,7 @@
 # filename: test_notifier.py
 import asyncio
-from decimal import Decimal
 import time
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
