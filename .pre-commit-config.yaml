@@ -5,6 +5,6 @@ repos:
     hooks:
       - id: architecture-sync-check
         name: Architecture Sync Check
-        entry: poetry run python .agent/skills/architecture-sync/scripts/check_sync.py
+        entry: python3 .agent/skills/architecture-sync/scripts/check_sync.py
         language: system
         pass_filenames: false

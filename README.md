@@ -1,5 +1,8 @@
 # TradeManager - IBKR Equities Trading System
 
+[![pytest](https://github.com/fxhuhn/TradeManager/actions/workflows/pytest.yml/badge.svg)](https://github.com/fxhuhn/TradeManager/actions/workflows/pytest.yml)
+[![quality_security](https://github.com/fxhuhn/TradeManager/actions/workflows/quality_security.yml/badge.svg)](https://github.com/fxhuhn/TradeManager/actions/workflows/quality_security.yml)
+
 TradeManager ist ein automatisiertes End-of-Day (EOD) Handelssystem für US-Aktien über die Trader Workstation (TWS) oder das IB Gateway von Interactive Brokers (IBKR).
 
 Das System basiert vollständig auf asynchronem Python (`asyncio` und `ib_async`) und ist für Robustheit, Fehlertoleranz und eine saubere Trennung von Business-Logik (Functional Core) und System-Schnittstellen (Imperative Shell) konzipiert.
