@@ -61,7 +61,25 @@ venv.bak/
 *.swo
 
 # custom
+.DS_Store
+/scripts
+
+# Temporäre KI-Arbeitsverzeichnisse (Strikt lokal)
+agent-tmp/
+.agent-tmp/
+
+# Lokaler KI-Wissensspeicher / Laufzeit-Erkenntnisse
+brain/
+.brain/
+
+# Erlaube explizit die Agenten-Skills und Workflows auf GitHub
+!/.agent/
+!/.agent/skills/
+!/.agent/skills/**/*
+
+.agent/skills/**/*.pyc
+.agent/skills/**/__pycache__/
+
+# Custom App Data
 /data
 /doc/*.pdf
-/.agent
-/scripts
