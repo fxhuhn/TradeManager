@@ -337,6 +337,55 @@ async def test_order_builder_order_ref():
     assert tws_order.orderRef == "NDXMomentum"
 
 
+def test_build_order_rounds_price_to_tick_size():
+    """Verify that build_order() rounds prices to correct tick sizes for .DE and US symbols."""
+    from app.trading.order_builder import build_order
+
+    # 1. SXRV.DE (price >= 100 -> tick size 0.05)
+    order_row_de = OrderRow(
+        order_id=647,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="G1",
+        account_id="A1",
+        bracket_role="ENTRY",
+        symbol="SXRV.DE",
+        sec_type="STK",
+        exchange="SMART",
+        action="BUY",
+        quantity=5,
+        order_type="LMT",
+        target_price=Decimal("1473.91"),
+        tif="DAY",
+        strategy_name="TwoPercent",
+        status="Created",
+    )
+    tws_order_de = build_order(order_row_de)
+    assert tws_order_de.lmtPrice == 1473.90
+
+    # 2. AAPL (US stock -> tick size 0.01)
+    order_row_us = OrderRow(
+        order_id=42,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="G1",
+        account_id="A1",
+        bracket_role="ENTRY",
+        symbol="AAPL",
+        sec_type="STK",
+        exchange="SMART",
+        action="BUY",
+        quantity=100,
+        order_type="LMT",
+        target_price=Decimal("180.123"),
+        tif="GTC",
+        strategy_name="NDXMomentum",
+        status="Created",
+    )
+    tws_order_us = build_order(order_row_us)
+    assert tws_order_us.lmtPrice == 180.12
+
+
 def test_calculate_settlement_pure():
     """Verify that calculate_settlement accurately computes VWAP, slippage, and net PnL (pure core)."""
     from app.trading.settlement import (

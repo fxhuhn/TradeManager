@@ -5,6 +5,8 @@ Erstellt SMART-Routing US-Aktienkontrakte und konfiguriert
 die entsprechenden Stop-, Limit- oder Market-Orders inkl. OCA-Gruppen.
 """
 
+from decimal import ROUND_HALF_UP, Decimal
+
 import structlog
 from ib_async import Order, Stock
 
@@ -24,6 +26,30 @@ def make_stock_contract(symbol: str) -> Stock:
     return Stock(symbol_upper, "SMART", "USD")
 
 
+def get_tick_size(symbol: str, price: float) -> float:
+    """Ermittelt die minimale Preisänderung (Tick Size) für ein Symbol."""
+    symbol_upper = symbol.upper()
+    if symbol_upper.endswith(".DE"):
+        if price >= 100.0:
+            return 0.05
+        if price >= 50.0:
+            return 0.01
+        if price >= 10.0:
+            return 0.005
+        return 0.001
+    return 0.01  # Standard für US-Aktien
+
+
+def round_to_tick(price: float, tick_size: float) -> float:
+    """Rundet einen Preis auf das nächste Vielfache der Tick-Größe unter Berücksichtigung von Float-Ungenauigkeiten."""
+    price_dec = Decimal(str(price))
+    tick_dec = Decimal(str(tick_size))
+    rounded = (price_dec / tick_dec).quantize(
+        Decimal("1"), rounding=ROUND_HALF_UP
+    ) * tick_dec
+    return float(rounded)
+
+
 def build_order(order_row: OrderRow) -> Order:
     """
     Konstruiert ein ib_async Order-Objekt aus den DB-Orderzeilen.
@@ -41,11 +67,16 @@ def build_order(order_row: OrderRow) -> Order:
         order.orderRef = order_row.strategy_name
 
     # Preise setzen (Dezimal-zu-Float-Konvertierung an der API-Schnittstelle)
+    # Runden auf die minimale Tick-Größe des Zielmarkts
     if order.orderType in ("LMT", "LOC"):
-        order.lmtPrice = float(order_row.target_price)
+        price = float(order_row.target_price)
+        tick_size = get_tick_size(order_row.symbol, price)
+        order.lmtPrice = round_to_tick(price, tick_size)
     elif order.orderType == "STP":
         # TWS Stop-Orders nutzen auxPrice für das Stop-Trigger-Niveau
-        order.auxPrice = float(order_row.target_price)
+        price = float(order_row.target_price)
+        tick_size = get_tick_size(order_row.symbol, price)
+        order.auxPrice = round_to_tick(price, tick_size)
     elif order.orderType in ("MKT", "MOC"):
         pass
     else:
