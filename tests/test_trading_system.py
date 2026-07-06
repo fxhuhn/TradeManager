@@ -361,7 +361,7 @@ def test_build_order_rounds_price_to_tick_size():
         status="Created",
     )
     tws_order_de = build_order(order_row_de)
-    assert tws_order_de.lmtPrice == 1473.90
+    assert tws_order_de.lmtPrice == 1474.00
 
     # 2. AAPL (US stock -> tick size 0.01)
     order_row_us = OrderRow(

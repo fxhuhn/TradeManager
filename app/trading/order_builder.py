@@ -30,13 +30,37 @@ def get_tick_size(symbol: str, price: float) -> float:
     """Ermittelt die minimale Preisänderung (Tick Size) für ein Symbol."""
     symbol_upper = symbol.upper()
     if symbol_upper.endswith(".DE"):
-        if price >= 100.0:
+        if price >= 50000.0:
+            return 10.0
+        if price >= 20000.0:
+            return 5.0
+        if price >= 10000.0:
+            return 2.0
+        if price >= 5000.0:
+            return 1.0
+        if price >= 2000.0:
+            return 0.5
+        if price >= 1000.0:
+            return 0.2
+        if price >= 500.0:
+            return 0.1
+        if price >= 200.0:
             return 0.05
+        if price >= 100.0:
+            return 0.02
         if price >= 50.0:
             return 0.01
-        if price >= 10.0:
+        if price >= 20.0:
             return 0.005
-        return 0.001
+        if price >= 10.0:
+            return 0.002
+        if price >= 5.0:
+            return 0.001
+        if price >= 2.0:
+            return 0.0005
+        if price >= 1.0:
+            return 0.0002
+        return 0.0001
     return 0.01  # Standard für US-Aktien
 
 
