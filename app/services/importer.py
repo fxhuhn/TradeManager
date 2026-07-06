@@ -477,6 +477,16 @@ async def _process_and_upsert_group(
                         csv_exit_qty=target_quantity,
                         db_entry_qty=db_entry_quantity,
                     )
+                    await notifier.send_importer_info(
+                        file_name=trade_group_id,
+                        status="Exit-Menge Angepasst",
+                        details=(
+                            f"Die Menge der Exit-Order wurde an die tatsächliche ENTRY-Menge in der Datenbank angepasst "
+                            f"(Reduziert von {target_quantity} auf {db_entry_quantity} Stück)."
+                        ),
+                        emoji="⚖️",
+                        title="EXIT-SIZING",
+                    )
                     target_quantity = db_entry_quantity
 
     legs = [dataclasses.replace(leg, quantity=target_quantity) for leg in raw_legs]

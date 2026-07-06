@@ -414,3 +414,10 @@ async def test_run_csv_import_aligns_standalone_exit_quantity(
         rows = await cursor.fetchall()
         assert len(rows) == 1
         assert rows[0]["quantity"] == 5
+
+    # Check that a notification for exit alignment was sent
+    mock_notifier.send_importer_info.assert_called_once()
+    kwargs = mock_notifier.send_importer_info.call_args[1]
+    assert kwargs["status"] == "Exit-Menge Angepasst"
+    assert kwargs["title"] == "EXIT-SIZING"
+    assert "Reduziert von 6 auf 5" in kwargs["details"]
