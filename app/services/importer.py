@@ -444,11 +444,20 @@ async def _process_and_upsert_group(
 
     legs = [dataclasses.replace(leg, quantity=target_quantity) for leg in raw_legs]
 
-    await _upsert_trade_group_legs(
-        db, trade_group_id, account_id, entry_leg, legs, target_quantity, notifier
-    )
-
-    await queue.put(trade_group_id)
+    try:
+        await _upsert_trade_group_legs(
+            db, trade_group_id, account_id, entry_leg, legs, target_quantity, notifier
+        )
+        await queue.put(trade_group_id)
+    except ValueError as exception:
+        if "Standalone exit order imported" in str(exception):
+            logger.error(
+                "Skipped standalone exit order because no matching ENTRY order exists in the database.",
+                trade_group_id=trade_group_id,
+                error=str(exception),
+            )
+        else:
+            raise
 
 
 def calculate_downscaled_quantity(

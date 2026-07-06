@@ -255,3 +255,44 @@ async def test_csv_directory_watcher_disconnected_postpones(
         assert kwargs["title"] == "IMPORT PAUSIERT"
         assert kwargs["status"] == "Wartend"
         assert kwargs["emoji"] == "⏳"
+
+
+@pytest.mark.asyncio
+async def test_run_csv_import_handles_standalone_exit_gracefully(
+    tmp_path: Path, mock_config: Config, db
+) -> None:
+    """Prüft, dass run_csv_import bei einem Standalone-Exit die Exception abfängt und fortfährt."""
+    from app.services.importer import run_csv_import
+
+    csv_file = tmp_path / "orders_2026_07_06.csv"
+    # Ein Standalone Exit (kein ENTRY in DB)
+    csv_content = (
+        "trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name\n"
+        "974_DipBuyer_STLD,EXIT,STLD,STK,SMART,U19605236,SELL,27,LMT,227.46,DAY,DipBuyer\n"
+    )
+    csv_file.write_text(csv_content, encoding="utf-8")
+
+    mock_interactive_brokers = MagicMock()
+    mock_interactive_brokers.managedAccounts.return_value = ["U19605236"]
+    mock_interactive_brokers.isConnected.return_value = True
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_importer_info = AsyncMock(return_value=True)
+    mock_queue = asyncio.Queue()
+
+    # run_csv_import aufrufen
+    # Sollte ohne Exception durchlaufen, da das ValueError abgefangen wird
+    await run_csv_import(
+        db=db,
+        interactive_brokers=mock_interactive_brokers,
+        csv_path=csv_file,
+        queue=mock_queue,
+        notifier=mock_notifier,
+        config=mock_config,
+    )
+
+    # Verifizieren, dass der Notifier über das fehlgeschlagene Standalone Exit informiert wurde
+    mock_notifier.send_importer_info.assert_called_once()
+    kwargs = mock_notifier.send_importer_info.call_args[1]
+    assert kwargs["status"] == "Fehlgeschlagen"
+    assert "Standalone exit order" in kwargs["details"]
