@@ -1,5 +1,7 @@
+# ruff: noqa
 # vulture_whitelist.py
 # Whitelist for unused variables, attributes, and classes identified by Vulture
+
 
 database_timeout_s
 _.row_factory
