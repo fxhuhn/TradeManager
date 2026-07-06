@@ -3,6 +3,9 @@ name: ibkr-agent
 description: "Leverage Interactive Brokers (IBKR) API via ib_async. Useful for checking account details, fetching open positions/orders, placing new orders, and handling real-time data."
 ---
 
+> [!IMPORTANT]
+> Must strictly respect `.agent/rules/workspace.md`. Do not reference or operate on files outside the active repository workspace.
+
 # IBKR API Agent Skill
 
 This skill provides comprehensive instructions, examples, and patterns for interacting with the Interactive Brokers (IBKR) API using the `ib_async` library. It details how to connect, query positions/account info/orders, place trades safely, handle errors, and mock the API during tests.

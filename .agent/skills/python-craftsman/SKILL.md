@@ -3,6 +3,9 @@ name: python-craftsman
 description: "Master Python developer skill enforcing strict rules for Python 3.12+, async-first design, type hints, clean naming, early returns, complexity thresholds, and Quality review gates."
 ---
 
+> [!IMPORTANT]
+> Must strictly respect `.agent/rules/workspace.md`. Do not reference or operate on files outside the active repository workspace.
+
 # Python Craftsman Skill
 
 This skill enforces high-end software craftsmanship guidelines for all Python code. It is based entirely on the strict laws defined in `python.md`.

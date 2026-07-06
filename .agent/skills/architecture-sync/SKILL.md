@@ -3,6 +3,9 @@ name: architecture-sync
 description: "Ensures the project-root architecture.md stays fully synchronized with public code components in the codebase."
 ---
 
+> [!IMPORTANT]
+> Must strictly respect `.agent/rules/workspace.md`. Do not reference or operate on files outside the active repository workspace.
+
 # Architecture Sync Skill
 
 This skill enforces synchronization between the active codebase structure and the system documentation (`architecture.md` at the project root).

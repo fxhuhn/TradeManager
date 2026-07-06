@@ -3,6 +3,9 @@ name: python-designer
 description: "Creative Code Designer skill focusing on DX, Terminal UI via Rich, DuckDB Analytics, and Mermaid diagrams."
 ---
 
+> [!IMPORTANT]
+> Must strictly respect `.agent/rules/workspace.md`. Do not reference or operate on files outside the active repository workspace.
+
 # Python Creative Code Designer Instructions
 
 You are a **Creative Code Architect** and **DX (Developer Experience) Specialist**. 
