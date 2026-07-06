@@ -296,3 +296,121 @@ async def test_run_csv_import_handles_standalone_exit_gracefully(
     kwargs = mock_notifier.send_importer_info.call_args[1]
     assert kwargs["status"] == "Fehlgeschlagen"
     assert "Standalone exit order" in kwargs["details"]
+
+
+@pytest.mark.asyncio
+async def test_run_csv_import_sends_telegram_on_downscaling(
+    tmp_path: Path, mock_config: Config, db
+) -> None:
+    """Verifies that run_csv_import triggers a downscaling alert if capital sizing limits the quantity."""
+    from ib_async import AccountValue
+
+    from app.services.importer import run_csv_import
+
+    csv_file = tmp_path / "orders_2026_07_06.csv"
+    # An entry with high quantity (100) and target price 100.0. Total cost = 10,000.00.
+    csv_content = (
+        "trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name\n"
+        "1001_DipBuyer_GLW,ENTRY,GLW,STK,SMART,U19605236,BUY,100,LMT,100.00,DAY,DipBuyer\n"
+    )
+    csv_file.write_text(csv_content, encoding="utf-8")
+
+    # Mock TWS so capital sizing limits allocation to e.g. 5,000.00 (which will downscale 100 to 50)
+    mock_interactive_brokers = MagicMock()
+    mock_interactive_brokers.managedAccounts.return_value = ["U19605236"]
+    mock_interactive_brokers.isConnected.return_value = True
+
+    # 5% of 100,000 NLV = 5,000 allocation.
+    mock_interactive_brokers.accountValues.return_value = [
+        AccountValue(
+            account="U19605236",
+            tag="NetLiquidation",
+            value="50000.00",
+            currency="EUR",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U19605236",
+            tag="AvailableFunds",
+            value="80000.00",
+            currency="EUR",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U19605236",
+            tag="TotalCashValue",
+            value="60000.00",
+            currency="EUR",
+            modelCode="",
+        ),
+    ]
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_importer_info = AsyncMock(return_value=True)
+    mock_queue = asyncio.Queue()
+
+    await run_csv_import(
+        db=db,
+        interactive_brokers=mock_interactive_brokers,
+        csv_path=csv_file,
+        queue=mock_queue,
+        notifier=mock_notifier,
+        config=mock_config,
+    )
+
+    # Check that a notification for downscaling was sent
+    mock_notifier.send_importer_info.assert_called_once()
+    kwargs = mock_notifier.send_importer_info.call_args[1]
+    assert kwargs["status"] == "Menge Reduziert"
+    assert kwargs["title"] == "KAPITAL-SIZING"
+    assert "von 100 auf 50 Stück" in kwargs["details"]
+
+
+@pytest.mark.asyncio
+async def test_run_csv_import_aligns_standalone_exit_quantity(
+    tmp_path: Path, mock_config: Config, db
+) -> None:
+    """Verifies that a standalone exit quantity is aligned with the existing ENTRY order quantity in the DB."""
+    from app.services.importer import run_csv_import
+
+    # 1. Insert an existing ENTRY order with quantity 5 (e.g. downscaled from 6)
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, parent_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name, status, retry_count)
+        VALUES (123, NULL, '1028_TwoPercent_SXRV.DE', 'U19605236', 'ENTRY', 'SXRV.DE', 'STK', 'SMART', 'BUY', 5, 'LMT', '1474.00', 'DAY', 'TwoPercent', 'Filled', 0)
+        """
+    )
+    await db.commit()
+
+    # 2. Import an exit file with exit quantity 6
+    csv_file = tmp_path / "orders_2026_07_06_exit.csv"
+    csv_content = (
+        "trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name\n"
+        "1028_TwoPercent_SXRV.DE,EXIT,SXRV.DE,STK,SMART,U19605236,SELL,6,LMT,1500.00,DAY,TwoPercent\n"
+    )
+    csv_file.write_text(csv_content, encoding="utf-8")
+
+    mock_interactive_brokers = MagicMock()
+    mock_interactive_brokers.managedAccounts.return_value = ["U19605236"]
+    mock_interactive_brokers.isConnected.return_value = True
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_importer_info = AsyncMock(return_value=True)
+    mock_queue = asyncio.Queue()
+
+    await run_csv_import(
+        db=db,
+        interactive_brokers=mock_interactive_brokers,
+        csv_path=csv_file,
+        queue=mock_queue,
+        notifier=mock_notifier,
+        config=mock_config,
+    )
+
+    # 3. Check that the newly imported exit order has quantity 5 (aligned), not 6 (from CSV)
+    async with db.execute(
+        "SELECT quantity FROM orders WHERE trade_group_id = '1028_TwoPercent_SXRV.DE' AND bracket_role = 'EXIT'"
+    ) as cursor:
+        rows = await cursor.fetchall()
+        assert len(rows) == 1
+        assert rows[0]["quantity"] == 5

@@ -424,6 +424,26 @@ async def _process_and_upsert_group(
             max_allocation=maximum_capital_allocation,
         )
 
+        if target_quantity < entry_leg.quantity:
+            logger.info(
+                "Capital sizing downscaled quantity",
+                trade_group_id=trade_group_id,
+                original_qty=entry_leg.quantity,
+                downscaled_qty=target_quantity,
+                max_allocation=float(maximum_capital_allocation),
+            )
+            await notifier.send_importer_info(
+                file_name=trade_group_id,
+                status="Menge Reduziert",
+                details=(
+                    f"Positionsgröße wurde aufgrund von Kapitalsizing-Regeln von "
+                    f"{entry_leg.quantity} auf {target_quantity} Stück reduziert "
+                    f"(Max. Allokation: {float(maximum_capital_allocation):.2f} EUR)."
+                ),
+                emoji="⚖️",
+                title="KAPITAL-SIZING",
+            )
+
         if target_quantity <= 0:
             logger.warning(
                 "Sizing resulted in Qty <= 0. Skipping group.",
@@ -441,6 +461,23 @@ async def _process_and_upsert_group(
                 title="SIZING-FEHLER",
             )
             return
+    else:
+        # Standalone exit: Align exit quantity with the actual quantity of the existing ENTRY order in the DB
+        async with db.execute(
+            "SELECT quantity FROM orders WHERE account_id = ? AND trade_group_id = ? AND bracket_role = 'ENTRY'",
+            (account_id, trade_group_id),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                db_entry_quantity = row["quantity"]
+                if db_entry_quantity != target_quantity:
+                    logger.info(
+                        "Aligning exit quantity with database ENTRY order quantity",
+                        trade_group_id=trade_group_id,
+                        csv_exit_qty=target_quantity,
+                        db_entry_qty=db_entry_quantity,
+                    )
+                    target_quantity = db_entry_quantity
 
     legs = [dataclasses.replace(leg, quantity=target_quantity) for leg in raw_legs]
 
