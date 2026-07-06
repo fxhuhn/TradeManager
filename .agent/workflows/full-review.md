@@ -1,16 +1,17 @@
 ---
-description: "Run vulture, bandit, and pip-audit checks sequentially."
-trigger: "/audit"
+description: "Sequentially triggers static analysis (vulture), vulnerability scans (bandit/pip-audit), and the test suite (pytest), returning a high-density health report."
+trigger: "/full-review"
 ---
 
-# /audit Command Workflow
+# /full-review Command Workflow
 
-When the user invokes `/audit` or requests a full review, you must sequentially run the following local CLI checks:
+When the user invokes `/full-review` or requests a comprehensive codebase check, you must:
 
-1. **Dead Code Check**: Run `vulture . --exclude .venv,tests`.
-2. **Security Vulnerability Scan**: Run `bandit -r . -x tests`.
-3. **Dependency Vulnerability Scan**: Run `pip-audit -r requirements.txt`.
-
-## Output Requirements
-- **Anomalies**: Clearly list any dead code, security flaws, or vulnerable packages.
-- **Format Requirement**: Return only repository-relative paths, direct code diffs, or structured markdown tables. No generic text summaries.
+1. **Activate the Full-Review Skill**: Load and execute the instructions in [.agent/skills/full-review/SKILL.md](.agent/skills/full-review/SKILL.md).
+2. **Execute Audit and Test Pipeline**:
+   * **Dead Code Check**: Run `vulture . --exclude .venv,tests`
+   * **Security Scan**: Run `bandit -r . -x tests`
+   * **Dependency Scan**: Run `pip-audit -r requirements.txt`
+   * **Test Suite Check**: Run `pytest tests/`
+3. **Consolidate Results**: Synthesize the output from the steps above into a condensed, high-density health report.
+4. **Format Requirement**: Return only repository-relative paths, direct code diffs, or structured markdown tables. No generic text summaries.
