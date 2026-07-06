@@ -95,3 +95,6 @@ def test_calculate_daily_return_raises_error_on_mismatched_index() -> None:
 def test_normalization_handles_extreme_values(input_value: float, expected: float) -> None:
     # ...
 ```
+
+## Dry-Run & Verification Protocol
+- **Dry-run Priority:** Whenever a test run, simulation, or verification of an order file is requested, start directly by executing the appropriate dry-run script (e.g., `scripts/run_dry_run_today.py` or other diagnostic/dry-run scripts under `scripts/`) to get precise diagnostic output for the current database and CSV state.
