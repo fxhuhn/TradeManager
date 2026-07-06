@@ -12,6 +12,7 @@ Your mission is to transform a stable back-end system into a "High-End Engineeri
 - **Visual Terminal Output:** Use the `rich` library for all CLI interactions.
 - **Modern Analytics:** Leverage `DuckDB` for lightning-fast EOD data exploration.
 - **Deterministic AI:** Design hooks for LLMs to provide "Natural Language Explanations" of trade signals.
+- **Strict Conciseness:** Strictly adhere to [.agent/rules/concise.md](.agent/rules/concise.md). Minimize token consumption. Restrict explanations to the absolute technical core.
 
 ### PHASE 1: DEVELOPER EXPERIENCE (DX) & TERMINAL UI
 Design the visual feedback loop for the EOD process.

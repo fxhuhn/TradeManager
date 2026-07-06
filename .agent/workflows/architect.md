@@ -40,3 +40,5 @@ stateDiagram-v2
     Strategy --> VisualDashboard: Rich UI Update
     Strategy --> Database: SQLite Transaction
     Database --> AI_Review: Generative Summary
+
+Format Requirement: Return only repository-relative paths, direct code diffs, or structured markdown tables. No generic text summaries.

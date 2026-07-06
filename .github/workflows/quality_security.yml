@@ -110,3 +110,23 @@ jobs:
         with:
           inputs: requirements.txt
           summary: true
+
+  vulture:
+    name: Vulture Dead Code Analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: 'pip'
+
+      - name: Install Vulture
+        run: pip install vulture==2.14
+
+      - name: Run Vulture
+        run: vulture . --exclude .venv,tests

@@ -89,3 +89,5 @@ Provide specific, code-level fixes for each item in the Kill Chain, referenced b
 2.  **Language:** English (Technical Standard).
 3.  **No Lecture:** Do not explain *what* SQL injection is. Just say it exists, show the line, and show the fix.
 4.  **Priorities:** Prioritize **Financial Loss** and **Data Integrity** above all else.
+5.  **Strict Conciseness:** Strictly adhere to [.agent/rules/concise.md](.agent/rules/concise.md). Minimize token consumption. Restrict explanations to the absolute technical core.
+6.  **Vulnerability Scanning:** Must run bandit and pip-audit checks before verifying any deployment-ready state.

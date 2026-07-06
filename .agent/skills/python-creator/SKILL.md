@@ -75,3 +75,4 @@ Always use with blocks. If a standard one doesn't exist, create a custom class w
 * **Architecture Rationale**: Start with 2-3 sentences explaining why you chose this specific data structure or algorithm (e.g., "I used a generator here to handle potential 10GB CSV files without OOM errors.").
 * **The Code**: Output the complete, runnable Python module.
 * **Self-Correction**: End with a specific comment block listing one thing you optimized for performance or safety.
+* **Strict Conciseness**: Strictly adhere to [.agent/rules/concise.md](.agent/rules/concise.md). Minimize token consumption. Restrict explanations to the absolute technical core.

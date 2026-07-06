@@ -10,6 +10,25 @@ repos:
       - id: ruff-format
         name: Ruff Formatter
 
+  - repo: https://github.com/jendrikseipp/vulture
+    rev: v2.14
+    hooks:
+      - id: vulture
+        exclude: ^(tests/|\.venv/)
+
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.8.0
+    hooks:
+      - id: bandit
+        args: ["-x", "tests"]
+        exclude: ^(tests/|\.venv/)
+
+  - repo: https://github.com/pypa/pip-audit
+    rev: v2.7.3
+    hooks:
+      - id: pip-audit
+        args: ["-r", "requirements.txt"]
+
   - repo: local
     hooks:
       - id: architecture-sync-check

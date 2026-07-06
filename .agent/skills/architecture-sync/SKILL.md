@@ -19,6 +19,7 @@ This skill is triggered whenever any of the following code modifications occur i
 * Before declaring any implementation task complete, you **must** verify that any newly added public Class or Function is documented in the project-root [architecture.md](architecture.md) file.
 * This documentation check is case-sensitive and scans for the exact class/function name within the documentation text.
 * The original [references/architecture.md](references/architecture.md) is **read-only**; all modifications must be made strictly to the root [architecture.md](architecture.md) file.
+* Strictly adhere to [.agent/rules/concise.md](.agent/rules/concise.md). Minimize token consumption. Restrict explanations to the absolute technical core.
 
 ### 3. Pre-Commit Validation Hook
 Every commit runs a local validation script to audit synchronization. To run this check manually:

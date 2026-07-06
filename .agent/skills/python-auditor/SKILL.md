@@ -160,3 +160,5 @@ Provide the *corrected* code snippets for the most critical errors.
 - **ALWAYS** check for the Early-Return Pattern. Nested `if/else` pyramids are a MAJOR violation.
 - **ALWAYS** estimate Cognitive Complexity. If you cannot measure it precisely, provide a conservative estimate and flag it.
 - **ALWAYS** verify the Functional Core / Imperative Shell boundary. Business logic that touches I/O is a CRITICAL violation.
+- **ALWAYS** strictly adhere to [.agent/rules/concise.md](.agent/rules/concise.md). Minimize token consumption. Restrict explanations to the absolute technical core.
+- **ALWAYS** run vulture check to identify and remove dead code before finalizing code changes.

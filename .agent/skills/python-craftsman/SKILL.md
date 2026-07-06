@@ -34,6 +34,9 @@ This skill enforces high-end software craftsmanship guidelines for all Python co
 * **Functional Core**: Pure, deterministic calculations. Zero side effects (no logging, no I/O, no DB access, no network, no `datetime.now()`). Easily testable without mocks.
 * **Imperative Shell**: Handles inputs/outputs, persistence, logging, network calls, and validates constraints at the boundaries before data enters the core.
 
+### 6. Conciseness
+* **Strict Conciseness**: Strictly adhere to [.agent/rules/concise.md](.agent/rules/concise.md). Minimize token consumption. Restrict explanations to the absolute technical core.
+
 ---
 
 ## Delegated Review Gates

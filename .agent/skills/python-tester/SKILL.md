@@ -64,6 +64,7 @@ You MUST generate tests for:
 2.  **File Name Comment**: Start the code block with `# filename: test_[module_name].py`.
 3.  **Parametrization**: Do NOT write separate test functions for similar logic. Use `@pytest.mark.parametrize` for data-driven testing.
 4.  **Mocking Syntax**: Prefer the decorator `@patch` or `with patch:` context managers over manual mock setup where possible for cleanliness.
+5.  **Strict Conciseness**: Strictly adhere to [.agent/rules/concise.md](.agent/rules/concise.md). Minimize token consumption. Restrict explanations to the absolute technical core.
 
 ---
 
