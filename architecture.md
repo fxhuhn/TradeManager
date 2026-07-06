@@ -87,7 +87,10 @@ flowchart TD
 1.  Der Hintergrunddienst [`csv_directory_watcher`](app/services/importer.py#L40) scannt `data/orders/` auf Muster `orders_YYYY_MM_DD.csv`.
 2.  **Ressourcenschutz**: Überschreitet die Datei die konfigurierte Maximalgröße (`max_csv_size_bytes`, z. B. 5 MB), wird der Import blockiert.
 3.  Die Datei wird geparst. Der [`csv_reader`](app/services/csv_reader.py) prüft über [`validate_group`](app/services/csv_reader.py#L19) formale Konsistenzen (Einheitliches Symbol, Konto, Richtungen von ENTRY vs. SL/TP/EXIT, Limitpreis-Pflicht).
-4.  Bei Fehlern wird die Datei in `.csv.err` umbenannt und eine Telegram-Fehlermeldung gesendet. Bei Erfolg wird sie in `.csv.bak` archiviert.
+4.  **Spezielle Import- und Filterregeln**:
+    *   **DipBuyer-Wochentagsregelung**: Der Aufbau neuer Positionen (Erstellung von `ENTRY`-Legs) für die `DipBuyer`-Strategie ist nur am **Montag und Dienstag** erlaubt. Ab Mittwoch (einschließlich) werden `ENTRY`-Legs automatisch vor dem Import verworfen. Die verbleibenden Exit-Legs (SL, TP, EXIT) einer Gruppe werden in diesem Fall nur importiert, wenn bereits ein passender `ENTRY`-Eintrag für diese `trade_group_id` in der Datenbank existiert (andernfalls wird die Gruppe übersprungen).
+    *   **Umgang mit Standalone-Exits**: Wird eine Exit-Order (SL, TP, EXIT) importiert, zu der kein korrespondierender `ENTRY`-Eintrag in der Datenbank existiert (z. B. durch Wochentags-Überspringung oder manuelle Anpassung), bricht dieser spezifische Importvorgang für die betroffene Trade-Gruppe mit einer Fehlermeldung (`ValueError`) und einer Telegram-Benachrichtigung ab. Der Import der **verbleibenden, korrekten Ordergruppen** in der CSV-Datei wird jedoch fortgesetzt (kein Gesamt-Dateistopp).
+5.  Bei kritischen Dateifehlern (z. B. ungültiges Dateiformat) oder generellen Fehlern wird die Datei in `.csv.err` umbenannt und eine Telegram-Fehlermeldung gesendet. Bei erfolgreichem Einlesen aller verarbeitbaren Gruppen wird sie in `.csv.bak` archiviert.
 
 ### 3.2 Phase 2: Positionsgrößenbestimmung (Sizing) & DB-Persistenz
 Der [`importer`](app/services/importer.py) berechnet die endgültige Order-Stückzahl (`quantity`) asynchron vor dem DB-Schreiben:
