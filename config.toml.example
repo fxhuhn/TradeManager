@@ -27,6 +27,7 @@ database_timeout_s = 30.0         # Verhindert Lockouts bei hoher paralleler DB-
 max_csv_size_bytes = 5242880      # 5 MB Sicherheitslimit für CSV-Import zur DoS-Abwehr
 log_file_path = "data/logs/app.log"              # Pfad zur zentralen Logdatei
 log_rotation_backup_count = 5               # Anzahl der rotierenden Backup-Dateien
+db_backup_interval_s = 86400                # Intervall für tägliches DB-Backup (1 Tag = 86400 Sekunden)
 
 [account]
 default_limit_pct = 0.05          # Standard-Kapitalallokation (5% des verfügbaren Kapitals)

@@ -24,7 +24,7 @@ import structlog
 from ib_async import IB
 
 from app.core.config import Config, load_config
-from app.core.db import get_db, run_migrations, verify_db_integrity
+from app.core.db import get_db, run_db_backup, run_migrations, verify_db_integrity
 from app.core.logging_setup import configure_logging
 from app.services.alert_watcher import alert_watcher, order_status_sync_loop
 from app.services.importer import csv_directory_watcher
@@ -193,6 +193,7 @@ class TradingSystemOrchestrator:
         )
 
         heartbeat_task = asyncio.create_task(self.heartbeat_loop())
+        backup_task = asyncio.create_task(self.database_backup_loop())
 
         self.tasks = (
             importer_task,
@@ -200,6 +201,7 @@ class TradingSystemOrchestrator:
             watcher_task,
             sync_task,
             heartbeat_task,
+            backup_task,
         )
 
     async def graceful_shutdown(self) -> None:
@@ -347,6 +349,30 @@ class TradingSystemOrchestrator:
                 logger.error("Error in heartbeat loop", error=str(exception))
 
             await asyncio.sleep(self.config.tws.heartbeat_interval_s)
+
+    async def database_backup_loop(self) -> None:
+        """Führt periodisch Backups der SQLite-Datenbank aus.
+
+        Raises:
+            asyncio.CancelledError: Falls die Schleife abgebrochen wird.
+        """
+        logger.info(
+            "Starting Database Backup background service",
+            interval_seconds=self.config.app.db_backup_interval_s,
+        )
+        while True:
+            try:
+                await run_db_backup(self.database_path)
+            except asyncio.CancelledError:
+                logger.info("Database backup loop was cancelled.")
+                raise
+            except Exception as exception:
+                logger.error(
+                    "Unexpected error in database backup loop",
+                    error=str(exception),
+                )
+
+            await asyncio.sleep(self.config.app.db_backup_interval_s)
 
     async def _execute_heartbeat_cycle(self) -> None:
         """Führt eine einzelne Ausführung des Heartbeat-Pings aus."""

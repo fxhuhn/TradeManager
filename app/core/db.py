@@ -7,6 +7,7 @@ aktiviert Fremdschlüssel-Constraints und führt Schema-Migrationen lexikografis
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 
 import aiosqlite
@@ -164,3 +165,61 @@ async def transaction(db: aiosqlite.Connection) -> AsyncIterator[aiosqlite.Conne
     except Exception:
         await db.execute("ROLLBACK")
         raise
+
+
+async def run_db_backup(db_path: Path) -> None:
+    """Erstellt ein tägliches Backup der angegebenen Datenbank.
+
+    Behält nur die letzten 5 Backups.
+    Verwendet SQLite VACUUM INTO für sichere Hot-Backups.
+    """
+    logger.info("Starting database backup", database_name=db_path.name)
+
+    try:
+        # 1. Pfade definieren
+        backup_directory = db_path.parent / "backup"
+        backup_directory.mkdir(parents=True, exist_ok=True)
+
+        timestamp_string = datetime.now().strftime("%Y-%m-%d")
+        backup_filename = f"{db_path.name}.{timestamp_string}"
+        backup_file = backup_directory / backup_filename
+
+        # 2. Backup erstellen (VACUUM INTO)
+        if backup_file.exists():
+            logger.warning(
+                "Backup already exists. Overwriting...",
+                filename=backup_filename,
+            )
+            backup_file.unlink()
+
+        async with aiosqlite.connect(str(db_path)) as connection:
+            # SICHERHEITSHINWEIS: VACUUM INTO unterstützt keine parametrisierten Abfragen.
+            # Der Pfad wird aus kontrollierten Eingaben (Dateiname + Zeitstempel) erstellt.
+            backup_path_string = str(backup_file.resolve())
+            await connection.execute(f"VACUUM INTO '{backup_path_string}'")
+
+        logger.info("Backup successfully created", path=str(backup_file))
+
+        # 3. Retention-Policy: Nur die letzten 5 behalten
+        all_backups = sorted(backup_directory.glob(f"{db_path.name}.*"))
+
+        keep_count = 5
+        if len(all_backups) > keep_count:
+            files_to_delete = all_backups[:-keep_count]
+            for file_to_delete in files_to_delete:
+                try:
+                    file_to_delete.unlink()
+                    logger.info("Old backup deleted", filename=file_to_delete.name)
+                except Exception as delete_error:
+                    logger.error(
+                        "Error deleting old backup file",
+                        filename=file_to_delete.name,
+                        error=str(delete_error),
+                    )
+
+    except Exception as exception:
+        logger.exception(
+            "Database backup failed",
+            database_path=str(db_path),
+            error=str(exception),
+        )

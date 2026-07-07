@@ -47,6 +47,7 @@ class AppConfig:
     max_csv_size_bytes: int
     log_file_path: str
     log_rotation_backup_count: int
+    db_backup_interval_s: int = 86400
 
 
 @dataclass(frozen=True)
@@ -161,6 +162,7 @@ def _parse_app_config(app_data: dict[str, object]) -> AppConfig:
         max_csv_size_bytes=int(app_data.get("max_csv_size_bytes", 5242880)),
         log_file_path=str(app_data.get("log_file_path", "data/app.log")),
         log_rotation_backup_count=int(app_data.get("log_rotation_backup_count", 5)),
+        db_backup_interval_s=int(app_data.get("db_backup_interval_s", 86400)),
     )
 
 
