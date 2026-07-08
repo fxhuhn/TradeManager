@@ -1,164 +1,177 @@
-# Systemarchitektur: TradeManager
+# TradeManager: Low-Level Technical Specification
 
-Dieses Dokument beschreibt die Software-Architektur, Datenflüsse und Abhängigkeiten des **Interactive Brokers Equities Trading System (TradeManager)**. Es dient nachfolgenden Agenten und Entwicklern als schneller Einstieg in die Codebase.
-
----
-
-## 1. Verzeichnisstruktur (Directory Structure)
-
-Die Codebase ist nach dem Prinzip **Functional Core, Imperative Shell** aufgebaut. Mathematische Berechnungen und Logik sind frei von Seiteneffekten (Functional Core), während Ein-/Ausgabe, Netzwerk und Persistenz in äußeren Schichten gekapselt sind (Imperative Shell).
-
-```text
-TradeManager/
-├── app/                      # Quellcode der Hauptanwendung
-│   ├── core/                 # Systemkonfiguration und Dateninfrastruktur
-│   │   ├── config.py         #   Laden von config.toml und .env
-│   │   ├── db.py             #   Verbindung im SQLite WAL-Modus, Transaktions- und Migrationssteuerung
-│   │   ├── logging_setup.py  #   Strukturiertes JSON-Logging über structlog
-│   │   └── models.py         #   Immutable Datenklassen (LegRow, OrderRow, ExecutionRow, SettlementRow)
-│   ├── services/             # Hintergrunddienste für Dateimonitoring und Alarmierung
-│   │   ├── alert_watcher.py  #   Dead-Order- und Slippage-Monitoring
-│   │   ├── csv_reader.py     #   Einlesen und Gruppenvalidierung der CSV-Orderzeilen
-│   │   ├── importer.py       #   CSV-Import, Positionsgrößenbestimmung (Sizing), DB-UPSERT
-│   │   └── notifier.py       #   Asynchroner Telegram-Client mit Rate-Limiting
-│   ├── trading/              # Kern-Ausführungslogik und TWS-Kopplung
-│   │   ├── callbacks.py      #   Event-Handler der TWS (Status, Fills, Commissions, Errors)
-│   │   ├── error_codes.py    #   TWS-Fehlerklassifikation (INFO, RETRIABLE, FATAL etc.)
-│   │   ├── order_builder.py  #   Instanziierung von ib_async Order- und Contract-Objekten
-│   │   ├── recovery.py       #   Zustandsabgleich (Startup & periodisch) zwischen DB und TWS
-│   │   ├── retry.py          #   Exponentieller Backoff für transiente API-Fehler
-│   │   ├── settlement.py     #   PnL-, VWAP- und Slippage-Berechnung
-│   │   └── worker.py         #   Execution Worker (Queue-Consumer zur Orderübermittlung)
-│   └── main.py               # Haupteinstiegspunkt & Orchestrierung
-├── doc/                      # Ausführliche PDF-Konzepte und Benutzerhandbücher
-│   └── README.md             #   Umfangreiches Benutzer- und Wartungshandbuch
-├── migrations/               # Datenbankmigrationen
-│   └── 001_initial.sql       #   SQL-Initialisierungsschema
-├── references/               # Systemdokumentation für Agenten
-│   └── architecture.md       #   (Dieses Dokument)
-├── scripts/                  # Hilfs-, Analyse- und Diagnoseskripte
-│   ├── check_tws.py          #   TWS-Verbindungs- und Kontostatus-Check
-│   ├── dry_run_today.py      #   Lokaler Dry Run des heutigen Imports (ohne DB-Schreiben / Orderübermittlung)
-│   ├── run_dry_run_today.py  #   Dry Run auf einer Kopie der Produktionsdatenbank
-│   └── run_simulation.py     #   Lokaler End-to-End Systemsimulationstest mit Mock-TWS
-└── tests/                    # Unittests und Systemtests (pytest)
-```
+This document details the database schemas, CSV interface layouts, internal data structures, state machine transitions, and error management rules.
 
 ---
 
-## 2. Zentrale Einstiegspunkte (Entrypoints)
+## 1. Database Schema
 
-### 2.1 Hauptanwendung
-*   **[`app/main.py`](file:///Users/produktmanagement/Python/github/TradeManager/app/main.py)**: Der Haupteinstiegspunkt startet den [`TradingSystemOrchestrator`](file:///Users/produktmanagement/Python/github/TradeManager/app/main.py#L48). Er führt nacheinander die Konfigurationsanalyse, die DB-Integritätsprüfung (mittels `PRAGMA integrity_check`), die Schema-Migrationen durch und stellt die asynchrone Verbindung via `ib_async` zur TWS/Gateway her. Anschließend werden die asynchronen Hintergrunddienste gestartet und der Signal-Handler für einen Graceful Shutdown registriert.
+All database models reside in the local SQLite database at `data/trading.db`, operating in **WAL mode** with foreign key constraint checks enabled (`PRAGMA foreign_keys = ON`).
 
-### 2.2 CLI-Hilfsprogramme (Scripts)
-*   **[`scripts/check_tws.py`](file:///Users/produktmanagement/Python/github/TradeManager/scripts/check_tws.py)**: Prüft Konnektivität zur Trader Workstation (TWS) und gibt Kontometriken wie `NetLiquidationValue`, `TotalCashValue` und `AvailableFunds` aus.
-*   **[`scripts/dry_run_today.py`](file:///Users/produktmanagement/Python/github/TradeManager/scripts/dry_run_today.py)**: Simuliert das Parsing, die Validierung und die Positionsgrößenberechnung der heutigen CSV-Orderdatei (`data/orders/orders_YYYY_MM_DD.csv`), ohne reale Bestellungen abzusetzen oder Daten zu persistieren.
-*   **[`scripts/run_dry_run_today.py`](file:///Users/produktmanagement/Python/github/TradeManager/scripts/run_dry_run_today.py)**: Arbeitet auf einer physischen Kopie der Produktionsdatenbank und simuliert auch Live-Depotabgleiche von Exit-Orders.
-*   **[`scripts/run_simulation.py`](file:///Users/produktmanagement/Python/github/TradeManager/scripts/run_simulation.py)**: Führt einen vollständigen lokalen E2E-Integrationstest unter Verwendung eines Mocks der TWS-Schnittstelle durch.
+### 1.1 Schema Version Table (`schema_version`)
+Stores schema migrations history.
 
----
+| Variable Name | Data Type | Validation Rules | Description |
+| :--- | :--- | :--- | :--- |
+| `version` | `INTEGER` | `PRIMARY KEY` | Incremental integer representing migration level. |
+| `applied_at` | `TIMESTAMP` | `DEFAULT CURRENT_TIMESTAMP` | Date and time when the schema migration was applied. |
 
-## 3. Datenfluss und Systemprozesse
+### 1.2 Orders Table (`orders`)
+Records intended and submitted orders.
 
-Der Lebenszyklus einer Ordergruppe erstreckt sich über mehrere Phasen von der Erkennung der CSV bis zum finalen PnL-Settlement.
+| Variable Name | Data Type | Validation Rules | Description |
+| :--- | :--- | :--- | :--- |
+| `order_id` | `INTEGER` | `PRIMARY KEY` | TWS-assigned order ID (negative integers represent local temp IDs). |
+| `perm_id` | `INTEGER` | `NULLABLE`, `UNIQUE` (partial index) | Permanent unique TWS ID once the order executes or gets confirmed. |
+| `parent_id` | `INTEGER` | `NULLABLE`, `FOREIGN KEY` | Reference to parent `order_id` (`ENTRY` order) with cascade updates. |
+| `trade_group_id` | `TEXT` | `NOT NULL` | Group key connecting bracket orders (e.g. entry, target, stop). |
+| `account_id` | `TEXT` | `NOT NULL` | The target Interactive Brokers brokerage account. |
+| `bracket_role` | `TEXT` | `CHECK IN ('ENTRY', 'SL', 'TP', 'EXIT')` | Structural role of the order in the trade group bracket. |
+| `symbol` | `TEXT` | `NOT NULL` | Ticker symbol of the equity asset (e.g. AAPL). |
+| `sec_type` | `TEXT` | `CHECK = 'STK'` | Asset class; exclusively equities ('STK') are supported. |
+| `exchange` | `TEXT` | `CHECK = 'SMART'` | Router routing target (exclusively SMART router is supported). |
+| `action` | `TEXT` | `CHECK IN ('BUY', 'SELL')` | The trade direction side. |
+| `quantity` | `INTEGER` | `NOT NULL`, `CHECK (quantity > 0)` | Scaled quantity of shares to trade. |
+| `order_type` | `TEXT` | `NOT NULL` | Order type class (e.g., LMT, STP, MKT, MOC). |
+| `target_price` | `REAL` | `NULLABLE` (Decimal precision) | Limit/Stop price. Mandatory if type is LMT or STP. |
+| `tif` | `TEXT` | `DEFAULT 'GTC'` | Time-In-Force (e.g., DAY, GTC). |
+| `strategy_name` | `TEXT` | `NULLABLE` | Name of the generating trading logic/strategy. |
+| `status` | `TEXT` | `CHECK IN ('Created', ...)` | Order lifecycle state. |
+| `retry_count` | `INTEGER` | `DEFAULT 0` | Current counter of transmission retries. |
+| `transmitted_at` | `TIMESTAMP` | `NULLABLE` | Timestamp when successfully sent to TWS. |
 
-```mermaid
-flowchart TD
-    A[orders_YYYY_MM_DD.csv] -->|1. Scan & DoS-Schutz| Watcher[csv_directory_watcher]
-    Watcher -->|2. Validierung| CSVReader[csv_reader.py]
-    Watcher -->|3. Abfrage Kontodaten| Sizing[importer.py Sizing / Downscaling]
-    Sizing -->|4. UPSERT mit negativer ID| DB[(SQLite WAL)]
-    Sizing -->|5. Queue-Push| Queue(((asyncio.Queue)))
-    
-    Queue -->|6. Queue-Pop| Worker[execution_worker]
-    Worker -->|7. Pre-Trade Margin & Cushion Check| Worker
-    Worker -->|8. Reserviere TWS-ID & DB-Cascade| TWS_API((IBKR TWS / Gateway))
-    Worker -->|9. Order-Übermittlung parent/child| TWS_API
-    
-    TWS_API -->|10. execDetailsEvent / orderStatusEvent| CB[callbacks.py]
-    CB -->|11. Status-Update / Exec-Schreiben| DB
-    CB -->|12. Wenn EXIT gefüllt: Trigger| Settlement[settlement.py]
-    Settlement -->|13. Berechne VWAP, Slippage & PnL| DB
-    Settlement -->|14. Status-Meldung| Notifier[notifier.py Telegram]
-```
+* **Constraints & Indexes**:
+  * `UNIQUE (account_id, trade_group_id, bracket_role, order_type)`: Prevents duplicate roles under same order types within a trade group.
+  * `FOREIGN KEY (parent_id) REFERENCES orders (order_id) ON UPDATE CASCADE ON DELETE SET NULL`
+  * `idx_orders_perm_id`: Unique partial index on `perm_id` WHERE `perm_id IS NOT NULL AND perm_id != 0`.
+  * `idx_orders_trade_group`: Index on `trade_group_id`.
+  * `idx_orders_status`: Index on `status`.
 
-### 3.1 Phase 1: Import & Validierung
-1.  Der Hintergrunddienst [`csv_directory_watcher`](file:///Users/produktmanagement/Python/github/TradeManager/app/services/importer.py#L40) scannt `data/orders/` auf Muster `orders_YYYY_MM_DD.csv`.
-2.  **Ressourcenschutz**: Überschreitet die Datei die konfigurierte Maximalgröße (`max_csv_size_bytes`, z. B. 5 MB), wird der Import blockiert.
-3.  Die Datei wird geparst. Der [`csv_reader`](file:///Users/produktmanagement/Python/github/TradeManager/app/services/csv_reader.py) prüft über [`validate_group`](file:///Users/produktmanagement/Python/github/TradeManager/app/services/csv_reader.py#L19) formale Konsistenzen (Einheitliches Symbol, Konto, Richtungen von ENTRY vs. SL/TP/EXIT, Limitpreis-Pflicht).
-4.  Bei Fehlern wird die Datei in `.csv.err` umbenannt und eine Telegram-Fehlermeldung gesendet. Bei Erfolg wird sie in `.csv.bak` archiviert.
+### 1.3 Executions Table (`executions`)
+Tracks transaction details reported from TWS callbacks.
 
-### 3.2 Phase 2: Positionsgrößenbestimmung (Sizing) & DB-Persistenz
-Der [`importer`](file:///Users/produktmanagement/Python/github/TradeManager/app/services/importer.py) berechnet die endgültige Order-Stückzahl (`quantity`) asynchron vor dem DB-Schreiben:
-*   **Modi**:
-    *   `total_cash`: Das Zuteilungslimit entspricht dem reinen Barbestand (`TotalCashValue`).
-    *   `margin_adjusted_capital`: Limit basiert auf Netto-Liquidationswert, Margin-Multiplikator und Allokationslimit-Prozentsatz, gedeckelt durch die verbleibende Buying Power.
-*   **Symmetrisches Downscaling**: Übersteigen die prognostizierten Kosten der Ordergruppe das Limit, wird die Stückzahl aller Legs (ENTRY, SL, TP, EXIT) symmetrisch herunterskaliert, um Absicherungen verhältnisgleich zu halten. Sinkt die Stückzahl auf 0, wird die gesamte Gruppe verworfen.
-*   Die berechneten Legs werden mit **temporären negativen IDs** (z. B. `-1`, `-2`) in die `orders`-Tabelle via UPSERT eingepflegt. Fremdschlüssel-Constraints aktualisieren verknüpfte Kind-Orders automatisch (`ON UPDATE CASCADE`), sobald die TWS-API-Order-ID zugewiesen wird.
-*   Die `trade_group_id` wird in die `asyncio.Queue` geschoben.
+| Variable Name | Data Type | Validation Rules | Description |
+| :--- | :--- | :--- | :--- |
+| `exec_id` | `TEXT` | `PRIMARY KEY` | TWS execution ID (uniquely identifies a partial fill). |
+| `order_id` | `INTEGER` | `NOT NULL`, `FOREIGN KEY` | Reference to corresponding order row in database. |
+| `price` | `REAL` | `NOT NULL` (Decimal precision) | Trade fill execution price. |
+| `qty` | `REAL` | `NOT NULL` (Decimal precision) | Number of shares filled in this transaction. |
+| `commission` | `REAL` | `NULLABLE` | Trade commission fee (populated later by commission callback). |
+| `currency` | `TEXT` | `NULLABLE` | Execution currency (e.g., USD). |
+| `executed_at` | `TIMESTAMP` | `NULLABLE` | Timestamp when the execution event occurred. |
 
-### 3.3 Phase 3: Execution Worker & Orderübermittlung
-Der [`execution_worker`](file:///Users/produktmanagement/Python/github/TradeManager/app/trading/worker.py#L32) verarbeitet die Queue:
-1.  **Verbindungstest**: Ist die TWS offline, wartet der Worker asynchron.
-2.  **Cushion & Pre-Trade Margin Check**:
-    *   **Cushion**: Ist das freie Polster `< min_cushion_pct` (z. B. 10 %), bricht die Order abbruch (Status: `Error`).
-    *   **What-If Simulation**: Das System sendet die Order mit `whatIf = True` an IBKR. Erhöht die Initial Margin die Gesamtauslastung über `max_margin_usage_pct` (z. B. 80 %), bricht der Vorgang ab. Bei Simulations-Timeout (> 5,0s) gilt **Fail-Closed**: Abbruch und Markierung der Order als `Error`.
-3.  **TWS-ID Reservierung**: Der Worker akquiriert das asynchrone [`ORDER_ID_LOCK`](file:///Users/produktmanagement/Python/github/TradeManager/app/trading/worker.py#L29), holt eine freie ID über `getReqId()` von TWS und aktualisiert die temporäre negative ID in der DB, wodurch das DB-Cascade greift.
-4.  **Platzierung**: Die ENTRY-Order wird mit `transmit=False` gesendet. Erst nach Absenden aller Child-Orders (SL, TP, EXIT) wird das letzte Leg mit `transmit=True` gesendet, um die Ordergruppe atomar freizugeben.
-5.  **Post-Fill Exits**: Bei nachträglichem Import von Exit-Orders für bereits ausgeführte Entries wird über `ib.positions()` ein Live-Depotabgleich durchgeführt, um Überverkäufe zu verhindern.
+* **Indexes**:
+  * `idx_executions_order_id`: Index on `order_id`.
 
-### 3.4 Phase 4: Event-Handling & Callbacks
-Der [`TwsCallbacksManager`](file:///Users/produktmanagement/Python/github/TradeManager/app/trading/callbacks.py) verarbeitet asynchron die TWS-Events:
-*   `orderStatusEvent`: Aktualisiert den Status einer Order (`Submitted`, `PreSubmitted`, `Filled`, `Cancelled`, `Error`) in der DB. Bei `Filled` wird das Settlement angestoßen.
-*   `execDetailsEvent`: Speichert jede Teilausführung in der Tabelle `executions` zur VWAP-Ermittlung ab.
-*   `commissionReportEvent`: Ergänzt die exakte Ausführungsgebühr in der Tabelle `executions`.
-*   `errorEvent`: Klassifiziert Fehler über [`error_codes.py`](file:///Users/produktmanagement/Python/github/TradeManager/app/trading/error_codes.py). Transiente Fehler (z. B. Netzwerk, Rate-Limits) triggern einen exponentiellen Backoff ([`retry.py`](file:///Users/produktmanagement/Python/github/TradeManager/app/trading/retry.py)) und die Rücksetzung der Order auf `Created` zwecks Re-queue.
+### 1.4 Trades Settlement Table (`trades_settlement`)
+Aggregates and persists final trade results.
 
-### 3.5 Phase 5: Trade Settlement & PnL-Berechnung
-Sobald ein schließendes Exit-Leg (`SL`, `TP`, `EXIT`) den Zustand `Filled` erreicht, berechnet [`settlement.py`](file:///Users/produktmanagement/Python/github/TradeManager/app/trading/settlement.py) das Trade-Ergebnis:
-1.  **VWAP (Einstieg/Ausstieg)**: $\sum(\text{Menge}_i \times \text{Preis}_i) / \sum(\text{Menge}_i)$ basierend auf den Einträgen in `executions`.
-2.  **Slippage**: Abweichung zwischen dem in der CSV definierten `TargetPrice` und dem realisierten Einstiegs-VWAP.
-3.  **Netto-PnL**: Brutto-Ergebnis abzüglich aller in `executions` erfassten Kommissionen.
-4.  Die Ergebnisse werden transaktionsgesichert in `trades_settlement` geschrieben und ein detaillierter HTML-Report wird via Telegram verschickt.
+| Variable Name | Data Type | Validation Rules | Description |
+| :--- | :--- | :--- | :--- |
+| `account_id` | `TEXT` | `NOT NULL` | Brokerage account ID. |
+| `trade_group_id` | `TEXT` | `NOT NULL` | Group key connecting the entry and exit legs. |
+| `avg_entry_price` | `REAL` | `NOT NULL` (Decimal precision) | Calculated average VWAP entry price across execution parts. |
+| `avg_exit_price` | `REAL` | `NOT NULL` (Decimal precision) | Calculated average VWAP exit price across execution parts. |
+| `price_diff_slippage`| `REAL` | `NOT NULL` (Decimal precision) | Difference between the intended target price and executed price. |
+| `total_commissions` | `REAL` | `NOT NULL` (Decimal precision) | Sum of commissions from all linked executions. |
+| `net_pnl` | `REAL` | `NOT NULL` (Decimal precision) | Profit or Loss calculated as `(Exit Price - Entry Price) * Qty - Fees`. |
+| `settled_at` | `TIMESTAMP` | `DEFAULT CURRENT_TIMESTAMP` | Timestamp indicating when settlement calculations finalized. |
 
-### 3.6 Phase 6: Systemüberwachung (Alert-Watcher & Heartbeat)
-*   **Alert-Watcher**: Der [`alert_watcher`](file:///Users/produktmanagement/Python/github/TradeManager/app/services/alert_watcher.py#L22) läuft im Hintergrund und meldet hängende Orders (länger als `dead_order_threshold_minutes` ohne Statusänderung) sowie hohe Slippage-Abweichungen per Telegram.
-*   **Status-Sync**: Alle 5 Minuten führt der Watcher [`order_status_sync_loop`](file:///Users/produktmanagement/Python/github/TradeManager/app/services/alert_watcher.py#L90) eine Recovery ([`recovery.py`](file:///Users/produktmanagement/Python/github/TradeManager/app/trading/recovery.py)) durch, um Offline-Fills oder stornierte Orders abzugleichen.
-*   **Keep-Alive & Gateway-Neustart**: Ein asynchroner Ping (`reqCurrentTimeAsync()`) prüft minütlich die Socket-Verbindung. Zwischen 12:00 und 12:05 Uhr (geplanter IBKR Docker-Gateway-Neustart) wird der Heartbeat pausiert, Alarme werden unterdrückt und der Worker wartet, bis die Verbindung wiederhergestellt ist.
+* **Constraints**:
+  * `PRIMARY KEY (account_id, trade_group_id)`
 
 ---
 
-## 4. Datenmodell & Zustandswerte
+## 2. CSV Interface Specification
 
-Das System speichert Daten in der SQLite-Datenbank `data/trading.db` mit aktivierten Fremdschlüsseln und WAL (Write-Ahead Logging).
+Daily files must follow the pattern `orders_YYYY_MM_DD.csv` and use UTF-8-sig encoding.
 
-### 4.1 Datenklassen-Modelle
-Alle Modelle sind als `@dataclass(frozen=True)` in [`app/core/models.py`](file:///Users/produktmanagement/Python/github/TradeManager/app/core/models.py) definiert:
-*   [`LegRow`](file:///Users/produktmanagement/Python/github/TradeManager/app/core/models.py#L37): Bildet die unveränderlichen Zeilen der CSV-Importdatei ab.
-*   [`OrderRow`](file:///Users/produktmanagement/Python/github/TradeManager/app/core/models.py#L59): Repräsentiert die Order-Absicht (Intention). Der Zustand wird über funktionale Kopien mittels `dataclasses.replace` fortgeschrieben und in die Tabelle `orders` geschrieben.
-*   [`ExecutionRow`](file:///Users/produktmanagement/Python/github/TradeManager/app/core/models.py#L111): Erfasst physische Teilausführungen (Realisierung) der TWS, verknüpft mit `orders.order_id`.
-*   [`SettlementRow`](file:///Users/produktmanagement/Python/github/TradeManager/app/core/models.py#L128): Hält die konsolidierten Ergebnisse eines geschlossenen Trades.
+### 2.1 CSV Fields Contract
 
-### 4.2 Lebenszyklus einer Order (`OrderRow.status`)
-```
-Created (Import) ──> Submitted (Worker gesendet) ──> PreSubmitted (TWS empfangen) ──> Filled (Ausgeführt)
-    │                       │
-    └──> Error (Fehlgeschl.) └──> Cancelled (Storniert)
-```
+| Variable Name | Data Type | Validation Rules | Description |
+| :--- | :--- | :--- | :--- |
+| `trade_group_id` | `TEXT` | `NOT NULL`, max length 64 | Unique ID linking ENTRY and exit orders of a trade setup. |
+| `bracket_role` | `TEXT` | `IN ('ENTRY', 'SL', 'TP', 'EXIT')` | Bracket execution classification role. Case-insensitive. |
+| `symbol` | `TEXT` | `NOT NULL`, uppercase letters | Asset symbol representing target trade instrument. |
+| `sec_type` | `TEXT` | `CHECK = 'STK'` | Asset type; must match 'STK' (Equities). |
+| `exchange` | `TEXT` | `CHECK = 'SMART'` | Trading exchange target; must match 'SMART'. |
+| `account_id` | `TEXT` | `NOT NULL` | Associated Interactive Brokers account identifier. |
+| `action` | `TEXT` | `IN ('BUY', 'SELL')` | Buying or selling trading side. Case-insensitive. |
+| `quantity` | `INTEGER` | `NOT NULL`, `quantity > 0` | Target amount of shares proposed to trade. |
+| `order_type` | `TEXT` | `IN ('LMT', 'STP', 'MKT', 'MOC')` | Execution trigger style (Limit, Stop, Market, Market-on-Close). |
+| `target_price` | `Decimal` | `Positive if LMT/STP`, `Empty if MKT/MOC` | Reference limit or trigger activation price boundary. |
+| `tif` | `TEXT` | `IN ('DAY', 'GTC')`, `Default: 'GTC'` | Order validity duration instruction (Time-In-Force). |
+| `strategy_name` | `TEXT` | `Optional` | Strategy system classification key name. |
+
+### 2.2 Time Format Contract
+Datetime variables are formatted as **ISO-8601 strings with timezone offset**:
+* Syntax Pattern: `YYYY-MM-DDTHH:MM:SS±HH:MM`
+* Example: `2026-07-07T13:21:02+02:00`
 
 ---
 
-## 5. Externe Abhängigkeiten
+## 3. Internal Python Data Structures
 
-Die Kernkomponenten minimieren externe Frameworks und stützen sich vorrangig auf die Python-Standardbibliothek.
+Mapping model classes in [app/core/models.py](file:///Users/produktmanagement/Python/github/TradeManager/app/core/models.py) are immutable `@dataclass(frozen=True)` containers.
 
-| Abhängigkeit | Mindestversion | Zweck / Einsatzgebiet |
+### 3.1 Dataclass Definitions
+
+| Class Name | Fields / Data Types | Purpose |
 | :--- | :--- | :--- |
-| **`ib_async`** | $\ge$ 1.0.0 | Asynchroner Client zur Interactive Brokers TWS API ([`ib_async`](https://github.com/erdewit/ib_async)) |
-| **`aiosqlite`** | $\ge$ 0.20.0 | Asynchrone Anbindung der SQLite-Datenbank |
-| **`aiohttp`** | $\ge$ 3.9.0 | Asynchroner HTTP-Client für die Anbindung der Telegram-Bot-API |
-| **`structlog`** | $\ge$ 24.0.0 | Strukturiertes, maschinenlesbares JSON/Console-Logging |
-| **`pytest`** | $\ge$ 8.0.0 | Test-Framework für Unittests |
-| **`pytest-asyncio`** | $\ge$ 0.23.0 | Unterstützung asynchroner Testfälle |
-| **`pytest-cov`** | $\ge$ 5.0.0 | Testabdeckungsberichte |
+| `LegRow` | `trade_group_id: str`<br>`bracket_role: str`<br>`symbol: str`<br>`sec_type: str`<br>`exchange: str`<br>`account_id: str`<br>`action: str`<br>`quantity: int`<br>`order_type: str`<br>`target_price: Decimal \| None`<br>`tif: str`<br>`strategy_name: str` | Parsed representation of a raw CSV import row before any sizing or DB write. |
+| `OrderRow` | `order_id: int`<br>`perm_id: int \| None`<br>`parent_id: int \| None`<br>`trade_group_id: str`<br>`account_id: str`<br>`bracket_role: str`<br>`symbol: str`<br>`sec_type: str`<br>`exchange: str`<br>`action: str`<br>`quantity: int`<br>`order_type: str`<br>`target_price: Decimal \| None`<br>`tif: str`<br>`strategy_name: str \| None`<br>`status: str`<br>`retry_count: int = 0`<br>`transmitted_at: str \| None = None` | Persistent intent record representing the database representation. Copied using `dataclasses.replace` to modify state. |
+| `ExecutionRow` | `exec_id: str`<br>`order_id: int`<br>`price: Decimal`<br>`qty: Decimal`<br>`commission: Decimal \| None = None`<br>`currency: str \| None = None`<br>`executed_at: str \| None = None` | Atomic execution ticket representing partial/total fill reports. |
+| `SettlementRow` | `account_id: str`<br>`trade_group_id: str`<br>`avg_entry_price: Decimal`<br>`avg_exit_price: Decimal`<br>`price_diff_slippage: Decimal`<br>`total_commissions: Decimal`<br>`net_pnl: Decimal`<br>`settled_at: str \| None = None` | Settlement result structure generated when exit leg completes. |
+
+---
+
+## 4. State Machine Transitions
+
+The lifecycle status changes of a trade group's order are stateful and governed by the SQLite database states:
+
+```
+                  ┌──────────────┐
+                  │   Created    │ (Initially imported)
+                  └──────┬───────┘
+                         │
+                         ▼ (Placed to queue -> Transmit initiated)
+                  ┌──────────────┐
+                  │  Submitted   │ (Sent to Interactive Brokers socket)
+                  └──────┬───────┘
+                         │
+        ┌────────────────┼────────────────┐
+        ▼ (TWS Ack)      ▼ (TWS Cancel)   ▼ (Error/Timeout)
+  ┌──────────────┐┌──────────────┐┌──────────────┐
+  │ PreSubmitted ││  Cancelled   ││    Error     │ (Fail-Closed)
+  └──────┬───────┘└──────────────┘└──────────────┘
+         │
+         ▼ (TWS Fill Callback)
+  ┌──────────────┐
+  │    Filled    │ (Triggers Settlement)
+  └──────────────┘
+```
+
+| Source State | Destination State | Trigger Rule / Conditions |
+| :--- | :--- | :--- |
+| — | `Created` | Order record is parsed, downscaled successfully, and written to database. |
+| `Created` | `Submitted` | Queue worker transmits parent/child legs to IBKR socket (first parent exit, then parent entry). |
+| `Submitted` | `PreSubmitted` | Gateway returns receipt acknowledgment event. |
+| `Submitted` | `Error` | What-If simulation fails, connection is severed, or API submission returns immediate error. |
+| `PreSubmitted`| `Filled` | Order average fill price and size matches requested target amount. Triggers settlement computation. |
+| `PreSubmitted`| `Cancelled` | Execution is halted via manual intervention, auto-purge, or TWS error cancellation. |
+| `PreSubmitted`| `Error` | Connection disconnect limits exceeded, or Gateway reports failed transmission error. |
+| `Submitted` | `Cancelled` | Brokerage cancels the order context before Gateway processing. |
+
+---
+
+## 5. Error Classification & Actions Matrix
+
+Governed by [app/trading/error_codes.py](file:///Users/produktmanagement/Python/github/TradeManager/app/trading/error_codes.py), IBKR API error codes map to system actions.
+
+| Error Class | Associated Codes | System Action / Response |
+| :--- | :--- | :--- |
+| **`INFO`** | `2104`, `2106`, `2107`, `2108`, `2119`, `2158`, `2100`, `2182`, `399` | Log warning/info. No execution actions are taken. System execution continues undisturbed. |
+| **`RECONNECT`**| `1101`, `1102` | Pause outgoing transmissions. Block queue consumption. Gateway disconnect check logic starts. Resume once connection events clear. |
+| **`RETRIABLE`**| `1100`, `1300`, `10148`, `502`, `504`, `162` | Queue worker backs off exponentially. Status reverts to `Created`. Order is queued again for retry (up to max configured retries limit). |
+| **`CANCEL`** | `202`, `10147`, `10149`, `10268` | Order marked as `Cancelled` in database. Stop execution of remaining bracket elements if necessary to prevent exposure. |
+| **`FATAL`** | *All other codes* (default) | Halt order transmission. Mark status as `Error`. Alert administrator immediately via Telegram message (Critical notification). |

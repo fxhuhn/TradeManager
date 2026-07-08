@@ -1,260 +1,231 @@
-# Systemarchitektur: TradeManager
+# TradeManager: High-Level System Architecture
 
-Dieses Dokument beschreibt die Software-Architektur, Datenflüsse und Abhängigkeiten des **Interactive Brokers Equities Trading System (TradeManager)**. Es dient nachfolgenden Agenten und Entwicklern als schneller Einstieg in die Codebase.
-
----
-
-## 1. Verzeichnisstruktur (Directory Structure)
-
-Die Codebase ist nach dem Prinzip **Functional Core, Imperative Shell** aufgebaut. Mathematische Berechnungen und Logik sind frei von Seiteneffekten (Functional Core), während Ein-/Ausgabe, Netzwerk und Persistenz in äußeren Schichten gekapselt sind (Imperative Shell).
-
-```text
-TradeManager/
-├── app/                      # Quellcode der Hauptanwendung
-│   ├── core/                 # Systemkonfiguration und Dateninfrastruktur
-│   │   ├── config.py         #   Laden von config.toml und .env
-│   │   ├── db.py             #   Verbindung im SQLite WAL-Modus, Transaktions- und Migrationssteuerung
-│   │   ├── logging_setup.py  #   Strukturiertes JSON-Logging über structlog
-│   │   └── models.py         #   Immutable Datenklassen (LegRow, OrderRow, ExecutionRow, SettlementRow)
-│   ├── services/             # Hintergrunddienste für Dateimonitoring und Alarmierung
-│   │   ├── alert_watcher.py  #   Dead-Order- und Slippage-Monitoring
-│   │   ├── csv_reader.py     #   Einlesen und Gruppenvalidierung der CSV-Orderzeilen
-│   │   ├── importer.py       #   CSV-Import, Positionsgrößenbestimmung (Sizing), DB-UPSERT
-│   │   └── notifier.py       #   Asynchroner Telegram-Client mit Rate-Limiting
-│   ├── trading/              # Kern-Ausführungslogik und TWS-Kopplung
-│   │   ├── callbacks.py      #   Event-Handler der TWS (Status, Fills, Commissions, Errors)
-│   │   ├── error_codes.py    #   TWS-Fehlerklassifikation (INFO, RETRIABLE, FATAL etc.)
-│   │   ├── order_builder.py  #   Instanziierung von ib_async Order- und Contract-Objekten
-│   │   ├── recovery.py       #   Zustandsabgleich (Startup & periodisch) zwischen DB und TWS
-│   │   ├── retry.py          #   Exponentieller Backoff für transiente API-Fehler
-│   │   ├── settlement.py     #   PnL-, VWAP- und Slippage-Berechnung
-│   │   └── worker.py         #   Execution Worker (Queue-Consumer zur Orderübermittlung)
-│   └── main.py               # Haupteinstiegspunkt & Orchestrierung
-├── doc/                      # Ausführliche PDF-Konzepte und Benutzerhandbücher
-│   └── README.md             #   Umfangreiches Benutzer- und Wartungshandbuch
-├── migrations/               # Datenbankmigrationen
-│   └── 001_initial.sql       #   SQL-Initialisierungsschema
-├── references/               # Systemdokumentation für Agenten
-│   └── architecture.md       #   (Dieses Dokument)
-├── scripts/                  # Hilfs-, Analyse- und Diagnoseskripte
-│   ├── check_tws.py          #   TWS-Verbindungs- und Kontostatus-Check
-│   ├── dry_run_today.py      #   Lokaler Dry Run des heutigen Imports (ohne DB-Schreiben / Orderübermittlung)
-│   ├── run_dry_run_today.py  #   Dry Run auf einer Kopie der Produktionsdatenbank
-│   └── run_simulation.py     #   Lokaler End-to-End Systemsimulationstest mit Mock-TWS
-└── tests/                    # Unittests und Systemtests (pytest)
-```
+This document describes the high-level architecture, dataflow topologies, and invariants of the **Interactive Brokers Equities Trading System (TradeManager)**.
 
 ---
 
-## 2. Zentrale Einstiegspunkte (Entrypoints)
+## 1. System Context & Overview
 
-### 2.1 Hauptanwendung
-*   **[`app/main.py`](app/main.py)**: Der Haupteinstiegspunkt startet den [`TradingSystemOrchestrator`](app/main.py#L48). Er führt nacheinander die Konfigurationsanalyse, die DB-Integritätsprüfung (mittels `PRAGMA integrity_check`), die Schema-Migrationen durch und stellt die asynchrone Verbindung via `ib_async` zur TWS/Gateway her. Anschließend werden die asynchronen Hintergrunddienste gestartet und der Signal-Handler für einen Graceful Shutdown registriert.
-
-### 2.2 CLI-Hilfsprogramme (Scripts)
-*   **[`scripts/check_tws.py`](scripts/check_tws.py)**: Prüft Konnektivität zur Trader Workstation (TWS) und gibt Kontometriken wie `NetLiquidationValue`, `TotalCashValue` und `AvailableFunds` aus.
-*   **[`scripts/dry_run_today.py`](scripts/dry_run_today.py)**: Simuliert das Parsing, die Validierung und die Positionsgrößenberechnung der heutigen CSV-Orderdatei (`data/orders/orders_YYYY_MM_DD.csv`), ohne reale Bestellungen abzusetzen oder Daten zu persistieren.
-*   **[`scripts/run_dry_run_today.py`](scripts/run_dry_run_today.py)**: Arbeitet auf einer physischen Kopie der Produktionsdatenbank und simuliert auch Live-Depotabgleiche von Exit-Orders.
-*   **[`scripts/run_simulation.py`](scripts/run_simulation.py)**: Führt einen vollständigen lokalen E2E-Integrationstest unter Verwendung eines Mocks der TWS-Schnittstelle durch.
-
----
-
-## 3. Datenfluss und Systemprozesse
-
-Der Lebenszyklus einer Ordergruppe erstreckt sich über mehrere Phasen von der Erkennung der CSV bis zum finalen PnL-Settlement.
+TradeManager is an automated equities trading execution and settlement system designed to process daily target portfolios via Interactive Brokers (IBKR). The system functions asynchronously, consuming daily targets from a structured CSV, scaling order sizing dynamically relative to available capital, and executing order groups via IBKR TWS/Gateway while maintaining high-precision local state and real-time alerts.
 
 ```mermaid
-flowchart TD
-    A[orders_YYYY_MM_DD.csv] -->|1. Scan & DoS-Schutz| Watcher[csv_directory_watcher]
-    Watcher -->|2. Validierung| CSVReader[csv_reader.py]
-    Watcher -->|3. Abfrage Kontodaten| Sizing[importer.py Sizing / Downscaling]
-    Sizing -->|4. UPSERT mit negativer ID| DB[(SQLite WAL)]
-    Sizing -->|5. Queue-Push| Queue(((asyncio.Queue)))
+flowchart TB
+    subgraph Filesystem
+        CSV[orders_YYYY_MM_DD.csv]
+    end
+
+    subgraph Imperative Shell [Imperative Shell: Side Effects & Orchestration]
+        Watcher[csv_directory_watcher]
+        Importer[importer.py: Sizing & Import]
+        DB[(SQLite WAL DB)]
+        Queue(((asyncio.Queue)))
+        Worker[execution_worker.py]
+        Callbacks[callbacks.py: TwsCallbacksManager]
+        Notifier[notifier.py: TelegramNotifier]
+        Alerts[alert_watcher.py: AlertWatcher]
+        Recovery[recovery.py: Status Sync]
+    end
+
+    subgraph Functional Core [Functional Core: Pure Math & Rules]
+        CSVReader[csv_reader.py: Bracket Validation]
+        SizingMath[importer.py: Downscaling Math]
+        OrderBuilder[order_builder.py: ib_async Orders]
+        ErrorCodes[error_codes.py: Error Classification]
+        Settlement[settlement.py: VWAP & PnL Math]
+    end
+
+    subgraph External [External Interfaces]
+        IBKR((IBKR TWS / Gateway))
+        Telegram((Telegram API))
+    end
+
+    %% Flow connections
+    CSV -->|Detect file| Watcher
+    Watcher -->|Raw strings| CSVReader
+    CSVReader -->|LegRow structures| Watcher
+    Watcher -->|Compute sizing limits| Importer
+    Importer -->|Scale quantities| SizingMath
+    SizingMath -->|Scaled LegRow list| Importer
+    Importer -->|UPSERT orders| DB
+    Importer -->|Push trade_group_id| Queue
+
+    Queue -->|Pop trade_group_id| Worker
+    Worker -->|Fetch orders| DB
+    Worker -->|Pre-Trade Simulation| IBKR
+    Worker -->|Build contract & order| OrderBuilder
+    Worker -->|Transmit order groups| IBKR
+    Worker -->|Update order IDs| DB
+
+    IBKR -->|Events / status / fills| Callbacks
+    Callbacks -->|Write Executions / Orders| DB
+    Callbacks -->|Trigger PnL| Settlement
+    Settlement -->|Calculate VWAP & Net PnL| Callbacks
+    Callbacks -->|Persist Settlement| DB
+    Callbacks -->|Send Messages| Notifier
     
-    Queue -->|6. Queue-Pop| Worker[execution_worker]
-    Worker -->|7. Pre-Trade Margin & Cushion Check| Worker
-    Worker -->|8. Reserviere TWS-ID & DB-Cascade| TWS_API((IBKR TWS / Gateway))
-    Worker -->|9. Order-Übermittlung parent/child| TWS_API
-    
-    TWS_API -->|10. execDetailsEvent / orderStatusEvent| CB[callbacks.py]
-    CB -->|11. Status-Update / Exec-Schreiben| DB
-    CB -->|12. Wenn EXIT gefüllt: Trigger| Settlement[settlement.py]
-    Settlement -->|13. Berechne VWAP, Slippage & PnL| DB
-    Settlement -->|14. Status-Meldung| Notifier[notifier.py Telegram]
-```
+    Alerts -.->|Read & Scan| DB
+    Alerts -.->|Dead Order / Slippage| Notifier
+    Recovery -.->|Sync Active Orders| IBKR
+    Recovery -.->|Sync Database State| DB
 
-### 3.1 Phase 1: Import & Validierung
-1.  Der Hintergrunddienst [`csv_directory_watcher`](app/services/importer.py#L40) scannt `data/orders/` auf Muster `orders_YYYY_MM_DD.csv`.
-2.  **Ressourcenschutz**: Überschreitet die Datei die konfigurierte Maximalgröße (`max_csv_size_bytes`, z. B. 5 MB), wird der Import blockiert.
-3.  Die Datei wird geparst. Der [`csv_reader`](app/services/csv_reader.py) prüft über [`validate_group`](app/services/csv_reader.py#L19) formale Konsistenzen (Einheitliches Symbol, Konto, Richtungen von ENTRY vs. SL/TP/EXIT, Limitpreis-Pflicht).
-4.  **Spezielle Import- und Filterregeln**:
-    *   **DipBuyer-Wochentagsregelung**: Der Aufbau neuer Positionen (Erstellung von `ENTRY`-Legs) für die `DipBuyer`-Strategie ist nur am **Montag und Dienstag** erlaubt. Ab Mittwoch (einschließlich) werden `ENTRY`-Legs automatisch vor dem Import verworfen. Die verbleibenden Exit-Legs (SL, TP, EXIT) einer Gruppe werden in diesem Fall nur importiert, wenn bereits ein passender `ENTRY`-Eintrag für diese `trade_group_id` in der Datenbank existiert (andernfalls wird die Gruppe übersprungen).
-    *   **Umgang mit Standalone-Exits**: Wird eine Exit-Order (SL, TP, EXIT) importiert, zu der kein korrespondierender `ENTRY`-Eintrag in der Datenbank existiert (z. B. durch Wochentags-Überspringung oder manuelle Anpassung), bricht dieser spezifische Importvorgang für die betroffene Trade-Gruppe mit einer Fehlermeldung (`ValueError`) und einer Telegram-Benachrichtigung ab. Der Import der **verbleibenden, korrekten Ordergruppen** in der CSV-Datei wird jedoch fortgesetzt (kein Gesamt-Dateistopp).
-5.  Bei kritischen Dateifehlern (z. B. ungültiges Dateiformat) oder generellen Fehlern wird die Datei in `.csv.err` umbenannt und eine Telegram-Fehlermeldung gesendet. Bei erfolgreichem Einlesen aller verarbeitbaren Gruppen wird sie in `.csv.bak` archiviert.
-
-### 3.2 Phase 2: Positionsgrößenbestimmung (Sizing) & DB-Persistenz
-Der [`importer`](app/services/importer.py) berechnet die endgültige Order-Stückzahl (`quantity`) asynchron vor dem DB-Schreiben:
-*   **Modi**:
-    *   `total_cash`: Das Zuteilungslimit entspricht dem reinen Barbestand (`TotalCashValue`).
-    *   `margin_adjusted_capital`: Limit basiert auf Netto-Liquidationswert, Margin-Multiplikator und Allokationslimit-Prozentsatz, gedeckelt durch die verbleibende Buying Power.
-*   **Symmetrisches Downscaling**: Übersteigen die prognostizierten Kosten der Ordergruppe das Limit, wird die Stückzahl aller Legs (ENTRY, SL, TP, EXIT) symmetrisch herunterskaliert, um Absicherungen verhältnisgleich zu halten. Sinkt die Stückzahl auf 0, wird die gesamte Gruppe verworfen.
-*   Die berechneten Legs werden mit **temporären negativen IDs** (z. B. `-1`, `-2`) in die `orders`-Tabelle via UPSERT eingepflegt. Fremdschlüssel-Constraints aktualisieren verknüpfte Kind-Orders automatisch (`ON UPDATE CASCADE`), sobald die TWS-API-Order-ID zugewiesen wird.
-*   Die `trade_group_id` wird in die `asyncio.Queue` geschoben.
-
-### 3.3 Phase 3: Execution Worker & Orderübermittlung
-Der [`execution_worker`](app/trading/worker.py#L32) verarbeitet die Queue:
-1.  **Verbindungstest**: Ist die TWS offline, wartet der Worker asynchron.
-2.  **Cushion & Pre-Trade Margin Check**:
-    *   **Cushion**: Ist das freie Polster `< min_cushion_pct` (z. B. 10 %), bricht die Order abbruch (Status: `Error`).
-    *   **What-If Simulation**: Das System sendet die Order mit `whatIf = True` an IBKR. Erhöht die Initial Margin die Gesamtauslastung über `max_margin_usage_pct` (z. B. 80 %), bricht der Vorgang ab. Bei Simulations-Timeout (> 5,0s) gilt **Fail-Closed**: Abbruch und Markierung der Order als `Error`.
-3.  **TWS-ID Reservierung**: Der Worker akquiriert das asynchrone [`ORDER_ID_LOCK`](app/trading/worker.py#L29), holt eine freie ID über `getReqId()` von TWS und aktualisiert die temporäre negative ID in der DB, wodurch das DB-Cascade greift.
-4.  **Platzierung**: Die ENTRY-Order wird mit `transmit=False` gesendet. Erst nach Absenden aller Child-Orders (SL, TP, EXIT) wird das letzte Leg mit `transmit=True` gesendet, um die Ordergruppe atomar freizugeben.
-5.  **Post-Fill Exits**: Bei nachträglichem Import von Exit-Orders für bereits ausgeführte Entries wird über `ib.positions()` ein Live-Depotabgleich durchgeführt, um Überverkäufe zu verhindern.
-
-### 3.4 Phase 4: Event-Handling & Callbacks
-Der [`TwsCallbacksManager`](app/trading/callbacks.py) verarbeitet asynchron die TWS-Events:
-*   `orderStatusEvent`: Aktualisiert den Status einer Order (`Submitted`, `PreSubmitted`, `Filled`, `Cancelled`, `Error`) in der DB. Bei `Filled` wird das Settlement angestoßen.
-*   `execDetailsEvent`: Speichert jede Teilausführung in der Tabelle `executions` zur VWAP-Ermittlung ab.
-*   `commissionReportEvent`: Ergänzt die exakte Ausführungsgebühr in der Tabelle `executions`.
-*   `errorEvent`: Klassifiziert Fehler über [`error_codes.py`](app/trading/error_codes.py). Transiente Fehler (z. B. Netzwerk, Rate-Limits) triggern einen exponentiellen Backoff ([`retry.py`](app/trading/retry.py)) und die Rücksetzung der Order auf `Created` zwecks Re-queue.
-
-### 3.5 Phase 5: Trade Settlement & PnL-Berechnung
-Sobald ein schließendes Exit-Leg (`SL`, `TP`, `EXIT`) den Zustand `Filled` erreicht, berechnet [`settlement.py`](app/trading/settlement.py) das Trade-Ergebnis:
-1.  **VWAP (Einstieg/Ausstieg)**: $\sum(\text{Menge}_i \times \text{Preis}_i) / \sum(\text{Menge}_i)$ basierend auf den Einträgen in `executions`.
-2.  **Slippage**: Abweichung zwischen dem in der CSV definierten `TargetPrice` und dem realisierten Einstiegs-VWAP.
-3.  **Netto-PnL**: Brutto-Ergebnis abzüglich aller in `executions` erfassten Kommissionen.
-4.  Die Ergebnisse werden transaktionsgesichert in `trades_settlement` geschrieben und ein detaillierter HTML-Report wird via Telegram verschickt.
-
-### 3.6 Phase 6: Systemüberwachung (Alert-Watcher & Heartbeat)
-*   **Alert-Watcher**: Der [`alert_watcher`](app/services/alert_watcher.py#L22) läuft im Hintergrund und meldet hängende Orders (länger als `dead_order_threshold_minutes` ohne Statusänderung) sowie hohe Slippage-Abweichungen per Telegram.
-*   **Status-Sync**: Alle 5 Minuten führt der Watcher [`order_status_sync_loop`](app/services/alert_watcher.py#L90) eine Recovery ([`recovery.py`](app/trading/recovery.py)) durch, um Offline-Fills oder stornierte Orders abzugleichen.
-*   **Keep-Alive & Gateway-Neustart**: Ein asynchroner Ping (`reqCurrentTimeAsync()`) prüft minütlich die Socket-Verbindung. Zwischen 12:00 und 12:05 Uhr (geplanter IBKR Docker-Gateway-Neustart) wird der Heartbeat pausiert, Alarme werden unterdrückt und der Worker wartet, bis die Verbindung wiederhergestellt ist.
-
----
-
-## 4. Datenmodell & Zustandswerte
-
-Das System speichert Daten in der SQLite-Datenbank `data/trading.db` mit aktivierten Fremdschlüsseln und WAL (Write-Ahead Logging).
-
-### 4.1 Datenklassen-Modelle
-Alle Modelle sind als `@dataclass(frozen=True)` in [`app/core/models.py`](app/core/models.py) definiert:
-*   [`LegRow`](app/core/models.py#L37): Bildet die unveränderlichen Zeilen der CSV-Importdatei ab.
-*   [`OrderRow`](app/core/models.py#L59): Repräsentiert die Order-Absicht (Intention). Der Zustand wird über funktionale Kopien mittels `dataclasses.replace` fortgeschrieben und in die Tabelle `orders` geschrieben.
-*   [`ExecutionRow`](app/core/models.py#L111): Erfasst physische Teilausführungen (Realisierung) der TWS, verknüpft mit `orders.order_id`.
-*   [`SettlementRow`](app/core/models.py#L128): Hält die konsolidierten Ergebnisse eines geschlossenen Trades.
-
-### 4.2 Lebenszyklus einer Order (`OrderRow.status`)
-```
-Created (Import) ──> Submitted (Worker gesendet) ──> PreSubmitted (TWS empfangen) ──> Filled (Ausgeführt)
-    │                       │
-    └──> Error (Fehlgeschl.) └──> Cancelled (Storniert)
+    Notifier -->|Send Alert / Status HTML| Telegram
 ```
 
 ---
 
-## 5. Externe Abhängigkeiten
+## 2. Architectural Design Patterns & Invariants
 
-Die Kernkomponenten minimieren externe Frameworks und stützen sich vorrangig auf die Python-Standardbibliothek.
+The system is constructed around a strict set of architectural rules to ensure deterministic execution, high reliability, and error resilience:
 
-| Abhängigkeit | Mindestversion | Zweck / Einsatzgebiet |
-| :--- | :--- | :--- |
-| **`ib_async`** | $\ge$ 1.0.0 | Asynchroner Client zur Interactive Brokers TWS API ([`ib_async`](https://github.com/erdewit/ib_async)) |
-| **`aiosqlite`** | $\ge$ 0.20.0 | Asynchrone Anbindung der SQLite-Datenbank |
-| **`aiohttp`** | $\ge$ 3.9.0 | Asynchroner HTTP-Client für die Anbindung der Telegram-Bot-API |
-| **`structlog`** | $\ge$ 24.0.0 | Strukturiertes, maschinenlesbares JSON/Console-Logging |
-| **`pytest`** | $\ge$ 8.0.0 | Test-Framework für Unittests |
-| **`pytest-asyncio`** | $\ge$ 0.23.0 | Unterstützung asynchroner Testfälle |
-| **`pytest-cov`** | $\ge$ 5.0.0 | Testabdeckungsberichte |
+### 2.1 Functional Core / Imperative Shell Split
+- **Functional Core (Pure Logic)**: All validation, mathematical calculations (e.g., downscaling trade size, computing PnL, classifying error codes, building orders) are side-effect-free pure functions. They are deterministic, do not access files, databases, network sockets, or time, and are easily testable.
+- **Imperative Shell (State & I/O)**: All database writes, API calls, time checks, and directory polling are isolated to the outer boundary. High-level orchestrators load data, delegate decisions to the Functional Core, and persist the results.
+
+### 2.2 Global Constraints & Standards
+1. **Python 3.12+ Async Design**: The application runs completely in a single-threaded `asyncio` event loop. All blocking operations (database queries, network calls, file reads) are handled non-blocking.
+2. **Decimal Financial Precision**: Every price, quantity, commission, and profit/loss calculation uses Python's standard `Decimal` class instead of binary floats, avoiding floating-point rounding errors.
+3. **SQLite WAL Mode**: The local relational database is configured to use Write-Ahead Logging (`PRAGMA journal_mode=WAL`) to allow concurrent reads and prevent writer blocks during active execution periods.
+4. **Stateless Execution Layers**: The core execution workers and state recovery loops do not hold in-memory execution state. The single source of truth is the SQLite database, synced continuously with the TWS socket.
 
 ---
 
-## 6. Public Code Components Index
+## 3. Dataflow Topologies
 
-This section lists all public classes and functions dynamically parsed from the `app/` directory, satisfying the synchronization checks for the `architecture-sync` skill.
+### 3.1 Import, Sizing & Queueing
+1. **File Watcher Detection**: A background task polls for `orders_YYYY_MM_DD.csv` in `data/`. If found, a sizing check is initiated.
+2. **Capital Zuteilung Limits & Downscaling**: Net liquidation, cash, and buying power are requested from IBKR. The sizing math scales order quantities down symmetrically if estimated costs exceed allocated thresholds.
+3. **Database Insertion**: Orders are saved to SQLite with negative temporary parent/child IDs (to maintain bracket structures before TWS ID assignment).
+4. **Worker Queueing**: Valid trade groups are pushed to an asynchronous processing queue (`asyncio.Queue`).
 
-### 6.1 Core Models & Configuration
-*   [`AccountConfig`](app/core/config.py#L53)
-*   [`AppConfig`](app/core/config.py#L35)
-*   [`Config`](app/core/config.py#L74)
-*   [`TelegramConfig`](app/core/config.py#L64)
-*   [`TwsConfig`](app/core/config.py#L18)
-*   [`load_config`](app/core/config.py#L211)
-*   [`load_env`](app/core/config.py#L87)
-*   [`create_database_connection`](app/core/db.py)
-*   [`get_db`](app/core/db.py)
-*   [`run_db_backup`](app/core/db.py)
-*   [`run_migrations`](app/core/db.py)
-*   [`transaction`](app/core/db.py)
-*   [`verify_db_integrity`](app/core/db.py)
-*   [`decimal_from_db`](app/core/models.py#L25)
-*   [`order_row_from_db_row`](app/core/models.py#L86)
-*   [`configure_logging`](app/core/logging_setup.py)
-*   [`clean_ib_async_warnings_processor`](app/core/logging_setup.py)
+### 3.2 Order Execution
+1. **Queue Consumer**: An execution worker pops trade groups and evaluates them sequentially.
+2. **Cushion & Pre-Trade Simulation**: Checks local account margins. A dry-run `whatIf=True` order is simulated on the IBKR Gateway. If margin usage exceeds `max_margin_usage_pct` or available cushion is below `min_cushion_pct`, the order fails.
+3. **ID Assignment**: The worker locks TWS ID allocation, fetches a valid TWS order ID, and replaces the negative temporary IDs in SQLite (relying on `ON UPDATE CASCADE` foreign keys to update child brackets).
+4. **Atomic Transmission**: Parent entry orders are transmitted with `transmit=False`. Once all child stop/limit exits are queued in TWS, the final exit order is sent with `transmit=True` to activate the entire bracket.
 
-### 6.2 Application Services
-*   [`AlertState`](app/services/alert_watcher.py)
-*   [`check_dead_orders`](app/services/alert_watcher.py)
-*   [`check_high_slippage`](app/services/alert_watcher.py)
-*   [`load_csv`](app/services/csv_reader.py)
-*   [`determine_maximum_capital_allocation`](app/services/importer.py)
-*   [`resolve_account_id`](app/services/importer.py)
-*   [`calculate_downscaled_quantity`](app/services/importer.py)
-*   [`get_next_temp_id`](app/services/importer.py)
-*   [`run_csv_import`](app/services/importer.py)
-*   [`AsyncTelegramRateLimiter`](app/services/notifier.py)
-*   [`TelegramNotifier`](app/services/notifier.py)
-*   [`send_message`](app/services/notifier.py)
-*   [`send_bracket_order_submitted`](app/services/notifier.py)
-*   [`send_order_filled`](app/services/notifier.py)
-*   [`send_order_failed`](app/services/notifier.py)
-*   [`send_importer_info`](app/services/notifier.py)
-*   [`send_margin_utilization_warning`](app/services/notifier.py)
-*   [`send_high_margin_usage_warning`](app/services/notifier.py)
-*   [`send_margin_limit_exceeded`](app/services/notifier.py)
-*   [`send_system_status`](app/services/notifier.py)
+### 3.3 Callbacks, Settlement & Alerting
+1. **Real-time Callbacks**: Fills (`execDetailsEvent`) and status updates (`orderStatusEvent`) write to local tables.
+2. **PnL & VWAP Consolidation**: Upon exit fill, the settlement module fetches execution entries, calculates average entry/exit VWAP, commissions, slippage, and net PnL, then persists the record in `trades_settlement`.
+3. **Telegram Notification**: Formatted HTML summaries are sent via the rate-limited Telegram client.
+4. **Background Alerting**: An independent watchdog scans the database for stuck orders (no status change for over threshold time) or excessive slippage and reports anomalies immediately.
 
-### 6.3 Trading Core & Callbacks
-*   [`ErrorClass`](app/trading/error_codes.py)
-*   [`classify_error_code`](app/trading/error_codes.py)
-*   [`build_order`](app/trading/order_builder.py)
-*   [`get_tick_size`](app/trading/order_builder.py)
-*   [`make_stock_contract`](app/trading/order_builder.py)
-*   [`round_to_tick`](app/trading/order_builder.py)
-*   [`fetch_active_orders`](app/trading/recovery.py)
-*   [`fetch_completed_orders`](app/trading/recovery.py)
-*   [`run_recovery`](app/trading/recovery.py)
-*   [`handle_retriable_error`](app/trading/retry.py)
-*   [`AccountBalanceMetrics`](app/trading/settlement.py)
-*   [`ExecutionTuple`](app/trading/settlement.py)
-*   [`SettlementInput`](app/trading/settlement.py)
-*   [`SettlementOutput`](app/trading/settlement.py)
-*   [`fetch_account_balance_metrics`](app/trading/settlement.py)
-*   [`calculate_settlement`](app/trading/settlement.py)
-*   [`get_settlement_lock`](app/trading/settlement.py)
-*   [`cleanup_settlement_lock`](app/trading/settlement.py)
-*   [`trigger_settlement`](app/trading/settlement.py)
+---
 
-### 6.4 Callbacks, Worker & Main
-*   [`on_order_status`](app/trading/callbacks.py)
-*   [`on_exec_details`](app/trading/callbacks.py)
-*   [`on_commission_report`](app/trading/callbacks.py)
-*   [`on_error`](app/trading/callbacks.py)
-*   [`on_disconnected`](app/trading/callbacks.py)
-*   [`run_reconnect_callback`](app/trading/callbacks.py)
-*   [`run_recovery_callback`](app/trading/callbacks.py)
-*   [`handle_retriable_error_callback`](app/trading/callbacks.py)
-*   [`trigger_settlement_callback`](app/trading/callbacks.py)
-*   [`is_order_reported`](app/trading/callbacks.py)
-*   [`is_group_reported`](app/trading/callbacks.py)
-*   [`mark_order_reported`](app/trading/callbacks.py)
-*   [`mark_group_reported`](app/trading/callbacks.py)
-*   [`register_all`](app/trading/callbacks.py)
-*   [`process_trade_group`](app/trading/worker.py)
-*   [`connect_to_tws`](app/main.py)
-*   [`database_backup_loop`](app/main.py)
-*   [`graceful_shutdown`](app/main.py)
-*   [`heartbeat_loop`](app/main.py)
-*   [`signal_handler`](app/main.py)
-*   [`start_background_tasks`](app/main.py)
-*   [`wait`](app/main.py)
+## 4. Public Component Reference
 
+This section provides a detailed reference of all public classes and functions in the system, grouped by source module.
+
+### 4.1 Module: `app.core.config`
+- `TwsConfig` (Class): Configuration for connection to Interactive Brokers TWS/Gateway.
+- `AppConfig` (Class): Application-level settings such as loop intervals and thresholds.
+- `AccountConfig` (Class): Account limits, margins, and cushion thresholds.
+- `TelegramConfig` (Class): Telegram credentials and target chat settings.
+- `Config` (Class): Parent configuration object nesting TWS, App, Account, and Telegram configs.
+- `load_env` (Function): Loads environment variables from the given environment path.
+- `load_config` (Function): Parses and constructs the type-safe configuration object.
+
+### 4.2 Module: `app.core.db`
+- `get_db` (Function): Initializes and returns a SQLite connection in WAL mode.
+- `verify_db_integrity` (Function): Runs SQLite integrity checks on the database file.
+- `run_migrations` (Function): Executes SQLite schema migrations.
+- `transaction` (Function): Async context manager for database transactions.
+- `run_db_backup` (Function): Performs database backup using `VACUUM INTO`.
+
+### 4.3 Module: `app.core.logging_setup`
+- `clean_ib_async_warnings_processor` (Function): Standardizes warnings from the `ib_async` library.
+- `configure_logging` (Function): Sets up structured logger output.
+
+### 4.4 Module: `app.core.models`
+- `decimal_from_db` (Function): Safely extracts Decimal values from DB row representation.
+- `OrderRow` (Class): Relational structure representing an active IBKR order state.
+- `order_row_from_db_row` (Function): Maps a DB mapping row to an `OrderRow` instance.
+- `ExecutionRow` (Class): Relational structure representing individual transaction execution fills.
+- `SettlementRow` (Class): Relational structure for calculated trade group settlements.
+
+### 4.5 Module: `app.services.alert_watcher`
+- `order_status_sync_loop` (Function): Continuous task to synchronize order statuses.
+- `check_dead_orders` (Function): Periodically checks for unresponsive orders.
+- `check_high_slippage` (Function): Compares actual fills against targets for slippage warnings.
+- `AlertState` (Class): Manages reported order and group identifiers to prevent duplicate alerts.
+  - `is_order_reported` (Method)
+  - `mark_order_reported` (Method)
+  - `is_group_reported` (Method)
+  - `mark_group_reported` (Method)
+
+### 4.6 Module: `app.services.csv_reader`
+- `validate_group` (Function): Asserts bracket consistency and validity of leg rows.
+- `load_csv` (Function): Reads and parses input targets into lists of leg rows.
+
+### 4.7 Module: `app.services.importer`
+- `AccountBalanceMetrics` (Class): Dataclass encapsulating cash, margin, and liquidation values.
+- `run_csv_import` (Function): Orchestrates directory polling and loading of new CSV targets.
+- `resolve_account_id` (Function): Queries TWS to determine the default target account ID.
+- `calculate_downscaled_quantity` (Function): Computes downscaled order size to respect capital rules.
+- `fetch_account_balance_metrics` (Function): Fetches real-time account data from IBKR.
+- `determine_maximum_capital_allocation` (Function): Calculates maximum permissible allocation size.
+- `get_next_temp_id` (Function): Queries DB to increment temporary execution sequence.
+
+### 4.8 Module: `app.services.notifier`
+- `AsyncTelegramRateLimiter` (Class): Implements message throttling for the Telegram API.
+  - `wait` (Method)
+  - `send_message` (Method)
+  - `send_system_status` (Method)
+  - `send_order_filled` (Method)
+  - `send_order_failed` (Method)
+  - `send_importer_info` (Method)
+  - `send_bracket_order_submitted` (Method)
+  - `send_margin_limit_exceeded` (Method)
+  - `send_margin_utilization_warning` (Method)
+  - `send_high_margin_usage_warning` (Method)
+
+### 4.9 Module: `app.trading.callbacks`
+- `register_all` (Function/Method): Binds TwsCallbacksManager event handlers to TWS.
+- `on_order_status` (Function/Method): Callback invoked when order states transition.
+- `on_exec_details` (Function/Method): Callback for trade execution details.
+- `on_commission_report` (Function/Method): Callback handling trade commission details.
+- `on_error` (Function/Method): Dispatches TWS connection/request errors.
+- `on_disconnected` (Function/Method): Handles disconnection events from the Gateway.
+
+### 4.10 Module: `app.trading.error_codes`
+- `ErrorClass` (Class): Enumeration classifying IBKR error severity.
+- `classify_error_code` (Function): Categorizes error codes into actionable retry/fail classes.
+
+### 4.11 Module: `app.trading.order_builder`
+- `make_stock_contract` (Function): Instantiates Stock contract structures for TWS.
+- `get_tick_size` (Function): Returns minimum tick movement of given stock asset.
+- `round_to_tick` (Function): Snaps limit prices to valid tick offsets.
+- `build_order` (Function): Constructs raw `Order` models with stop/limit brackets.
+
+### 4.12 Module: `app.trading.recovery`
+- `run_recovery` (Function): Restores system database matching gateway states.
+- `fetch_active_orders` (Function): Requests outstanding execution brackets.
+- `fetch_completed_orders` (Function): Fetches finalized bracket details.
+
+### 4.13 Module: `app.trading.retry`
+- `handle_retriable_error` (Function): Processes transitory order errors for rescheduling.
+
+### 4.14 Module: `app.trading.settlement`
+- `trigger_settlement` (Function): Evaluates completed execution lists to write final logs.
+- `get_settlement_lock` (Function): Obtains execution lock for a trade group.
+- `cleanup_settlement_lock` (Function): Releases execution lock for a trade group.
+- `ExecutionTuple` (Class): Encapsulates individual execution details.
+- `SettlementInput` (Class): Aggregated variables passed to calculations.
+- `SettlementOutput` (Class): Summary variables calculated for DB storage.
+- `calculate_settlement` (Function): Resolves net price, profit, and commissions.
+
+### 4.15 Module: `app.trading.worker`
+- `process_trade_group` (Function): Core worker loop evaluating a single trade group sequence.
+
+### 4.16 Module: `app.main`
+- `TradingSystemOrchestrator` (Class): Core system loop coordinator and scheduler.
+  - `create_database_connection` (Method)
+  - `trigger_settlement_callback` (Method)
+  - `handle_retriable_error_callback` (Method)
+  - `run_recovery_callback` (Method)
+  - `run_reconnect_callback` (Method)
+  - `start_background_tasks` (Method)
+  - `graceful_shutdown` (Method)
+  - `heartbeat_loop` (Method)
+  - `database_backup_loop` (Method)
+- `signal_handler` (Function): Receives OS signals for cleanup.
+- `connect_to_tws` (Function): Establishes gateway network socket connection.

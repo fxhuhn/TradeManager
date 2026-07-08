@@ -7,3 +7,7 @@
 
 ## Context Verification
 - If path or context confusion occurs, dynamically verify the active repository root via `git rev-parse --show-toplevel` before creating or modifying any files.
+
+## VS Code Environment Settings
+* **Interpreter Path**: In `.vscode/settings.json`, always configure `"python.defaultInterpreterPath"` as a relative path (`".venv/bin/python"`).
+* **Avoid Absolute Paths & Variables**: Do **NOT** use absolute paths or `${workspaceFolder}/.venv/bin/python` because they are fragile, non-portable, and prone to resolution errors in VS Code depending on the extension version or environment.
