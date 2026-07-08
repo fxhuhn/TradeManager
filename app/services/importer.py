@@ -175,6 +175,21 @@ async def run_csv_import(
         return
 
     # 3. Gruppen einzeln validieren, sizing anpassen und in DB verbuchen
+    filename_match = re.match(r"^orders_(\d{4})_(\d{2})_(\d{2})\.csv$", csv_path.name)
+    current_weekday: int | None = None
+    if filename_match:
+        try:
+            year = int(filename_match.group(1))
+            month = int(filename_match.group(2))
+            day = int(filename_match.group(3))
+            current_weekday = datetime(year, month, day).weekday()
+        except ValueError as exception:
+            logger.warning(
+                "Could not parse date from CSV filename. Falling back.",
+                filename=csv_path.name,
+                error=str(exception),
+            )
+
     for trade_group_id, raw_legs in grouped_legs.items():
         await _process_and_upsert_group(
             db=db,
@@ -184,6 +199,7 @@ async def run_csv_import(
             queue=queue,
             notifier=notifier,
             config=config,
+            current_weekday=current_weekday,
         )
 
 
