@@ -280,16 +280,24 @@ async def test_run_csv_import_handles_standalone_exit_gracefully(
     mock_notifier.send_importer_info = AsyncMock(return_value=True)
     mock_queue = asyncio.Queue()
 
-    # run_csv_import aufrufen
-    # Sollte ohne Exception durchlaufen, da das ValueError abgefangen wird
-    await run_csv_import(
-        db=db,
-        interactive_brokers=mock_interactive_brokers,
-        csv_path=csv_file,
-        queue=mock_queue,
-        notifier=mock_notifier,
-        config=mock_config,
-    )
+    from datetime import datetime as real_datetime
+
+    # Mock datetime to a Monday (July 6, 2026) to make the test weekday-independent
+    mock_now = real_datetime(2026, 7, 6, 12, 0, 0)
+    with patch("app.services.importer.datetime") as mock_datetime:
+        mock_datetime.side_effect = real_datetime
+        mock_datetime.now.return_value = mock_now
+
+        # run_csv_import aufrufen
+        # Sollte ohne Exception durchlaufen, da das ValueError abgefangen wird
+        await run_csv_import(
+            db=db,
+            interactive_brokers=mock_interactive_brokers,
+            csv_path=csv_file,
+            queue=mock_queue,
+            notifier=mock_notifier,
+            config=mock_config,
+        )
 
     # Verifizieren, dass der Notifier über das fehlgeschlagene Standalone Exit informiert wurde
     mock_notifier.send_importer_info.assert_called_once()
@@ -349,14 +357,22 @@ async def test_run_csv_import_sends_telegram_on_downscaling(
     mock_notifier.send_importer_info = AsyncMock(return_value=True)
     mock_queue = asyncio.Queue()
 
-    await run_csv_import(
-        db=db,
-        interactive_brokers=mock_interactive_brokers,
-        csv_path=csv_file,
-        queue=mock_queue,
-        notifier=mock_notifier,
-        config=mock_config,
-    )
+    from datetime import datetime as real_datetime
+
+    # Mock datetime to a Monday (July 6, 2026) to make the test weekday-independent
+    mock_now = real_datetime(2026, 7, 6, 12, 0, 0)
+    with patch("app.services.importer.datetime") as mock_datetime:
+        mock_datetime.side_effect = real_datetime
+        mock_datetime.now.return_value = mock_now
+
+        await run_csv_import(
+            db=db,
+            interactive_brokers=mock_interactive_brokers,
+            csv_path=csv_file,
+            queue=mock_queue,
+            notifier=mock_notifier,
+            config=mock_config,
+        )
 
     # Check that a notification for downscaling was sent
     mock_notifier.send_importer_info.assert_called_once()
@@ -398,14 +414,22 @@ async def test_run_csv_import_aligns_standalone_exit_quantity(
     mock_notifier.send_importer_info = AsyncMock(return_value=True)
     mock_queue = asyncio.Queue()
 
-    await run_csv_import(
-        db=db,
-        interactive_brokers=mock_interactive_brokers,
-        csv_path=csv_file,
-        queue=mock_queue,
-        notifier=mock_notifier,
-        config=mock_config,
-    )
+    from datetime import datetime as real_datetime
+
+    # Mock datetime to a Monday (July 6, 2026) to make the test weekday-independent
+    mock_now = real_datetime(2026, 7, 6, 12, 0, 0)
+    with patch("app.services.importer.datetime") as mock_datetime:
+        mock_datetime.side_effect = real_datetime
+        mock_datetime.now.return_value = mock_now
+
+        await run_csv_import(
+            db=db,
+            interactive_brokers=mock_interactive_brokers,
+            csv_path=csv_file,
+            queue=mock_queue,
+            notifier=mock_notifier,
+            config=mock_config,
+        )
 
     # 3. Check that the newly imported exit order has quantity 5 (aligned), not 6 (from CSV)
     async with db.execute(

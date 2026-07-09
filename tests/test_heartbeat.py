@@ -154,6 +154,7 @@ async def test_heartbeat_paused_during_restart_window(test_config: Config) -> No
     # Wir mocken datetime.now(), so dass es genau 12:01:00 liefert (im Restart-Fenster)
     mock_now = dt.datetime(2026, 6, 21, 12, 1, 0)
     with patch("datetime.datetime") as mock_datetime:
+        mock_datetime.side_effect = dt.datetime
         mock_datetime.now.return_value = mock_now
         # Wir lassen den heartbeat_loop laufen
         heartbeat_task = asyncio.create_task(orchestrator.heartbeat_loop())
@@ -190,6 +191,7 @@ async def test_callbacks_planned_restart_disconnected(test_config: Config) -> No
     # 1. Szenario: Geplanter Neustart um 12:01 Uhr
     mock_now_planned = dt.datetime(2026, 6, 21, 12, 1, 0)
     with patch("datetime.datetime") as mock_datetime:
+        mock_datetime.side_effect = dt.datetime
         mock_datetime.now.return_value = mock_now_planned
         callbacks_manager.on_disconnected()
         # Kurzes Yield für die Background-Tasks
@@ -205,6 +207,7 @@ async def test_callbacks_planned_restart_disconnected(test_config: Config) -> No
     mock_now_unexpected = dt.datetime(2026, 6, 21, 14, 0, 0)
     mock_notifier.send_system_status.reset_mock()
     with patch("datetime.datetime") as mock_datetime:
+        mock_datetime.side_effect = dt.datetime
         mock_datetime.now.return_value = mock_now_unexpected
         callbacks_manager.on_disconnected()
         await asyncio.sleep(0.01)
