@@ -341,23 +341,61 @@ class TwsCallbacksManager:
     async def _update_commission(
         self, exec_id: str, commission: Decimal, currency: str
     ) -> None:
-        """Aktualisiert die Kommission einer Ausführung in der executions-Tabelle."""
-        db = await self.db_factory()
-        try:
-            async with transaction(db):
-                await db.execute(
-                    "UPDATE executions SET commission = ?, currency = ? WHERE exec_id = ?",
-                    (str(commission), currency, exec_id),
+        """
+        Aktualisiert die Kommission einer Ausführung in der executions-Tabelle.
+
+        Nutzt eine Retry-Schleife, falls die Ausführung (execDetailsEvent)
+        aufgrund asynchroner Latenzen noch nicht in der Datenbank existiert.
+        """
+        max_attempts = 5
+        retry_delay_s = 0.05
+
+        for attempt in range(1, max_attempts + 1):
+            db = await self.db_factory()
+            try:
+                async with transaction(db):
+                    cursor = await db.execute(
+                        "UPDATE executions SET commission = ?, currency = ? WHERE exec_id = ?",
+                        (str(commission), currency, exec_id),
+                    )
+                    rows_updated = cursor.rowcount
+
+                if rows_updated > 0:
+                    logger.debug(
+                        "Commission for partial execution updated",
+                        exec_id=exec_id,
+                        attempt=attempt,
+                    )
+                    return
+
+                # Falls 0 Zeilen aktualisiert wurden, existiert der Eintrag noch nicht
+                if attempt < max_attempts:
+                    logger.debug(
+                        "Execution row not found yet for commission update. Retrying...",
+                        exec_id=exec_id,
+                        attempt=attempt,
+                        next_retry_in_s=retry_delay_s,
+                    )
+                    await asyncio.sleep(retry_delay_s)
+                else:
+                    logger.warning(
+                        "Failed to update commission: execution row not found after maximum retries",
+                        exec_id=exec_id,
+                        max_attempts=max_attempts,
+                    )
+
+            except Exception as exception:
+                logger.error(
+                    "Error updating commission",
+                    exec_id=exec_id,
+                    attempt=attempt,
+                    error=str(exception),
                 )
-            logger.debug("Commission for partial execution updated", exec_id=exec_id)
-        except Exception as exception:
-            logger.error(
-                "Error updating commission",
-                exec_id=exec_id,
-                error=str(exception),
-            )
-        finally:
-            await db.close()
+                if attempt == max_attempts:
+                    raise
+                await asyncio.sleep(retry_delay_s)
+            finally:
+                await db.close()
 
     def on_error(self, request_id: int, error_code: int, error_string: str) -> None:
         """
