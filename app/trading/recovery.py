@@ -39,7 +39,7 @@ async def run_recovery(
     Gleicht ausstehende lokale Orders mit der TWS ab und veranlasst bei Bedarf
     ein Re-queue oder Settlement.
     """
-    logger.info("Starting recovery phase")
+    logger.debug("Starting recovery phase")
 
     await fetch_active_orders(interactive_brokers_session, config.tws.request_timeout_s)
     await fetch_completed_orders(
@@ -56,7 +56,7 @@ async def run_recovery(
     }
 
     local_orders = await _load_local_pending_orders(database_connection)
-    logger.info("Pending local orders loaded", count=len(local_orders))
+    logger.debug("Pending local orders loaded", count=len(local_orders))
 
     groups_to_requeue = await _reconcile_orders(
         database_connection=database_connection,
@@ -75,7 +75,7 @@ async def run_recovery(
         )
         await queue.put(trade_group_id)
 
-    logger.info("Recovery phase completed")
+    logger.debug("Recovery phase completed")
 
 
 async def fetch_active_orders(interactive_brokers: IB, timeout_seconds: float) -> None:
