@@ -1,4 +1,7 @@
-from unittest.mock import AsyncMock, MagicMock
+from datetime import date, datetime
+from decimal import Decimal
+from unittest.mock import AsyncMock, MagicMock, patch
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -228,3 +231,334 @@ async def test_callbacks_exit_settlement_trigger(db, mock_config: Config) -> Non
     # 2. Assertions
     mock_notifier.send_order_filled.assert_called_once()
     mock_trigger_settlement.assert_called_once_with("G1", "A1")
+
+
+@pytest.mark.asyncio
+async def test_loc_order_cancel_not_near_close(db, mock_config: Config) -> None:
+    """Prüft, dass bei einer LOC-Order, die weit vor Marktschluss storniert wird, keine Preisprüfung erfolgt."""
+    # 1. Test-Order (LOC) einfuegen
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            44,
+            0,
+            None,
+            "G2",
+            "A1",
+            "EXIT",
+            "AMAT",
+            "STK",
+            "SMART",
+            "SELL",
+            10,
+            "LOC",
+            100.00,
+            "DAY",
+            "DipBuyer",
+            "Submitted",
+        ),
+    )
+    await db.commit()
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+    mock_notifier.send_loc_execution_anomaly = AsyncMock()
+
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=MagicMock(),
+        notifier=mock_notifier,
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    # 10:00 Uhr New York-Zeit (deutlich vor Marktschluss)
+    mock_now = datetime(2026, 7, 8, 10, 0, 0, tzinfo=ZoneInfo("America/New_York"))
+
+    with patch("app.trading.callbacks.datetime") as mock_dt:
+        mock_dt.now.return_value = mock_now
+
+        try:
+            await manager._cancel_order_in_db(44, 202, "Order Canceled")
+        finally:
+            db.close = original_close
+
+    mock_notifier.send_order_failed.assert_called_once()
+    mock_notifier.send_loc_execution_anomaly.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_loc_order_cancel_anomaly_detected(db, mock_config: Config) -> None:
+    """Prüft, dass bei Erreichen des Schlusskurses für eine stornierte LOC (SELL) ein Alarm gesendet wird."""
+    # 1. Test-Order (LOC SELL) einfuegen
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            45,
+            0,
+            None,
+            "G2",
+            "A1",
+            "EXIT",
+            "AMAT",
+            "STK",
+            "SMART",
+            "SELL",
+            10,
+            "LOC",
+            100.00,
+            "DAY",
+            "DipBuyer",
+            "Submitted",
+        ),
+    )
+    await db.commit()
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+    mock_notifier.send_loc_execution_anomaly = AsyncMock()
+
+    mock_ib = MagicMock()
+    mock_bar = MagicMock()
+    mock_bar.close = 105.00  # Preis wurde fuer SELL erreicht (105 >= 100)
+    mock_bar.date = date(2026, 7, 8)
+    mock_ib.reqHistoricalDataAsync = AsyncMock(return_value=[mock_bar])
+
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=mock_ib,
+        notifier=mock_notifier,
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    # 16:05 Uhr New York-Zeit (nach Marktschluss)
+    mock_now = datetime(2026, 7, 8, 16, 5, 0, tzinfo=ZoneInfo("America/New_York"))
+
+    with patch("app.trading.callbacks.datetime") as mock_dt:
+        mock_dt.now.return_value = mock_now
+        mock_dt.strptime = datetime.strptime
+
+        try:
+            await manager._cancel_order_in_db(45, 202, "Order Canceled")
+
+            with patch("asyncio.sleep", AsyncMock()):
+                await manager._check_loc_execution_price(
+                    order_id=45,
+                    symbol="AMAT",
+                    action="SELL",
+                    limit_price=Decimal("100.00"),
+                    quantity=Decimal("10"),
+                )
+        finally:
+            db.close = original_close
+
+    mock_notifier.send_order_failed.assert_called_once()
+    mock_notifier.send_loc_execution_anomaly.assert_called_once_with(
+        order_id=45,
+        symbol="AMAT",
+        action="SELL",
+        limit_price=Decimal("100.00"),
+        close_price=Decimal("105.00"),
+        quantity=Decimal("10"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_loc_order_cancel_no_anomaly(db, mock_config: Config) -> None:
+    """Prüft, dass kein Alarm gesendet wird, wenn der Limitpreis nicht erreicht wurde."""
+    # 1. Test-Order (LOC SELL) einfuegen
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            46,
+            0,
+            None,
+            "G2",
+            "A1",
+            "EXIT",
+            "AMAT",
+            "STK",
+            "SMART",
+            "SELL",
+            10,
+            "LOC",
+            100.00,
+            "DAY",
+            "DipBuyer",
+            "Submitted",
+        ),
+    )
+    await db.commit()
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+    mock_notifier.send_loc_execution_anomaly = AsyncMock()
+
+    mock_ib = MagicMock()
+    mock_bar = MagicMock()
+    mock_bar.close = 95.00  # Preis wurde fuer SELL nicht erreicht (95 < 100)
+    mock_bar.date = date(2026, 7, 8)
+    mock_ib.reqHistoricalDataAsync = AsyncMock(return_value=[mock_bar])
+
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=mock_ib,
+        notifier=mock_notifier,
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    # 16:05 Uhr New York-Zeit (nach Marktschluss)
+    mock_now = datetime(2026, 7, 8, 16, 5, 0, tzinfo=ZoneInfo("America/New_York"))
+
+    with patch("app.trading.callbacks.datetime") as mock_dt:
+        mock_dt.now.return_value = mock_now
+        mock_dt.strptime = datetime.strptime
+
+        try:
+            await manager._cancel_order_in_db(46, 202, "Order Canceled")
+
+            with patch("asyncio.sleep", AsyncMock()):
+                await manager._check_loc_execution_price(
+                    order_id=46,
+                    symbol="AMAT",
+                    action="SELL",
+                    limit_price=Decimal("100.00"),
+                    quantity=Decimal("10"),
+                )
+        finally:
+            db.close = original_close
+
+    mock_notifier.send_order_failed.assert_called_once()
+    mock_notifier.send_loc_execution_anomaly.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_loc_buy_order_anomaly_detected(db, mock_config: Config) -> None:
+    """Prüft, dass bei einer stornierten BUY LOC-Order ein Alarm gesendet wird, wenn der Schlusskurs <= Limitpreis ist."""
+    # 1. Test-Order (LOC BUY) einfuegen
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            47,
+            0,
+            None,
+            "G2",
+            "A1",
+            "EXIT",
+            "AMAT",
+            "STK",
+            "SMART",
+            "BUY",
+            10,
+            "LOC",
+            100.00,
+            "DAY",
+            "DipBuyer",
+            "Submitted",
+        ),
+    )
+    await db.commit()
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+    mock_notifier.send_loc_execution_anomaly = AsyncMock()
+
+    mock_ib = MagicMock()
+    mock_bar = MagicMock()
+    mock_bar.close = 95.00  # Preis wurde fuer BUY erreicht (95 <= 100)
+    mock_bar.date = date(2026, 7, 8)
+    mock_ib.reqHistoricalDataAsync = AsyncMock(return_value=[mock_bar])
+
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=mock_ib,
+        notifier=mock_notifier,
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    # 16:05 Uhr New York-Zeit (nach Marktschluss)
+    mock_now = datetime(2026, 7, 8, 16, 5, 0, tzinfo=ZoneInfo("America/New_York"))
+
+    with patch("app.trading.callbacks.datetime") as mock_dt:
+        mock_dt.now.return_value = mock_now
+        mock_dt.strptime = datetime.strptime
+
+        try:
+            with patch("asyncio.sleep", AsyncMock()):
+                await manager._check_loc_execution_price(
+                    order_id=47,
+                    symbol="AMAT",
+                    action="BUY",
+                    limit_price=Decimal("100.00"),
+                    quantity=Decimal("10"),
+                )
+        finally:
+            db.close = original_close
+
+    mock_notifier.send_loc_execution_anomaly.assert_called_once_with(
+        order_id=47,
+        symbol="AMAT",
+        action="BUY",
+        limit_price=Decimal("100.00"),
+        close_price=Decimal("95.00"),
+        quantity=Decimal("10"),
+    )

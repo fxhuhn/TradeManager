@@ -172,6 +172,7 @@ This section provides a detailed reference of all public classes and functions i
   - `send_system_status` (Method)
   - `send_order_filled` (Method)
   - `send_order_failed` (Method)
+  - `send_loc_execution_anomaly` (Method)
   - `send_importer_info` (Method)
   - `send_bracket_order_submitted` (Method)
   - `send_margin_limit_exceeded` (Method)

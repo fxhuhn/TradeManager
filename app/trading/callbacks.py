@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from datetime import date, datetime
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 import aiosqlite
 import structlog
@@ -455,7 +457,17 @@ class TwsCallbacksManager:
     ) -> None:
         """Kennzeichnet Order in DB als storniert und benachrichtigt via Telegram."""
         db = await self.db_factory()
+        order_row = None
         try:
+            # Details für die Benachrichtigung laden
+            query = """
+                SELECT symbol, bracket_role, action, quantity, order_type, target_price
+                FROM orders
+                WHERE order_id = ?
+            """
+            async with db.execute(query, (request_id,)) as cursor:
+                order_row = await cursor.fetchone()
+
             async with transaction(db):
                 await db.execute(
                     "UPDATE orders SET status = 'Cancelled' WHERE order_id = ?",
@@ -471,12 +483,201 @@ class TwsCallbacksManager:
         finally:
             await db.close()
 
+        symbol = order_row["symbol"] if order_row else "Unbekannt"
+        bracket_role = order_row["bracket_role"] if order_row else "-"
+
         await self.notifier.send_order_failed(
             order_id=request_id,
             tws_code=error_code,
             reason=error_string,
+            symbol=symbol,
+            bracket_role=bracket_role,
             is_fatal=False,
         )
+
+        # Überprüfung bei LOC-Orders nach Marktschluss anstoßen
+        if (
+            order_row
+            and order_row["order_type"] == "LOC"
+            and order_row["target_price"] is not None
+        ):
+            asyncio.create_task(
+                self._check_loc_execution_price(
+                    order_id=request_id,
+                    symbol=symbol,
+                    action=order_row["action"],
+                    limit_price=Decimal(str(order_row["target_price"])),
+                    quantity=Decimal(str(order_row["quantity"])),
+                )
+            )
+
+    async def _check_loc_execution_price(
+        self,
+        order_id: int,
+        symbol: str,
+        action: str,
+        limit_price: Decimal,
+        quantity: Decimal,
+    ) -> None:
+        """
+        Prüft nach dem Marktschluss, ob der Schlusskurs den Limitpreis einer stornierten
+        LOC-Order erreicht hat und alarmiert bei Abweichungen.
+        """
+        if not self._is_near_or_after_market_close(symbol):
+            logger.debug(
+                "Skipping LOC close price check: cancellation occurred before market close",
+                order_id=order_id,
+                symbol=symbol,
+            )
+            return
+
+        logger.info(
+            "Starting LOC execution price check",
+            order_id=order_id,
+            symbol=symbol,
+            action=action,
+            limit_price=limit_price,
+        )
+
+        try:
+            from app.trading.order_builder import make_stock_contract
+
+            contract = make_stock_contract(symbol)
+
+            # Kurz warten, bis IBKR-Server den Schlusskurs finalisiert haben
+            await asyncio.sleep(5)
+
+            bars = None
+            for attempt in range(1, 4):
+                try:
+                    bars = await self.interactive_brokers.reqHistoricalDataAsync(
+                        contract=contract,
+                        endDateTime="",
+                        durationStr="1 D",
+                        barSizeSetting="1 day",
+                        whatToShow="TRADES",
+                        useRTH=True,
+                        formatDate=1,
+                        keepUpToDate=False,
+                    )
+                    if bars:
+                        break
+                except Exception as exc:
+                    logger.warning(
+                        "Attempt to fetch historical close price failed",
+                        symbol=symbol,
+                        attempt=attempt,
+                        error=str(exc),
+                    )
+                await asyncio.sleep(5)
+
+            if not bars:
+                logger.warning(
+                    "Could not retrieve daily historical bars for LOC check",
+                    symbol=symbol,
+                    order_id=order_id,
+                )
+                return
+
+            last_bar = bars[-1]
+            if not self._is_bar_from_today(last_bar.date, symbol):
+                logger.warning(
+                    "Retrieved daily bar is not from today. Close price check skipped.",
+                    symbol=symbol,
+                    order_id=order_id,
+                    bar_date=str(last_bar.date),
+                )
+                return
+
+            close_price = Decimal(str(last_bar.close))
+            logger.info(
+                "LOC verification: retrieved close price",
+                symbol=symbol,
+                close_price=close_price,
+                limit_price=limit_price,
+            )
+
+            # Abgleich der Ausführungsbedingungen
+            was_eligible = False
+            if action.upper() == "BUY" and close_price <= limit_price:
+                was_eligible = True
+            elif action.upper() == "SELL" and close_price >= limit_price:
+                was_eligible = True
+
+            if was_eligible:
+                logger.error(
+                    "LOC order anomaly detected: Limit price reached but order cancelled",
+                    order_id=order_id,
+                    symbol=symbol,
+                    action=action,
+                    limit_price=limit_price,
+                    close_price=close_price,
+                )
+                await self.notifier.send_loc_execution_anomaly(
+                    order_id=order_id,
+                    symbol=symbol,
+                    action=action,
+                    limit_price=limit_price,
+                    close_price=close_price,
+                    quantity=quantity,
+                )
+            else:
+                logger.debug(
+                    "LOC order cancellation justified: limit price not reached by close price",
+                    order_id=order_id,
+                    symbol=symbol,
+                    limit_price=limit_price,
+                    close_price=close_price,
+                )
+
+        except Exception as exception:
+            logger.error(
+                "Error checking LOC execution price",
+                order_id=order_id,
+                symbol=symbol,
+                error=str(exception),
+            )
+
+    def _is_near_or_after_market_close(self, symbol: str) -> bool:
+        """Überprüft, ob der aktuelle Zeitpunkt nahe oder nach dem regulären Marktschluss liegt."""
+        symbol_upper = symbol.upper()
+        if symbol_upper.endswith(".DE"):
+            # Deutscher Markt (Xetra) schließt um 17:30 Uhr Berlin-Zeit
+            berlin_tz = ZoneInfo("Europe/Berlin")
+            now_berlin = datetime.now(berlin_tz)
+            market_close = now_berlin.replace(
+                hour=17, minute=25, second=0, microsecond=0
+            )
+            return now_berlin >= market_close
+        else:
+            # US-Markt (NASDAQ/NYSE) schließt um 16:00 Uhr New York-Zeit
+            ny_tz = ZoneInfo("America/New_York")
+            now_ny = datetime.now(ny_tz)
+            market_close = now_ny.replace(hour=15, minute=55, second=0, microsecond=0)
+            return now_ny >= market_close
+
+    def _is_bar_from_today(self, bar_date: object, symbol: str) -> bool:
+        """Überprüft, ob das Datum des Bars dem heutigen Handelstag entspricht."""
+        symbol_upper = symbol.upper()
+        tz = (
+            ZoneInfo("Europe/Berlin")
+            if symbol_upper.endswith(".DE")
+            else ZoneInfo("America/New_York")
+        )
+        today = datetime.now(tz).date()
+
+        if isinstance(bar_date, date):
+            return bar_date == today
+        elif isinstance(bar_date, datetime):
+            return bar_date.date() == today
+        elif isinstance(bar_date, str):
+            try:
+                # Format 'YYYYMMDD' oder 'YYYYMMDD  HH:MM:SS'
+                parsed_date = datetime.strptime(bar_date[:8], "%Y%m%d").date()
+                return parsed_date == today
+            except ValueError:
+                return False
+        return False
 
     async def _fail_order_in_db(
         self, request_id: int, error_code: int, error_string: str

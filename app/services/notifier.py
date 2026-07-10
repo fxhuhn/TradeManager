@@ -162,6 +162,28 @@ class TelegramNotifier:
         )
         return await self.send_message(message)
 
+    async def send_loc_execution_anomaly(
+        self,
+        order_id: int,
+        symbol: str,
+        action: str,
+        limit_price: Decimal,
+        close_price: Decimal,
+        quantity: Decimal,
+    ) -> bool:
+        """Sendet eine Fehlermeldung für eine LOC-Order, die trotz erreichtem Limitpreis nicht ausgeführt wurde."""
+        action_emoji = "🟢 BUY" if action.upper() == "BUY" else "🔴 SELL"
+        message = (
+            f"⚠️ <b>LOC ANOMALIE: NICHT AUSGEFÜHRT</b> | <code>{symbol}</code>\n"
+            f"├─ <b>Order-ID:</b> <code>{order_id}</code>\n"
+            f"├─ <b>Aktion:</b> <code>{action_emoji}</code>\n"
+            f"├─ <b>Menge:</b> <code>{quantity}</code>\n"
+            f"├─ <b>Limit-Preis:</b> <code>$ {limit_price:.2f}</code>\n"
+            f"├─ <b>Schlusskurs:</b> <code>$ {close_price:.2f}</code>\n"
+            f"└─ <b>Status:</b> Limitpreis wurde erreicht, aber Order wurde storniert/verfallen!"
+        )
+        return await self.send_message(message)
+
     async def send_importer_info(
         self,
         file_name: str,
