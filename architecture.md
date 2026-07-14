@@ -193,6 +193,7 @@ This section provides a detailed reference of all public classes and functions i
 - `classify_error_code` (Function): Categorizes error codes into actionable retry/fail classes.
 
 ### 4.11 Module: `app.trading.order_builder`
+- `normalize_symbol` (Function): Normalizes asset symbols by stripping exchange suffixes (e.g., `.DE`).
 - `make_stock_contract` (Function): Instantiates Stock contract structures for TWS.
 - `get_tick_size` (Function): Returns minimum tick movement of given stock asset.
 - `round_to_tick` (Function): Snaps limit prices to valid tick offsets.

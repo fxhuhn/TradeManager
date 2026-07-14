@@ -21,6 +21,7 @@ from app.core.config import Config
 from app.core.db import transaction
 from app.core.models import OrderRow, order_row_from_db_row, parse_positive_decimal
 from app.services.notifier import TelegramNotifier
+from app.trading.order_builder import normalize_symbol
 
 logger = structlog.get_logger()
 
@@ -414,10 +415,11 @@ async def _recover_created_order(
 
 def _has_live_position(interactive_brokers: IB, account_id: str, symbol: str) -> bool:
     """Prüft, ob für das Symbol eine offene Position im Depot vorhanden ist."""
+    target_symbol = normalize_symbol(symbol)
     for position in interactive_brokers.positions():
         if (
             position.account == account_id
-            and position.contract.symbol == symbol.upper()
+            and normalize_symbol(position.contract.symbol) == target_symbol
             and abs(position.position) > 0
         ):
             return True

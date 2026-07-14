@@ -25,6 +25,7 @@ from app.trading.order_builder import (
     build_order,
     extract_transmitted_price,
     make_stock_contract,
+    normalize_symbol,
 )
 
 logger = structlog.get_logger()
@@ -805,10 +806,11 @@ def _get_live_position_quantity(
     interactive_brokers: IB, account_id: str, symbol: str
 ) -> Decimal:
     """Ermittelt den aktuellen Depotbestand für ein bestimmtes Symbol und Account."""
+    target_symbol = normalize_symbol(symbol)
     for position in interactive_brokers.positions():
         if (
             position.account == account_id
-            and position.contract.symbol == symbol.upper()
+            and normalize_symbol(position.contract.symbol) == target_symbol
         ):
             return Decimal(str(position.position))
     return Decimal("0.0")

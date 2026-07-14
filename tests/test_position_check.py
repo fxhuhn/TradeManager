@@ -237,3 +237,52 @@ async def test_run_csv_import_with_existing_filled_entry(
     finally:
         if temp_csv.exists():
             temp_csv.unlink()
+
+
+@pytest.mark.asyncio
+async def test_process_trade_group_exit_matching_with_dot_de_suffix(
+    db, test_config: Config
+) -> None:
+    """Verifiziert, dass SXRV.DE in der DB gegen eine IB-Position SXRV gematcht wird."""
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status)
+        VALUES (30, 'TG_SXRV_DE', 'ACC_GERMANY', 'ENTRY', 'SXRV.DE', 'STK', 'SMART', 'BUY', 5, 'LMT', 1400.0, 'Filled')
+        """
+    )
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status)
+        VALUES (31, 'TG_SXRV_DE', 'ACC_GERMANY', 'EXIT', 'SXRV.DE', 'STK', 'SMART', 'SELL', 5, 'MKT', 0.0, 'Created')
+        """
+    )
+    await db.commit()
+
+    mock_position = MagicMock()
+    mock_position.account = "ACC_GERMANY"
+    mock_position.contract.symbol = "SXRV"
+    mock_position.position = 5.0
+
+    mock_ib = MagicMock()
+    mock_ib.positions.return_value = [mock_position]
+    mock_ib.client.getReqId.return_value = 301
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_importer_info = AsyncMock()
+    mock_notifier.send_bracket_order_submitted = AsyncMock()
+    mock_notifier.send_message = AsyncMock()
+
+    await process_trade_group(db, mock_ib, "TG_SXRV_DE", mock_notifier, test_config)
+
+    async with db.execute(
+        "SELECT status, quantity FROM orders WHERE order_id = 301"
+    ) as cursor:
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row["status"] == "Submitted"
+        assert row["quantity"] == 5
+
+    mock_ib.placeOrder.assert_called_once()
+    called_contract = mock_ib.placeOrder.call_args[0][0]
+    assert called_contract.symbol == "SXRV"
+    assert called_contract.primaryExchange == "IBIS2"

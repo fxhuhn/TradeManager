@@ -15,15 +15,29 @@ from app.core.models import OrderRow
 logger = structlog.get_logger()
 
 
+def normalize_symbol(symbol: str) -> str:
+    """Normalisiert ein Aktiensymbol durch Entfernung von Börsensuffixen.
+
+    Args:
+        symbol: Das rohe Symbol (z. B. 'SXRV.DE' oder 'AAPL').
+
+    Returns:
+        Das bereinigte Ticker-Symbol in Grossbuchstaben (z. B. 'SXRV').
+    """
+    cleaned_symbol = symbol.strip().upper()
+    if cleaned_symbol.endswith(".DE"):
+        return cleaned_symbol[:-3]
+    return cleaned_symbol
+
+
 def make_stock_contract(symbol: str) -> Stock:
     """Erstellt ein TWS-konformes Aktien-Vertragsobjekt via SMART-Routing."""
-    symbol_upper = symbol.upper()
+    clean_symbol = normalize_symbol(symbol)
 
-    if symbol_upper.endswith(".DE"):
-        clean_symbol = symbol_upper[:-3]
+    if symbol.strip().upper().endswith(".DE"):
         return Stock(clean_symbol, "SMART", "EUR", primaryExchange="IBIS2")
 
-    return Stock(symbol_upper, "SMART", "USD")
+    return Stock(clean_symbol, "SMART", "USD")
 
 
 # Xetra tick-size table: (lower_bound, tick_size)
