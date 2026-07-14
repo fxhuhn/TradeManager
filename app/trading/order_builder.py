@@ -26,42 +26,40 @@ def make_stock_contract(symbol: str) -> Stock:
     return Stock(symbol_upper, "SMART", "USD")
 
 
+# Xetra tick-size table: (lower_bound, tick_size)
+# Source: Deutsche Börse Xetra Tick Size Table (MiFID II liquidity bands)
+_XETRA_TICK_TABLE: list[tuple[float, float]] = [
+    (50000.0, 10.0),
+    (20000.0, 5.0),
+    (10000.0, 2.0),
+    (5000.0, 1.0),
+    (2000.0, 0.5),
+    (1000.0, 0.2),
+    (500.0, 0.1),
+    (200.0, 0.05),
+    (100.0, 0.02),
+    (50.0, 0.01),
+    (20.0, 0.005),
+    (10.0, 0.002),
+    (5.0, 0.001),
+    (2.0, 0.0005),
+    (1.0, 0.0002),
+]
+
+_DEFAULT_US_TICK_SIZE: float = 0.01
+_XETRA_MIN_TICK_SIZE: float = 0.0001
+
+
 def get_tick_size(symbol: str, price: float) -> float:
     """Ermittelt die minimale Preisänderung (Tick Size) für ein Symbol."""
-    symbol_upper = symbol.upper()
-    if symbol_upper.endswith(".DE"):
-        if price >= 50000.0:
-            return 10.0
-        if price >= 20000.0:
-            return 5.0
-        if price >= 10000.0:
-            return 2.0
-        if price >= 5000.0:
-            return 1.0
-        if price >= 2000.0:
-            return 0.5
-        if price >= 1000.0:
-            return 0.2
-        if price >= 500.0:
-            return 0.1
-        if price >= 200.0:
-            return 0.05
-        if price >= 100.0:
-            return 0.02
-        if price >= 50.0:
-            return 0.01
-        if price >= 20.0:
-            return 0.005
-        if price >= 10.0:
-            return 0.002
-        if price >= 5.0:
-            return 0.001
-        if price >= 2.0:
-            return 0.0005
-        if price >= 1.0:
-            return 0.0002
-        return 0.0001
-    return 0.01  # Standard für US-Aktien
+    if not symbol.upper().endswith(".DE"):
+        return _DEFAULT_US_TICK_SIZE
+
+    for lower_bound, tick_size in _XETRA_TICK_TABLE:
+        if price >= lower_bound:
+            return tick_size
+
+    return _XETRA_MIN_TICK_SIZE
 
 
 def round_to_tick(price: float, tick_size: float) -> float:
@@ -123,3 +121,22 @@ def build_order(order_row: OrderRow) -> Order:
             order.ocaType = 1
 
     return order
+
+
+def extract_transmitted_price(ib_order: Order) -> Decimal | None:
+    """Extracts the actual tick-rounded price from a constructed ib_async Order.
+
+    After build_order() applies tick-size rounding, the price stored on the
+    ib_async Order object may differ from the original target_price. This
+    function returns that rounded price so callers can update DB and
+    notifications to reflect the value actually transmitted to TWS.
+    """
+    order_type = ib_order.orderType.upper() if ib_order.orderType else ""
+
+    if order_type in ("LMT", "LOC") and ib_order.lmtPrice:
+        return Decimal(str(ib_order.lmtPrice))
+
+    if order_type == "STP" and ib_order.auxPrice:
+        return Decimal(str(ib_order.auxPrice))
+
+    return None

@@ -19,7 +19,7 @@ from ib_async import IB
 
 from app.core.config import Config
 from app.core.db import transaction
-from app.core.models import OrderRow, order_row_from_db_row
+from app.core.models import OrderRow, order_row_from_db_row, parse_positive_decimal
 from app.services.notifier import TelegramNotifier
 
 logger = structlog.get_logger()
@@ -186,131 +186,184 @@ async def _recover_submitted_order(
     trigger_settlement_callback: Callable[[str, str], Awaitable[None]],
 ) -> None:
     """Gleicht den Zustand einer lokalen Submitted/PreSubmitted Order mit TWS ab."""
-    order_id = order.order_id
     if tws_active:
-        perm_id = tws_active.order.permId
-        tws_status = tws_active.orderStatus.status
-        mapped_status = "PreSubmitted" if tws_status == "PreSubmitted" else "Submitted"
-
-        if order.perm_id == perm_id and order.status == mapped_status:
-            return
-
-        logger.info(
-            "Recovery scenario 1: Order active in TWS. Updating perm_id and status.",
-            order_id=order_id,
-            perm_id=perm_id,
-            mapped_status=mapped_status,
-        )
-        async with transaction(database_connection):
-            await database_connection.execute(
-                "UPDATE orders SET perm_id = ?, status = ? WHERE order_id = ?",
-                (perm_id, mapped_status, order_id),
-            )
+        await _sync_active_order_status(database_connection, order, tws_active)
         return
 
     if tws_completed and tws_completed.orderStatus.status == "Filled":
-        logger.info(
-            "Recovery scenario 2: Order filled in TWS during downtime. Triggering settlement.",
-            order_id=order_id,
-        )
-        async with transaction(database_connection):
-            await database_connection.execute(
-                "UPDATE orders SET status = 'Filled' WHERE order_id = ?",
-                (order_id,),
-            )
-
-        await _save_missing_executions(
-            database_connection, order, interactive_brokers_session
-        )
-
-        avg_fill_price = (
-            tws_completed.orderStatus.avgFillPrice
-            if tws_completed and tws_completed.orderStatus
-            else None
-        )
-        price_decimal = None
-        if (
-            avg_fill_price
-            and isinstance(avg_fill_price, (int, float, Decimal))
-            and avg_fill_price > 0
-        ):
-            price_decimal = Decimal(str(avg_fill_price))
-        elif order.target_price is not None and float(order.target_price) > 0:
-            price_decimal = Decimal(str(order.target_price))
-
-        await notifier.send_order_filled(
-            symbol=order.symbol,
-            bracket_role=order.bracket_role,
-            action=order.action,
-            quantity=Decimal(order.quantity),
-            execution_price=price_decimal,
-            order_type=order.order_type,
-            order_id=order_id,
-            strategy_name=order.strategy_name or "",
-        )
-
-        asyncio.create_task(
-            trigger_settlement_callback(order.trade_group_id, order.account_id)
+        await _handle_filled_during_downtime(
+            database_connection,
+            order,
+            tws_completed,
+            interactive_brokers_session,
+            notifier,
+            trigger_settlement_callback,
         )
         return
 
-    # Zusätzliche Prüfung auf indirekt gefüllte Entry-Orders (Szenario 2b)
     if order.bracket_role == "ENTRY":
-        has_active_child = any(
-            local_order.parent_id == order_id
-            and local_order.order_id in tws_active_orders
-            for local_order in local_orders
+        was_recovered = await _try_recover_indirect_entry_fill(
+            database_connection,
+            order,
+            local_orders,
+            tws_active_orders,
+            tws_completed_orders,
+            interactive_brokers_session,
+            notifier,
         )
-        has_position = _has_live_position(
-            interactive_brokers_session, order.account_id, order.symbol
-        )
-
-        if has_active_child or has_position:
-            logger.info(
-                "Recovery scenario 2b: Entry order filled (active position or child order found). Setting to Filled.",
-                order_id=order_id,
-                symbol=order.symbol,
-            )
-            async with transaction(database_connection):
-                await database_connection.execute(
-                    "UPDATE orders SET status = 'Filled' WHERE order_id = ?",
-                    (order_id,),
-                )
-
-            # Fehlende Ausführungen sichern
-            await _save_missing_executions(
-                database_connection, order, interactive_brokers_session
-            )
-
-            entry_trade = tws_completed_orders.get(order_id)
-            avg_fill_price = (
-                entry_trade.orderStatus.avgFillPrice
-                if entry_trade and entry_trade.orderStatus
-                else None
-            )
-            price_decimal = None
-            if (
-                avg_fill_price
-                and isinstance(avg_fill_price, (int, float, Decimal))
-                and avg_fill_price > 0
-            ):
-                price_decimal = Decimal(str(avg_fill_price))
-            elif order.target_price is not None and float(order.target_price) > 0:
-                price_decimal = Decimal(str(order.target_price))
-
-            await notifier.send_order_filled(
-                symbol=order.symbol,
-                bracket_role=order.bracket_role,
-                action=order.action,
-                quantity=Decimal(order.quantity),
-                execution_price=price_decimal,
-                order_type=order.order_type,
-                order_id=order_id,
-                strategy_name=order.strategy_name or "",
-            )
+        if was_recovered:
             return
 
-    # Recovery Szenario 3: Ghost Order
+    await _cancel_ghost_order(database_connection, order, notifier)
+
+
+async def _sync_active_order_status(
+    database_connection: aiosqlite.Connection,
+    order: OrderRow,
+    tws_active: object,
+) -> None:
+    """Recovery Scenario 1: Updates perm_id and status for orders still active in TWS."""
+    order_id = order.order_id
+    perm_id = tws_active.order.permId
+    tws_status = tws_active.orderStatus.status
+    mapped_status = "PreSubmitted" if tws_status == "PreSubmitted" else "Submitted"
+
+    if order.perm_id == perm_id and order.status == mapped_status:
+        return
+
+    logger.info(
+        "Recovery scenario 1: Order active in TWS. Updating perm_id and status.",
+        order_id=order_id,
+        perm_id=perm_id,
+        mapped_status=mapped_status,
+    )
+    async with transaction(database_connection):
+        await database_connection.execute(
+            "UPDATE orders SET perm_id = ?, status = ? WHERE order_id = ?",
+            (perm_id, mapped_status, order_id),
+        )
+
+
+async def _handle_filled_during_downtime(
+    database_connection: aiosqlite.Connection,
+    order: OrderRow,
+    tws_completed: object,
+    interactive_brokers_session: IB,
+    notifier: TelegramNotifier,
+    trigger_settlement_callback: Callable[[str, str], Awaitable[None]],
+) -> None:
+    """Recovery Scenario 2: Process orders filled in TWS while the application was down."""
+    order_id = order.order_id
+    logger.info(
+        "Recovery scenario 2: Order filled in TWS during downtime. Triggering settlement.",
+        order_id=order_id,
+    )
+    async with transaction(database_connection):
+        await database_connection.execute(
+            "UPDATE orders SET status = 'Filled' WHERE order_id = ?",
+            (order_id,),
+        )
+
+    await _save_missing_executions(
+        database_connection, order, interactive_brokers_session
+    )
+
+    avg_fill_price = (
+        tws_completed.orderStatus.avgFillPrice
+        if tws_completed and tws_completed.orderStatus
+        else None
+    )
+    price_decimal = parse_positive_decimal(avg_fill_price) or parse_positive_decimal(
+        order.target_price
+    )
+    limit_price_decimal = parse_positive_decimal(order.target_price)
+
+    await notifier.send_order_filled(
+        symbol=order.symbol,
+        bracket_role=order.bracket_role,
+        action=order.action,
+        quantity=Decimal(order.quantity),
+        execution_price=price_decimal,
+        order_type=order.order_type,
+        order_id=order_id,
+        strategy_name=order.strategy_name or "",
+        limit_price=limit_price_decimal,
+    )
+
+    asyncio.create_task(
+        trigger_settlement_callback(order.trade_group_id, order.account_id)
+    )
+
+
+async def _try_recover_indirect_entry_fill(
+    database_connection: aiosqlite.Connection,
+    order: OrderRow,
+    local_orders: list[OrderRow],
+    tws_active_orders: dict[int, object],
+    tws_completed_orders: dict[int, object],
+    interactive_brokers_session: IB,
+    notifier: TelegramNotifier,
+) -> bool:
+    """Recovery Scenario 2b: Recovers entry orders that filled indirectly (active child or portfolio position found)."""
+    order_id = order.order_id
+    has_active_child = any(
+        local_order.parent_id == order_id and local_order.order_id in tws_active_orders
+        for local_order in local_orders
+    )
+    has_position = _has_live_position(
+        interactive_brokers_session, order.account_id, order.symbol
+    )
+
+    if not (has_active_child or has_position):
+        return False
+
+    logger.info(
+        "Recovery scenario 2b: Entry order filled (active position or child order found). Setting to Filled.",
+        order_id=order_id,
+        symbol=order.symbol,
+    )
+    async with transaction(database_connection):
+        await database_connection.execute(
+            "UPDATE orders SET status = 'Filled' WHERE order_id = ?",
+            (order_id,),
+        )
+
+    await _save_missing_executions(
+        database_connection, order, interactive_brokers_session
+    )
+
+    entry_trade = tws_completed_orders.get(order_id)
+    avg_fill_price = (
+        entry_trade.orderStatus.avgFillPrice
+        if entry_trade and entry_trade.orderStatus
+        else None
+    )
+    price_decimal = parse_positive_decimal(avg_fill_price) or parse_positive_decimal(
+        order.target_price
+    )
+    limit_price_decimal = parse_positive_decimal(order.target_price)
+
+    await notifier.send_order_filled(
+        symbol=order.symbol,
+        bracket_role=order.bracket_role,
+        action=order.action,
+        quantity=Decimal(order.quantity),
+        execution_price=price_decimal,
+        order_type=order.order_type,
+        order_id=order_id,
+        strategy_name=order.strategy_name or "",
+        limit_price=limit_price_decimal,
+    )
+    return True
+
+
+async def _cancel_ghost_order(
+    database_connection: aiosqlite.Connection,
+    order: OrderRow,
+    notifier: TelegramNotifier,
+) -> None:
+    """Recovery Scenario 3: Cancels ghost orders (Submitted in DB, but nowhere in TWS)."""
+    order_id = order.order_id
     logger.warning(
         "Recovery scenario 3: Ghost Order detected (Submitted in DB, not in TWS). Cancelling.",
         order_id=order_id,

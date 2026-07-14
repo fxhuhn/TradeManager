@@ -23,6 +23,40 @@ def _strip_html(text: str) -> str:
     return re.sub(r"<[^>]+>", "", text)
 
 
+def _format_slippage_line(
+    limit_price: Decimal | None,
+    execution_price: Decimal | None,
+    action: str,
+) -> str:
+    """Formats a slippage indicator line for Telegram if prices diverge.
+
+    Evaluates slippage direction relative to the trade action:
+    - BUY:  fill below limit = favorable (saved money)
+    - SELL: fill above limit = favorable (received more)
+
+    Returns an empty string when slippage cannot be determined or is zero.
+    """
+    if limit_price is None or execution_price is None:
+        return ""
+
+    price_difference = execution_price - limit_price
+    if price_difference == 0:
+        return ""
+
+    percentage = (price_difference / limit_price) * 100
+
+    is_buy = action.upper() == "BUY"
+    is_favorable = (is_buy and price_difference < 0) or (
+        not is_buy and price_difference > 0
+    )
+    direction_emoji = "📈" if is_favorable else "📉"
+
+    return (
+        f"├─ {direction_emoji} <b>Slippage:</b> "
+        f"<code>{price_difference:+.2f}</code> (<code>{percentage:+.2f}%</code>)"
+    )
+
+
 class AsyncTelegramRateLimiter:
     """
     Stellt sicher, dass wir die Telegram Rate-Limits einhalten
@@ -121,8 +155,9 @@ class TelegramNotifier:
         order_type: str,
         order_id: int,
         strategy_name: str,
+        limit_price: Decimal | None = None,
     ) -> bool:
-        """Sendet eine Erfolgsmeldung für eine gefüllte Order."""
+        """Sendet eine Erfolgsmeldung für eine gefüllte Order inkl. Slippage-Anzeige."""
         total_value = (
             quantity * execution_price
             if execution_price is not None
@@ -132,13 +167,32 @@ class TelegramNotifier:
             f"{execution_price:.2f}" if execution_price is not None else "MKT"
         )
 
-        message = (
-            f"🟢 <b>ORDER GEFÜLLT</b> | <code>{symbol}</code>\n"
-            f"├─ <b>Typ:</b> <code>{bracket_role}</code> ({action})\n"
-            f"├─ <b>Menge:</b> <code>{quantity}</code> @ <code>{price_string}</code> ({order_type})\n"
-            f"├─ <b>Wert:</b> <code>$ {total_value:,.2f}</code>\n"
+        slippage_line = _format_slippage_line(limit_price, execution_price, action)
+
+        lines = [
+            f"🟢 <b>ORDER GEFÜLLT</b> | <code>{symbol}</code>",
+            f"├─ <b>Typ:</b> <code>{bracket_role}</code> ({action})",
+        ]
+
+        if limit_price is not None and execution_price is not None:
+            lines.append(
+                f"├─ <b>Limit:</b> <code>{limit_price:.2f}</code> → <b>Fill:</b> <code>{price_string}</code> ({order_type})"
+            )
+        else:
+            lines.append(
+                f"├─ <b>Menge:</b> <code>{quantity}</code> @ <code>{price_string}</code> ({order_type})"
+            )
+
+        lines.append(f"├─ <b>Wert:</b> <code>$ {total_value:,.2f}</code>")
+
+        if slippage_line:
+            lines.append(slippage_line)
+
+        lines.append(
             f"└─ <b>System:</b> ID: <code>{order_id}</code> • <i>{strategy_name}</i>"
         )
+
+        message = "\n".join(lines)
         return await self.send_message(message)
 
     async def send_order_failed(
@@ -225,12 +279,8 @@ class TelegramNotifier:
                 f"├─ <b>{order['role']}:</b> <code>{order['action']} {order['quantity']}</code> @ <code>{price_string}</code> ({order['order_type']})"
             )
 
-        if trade_group_id:
-            lines.append(
-                f"└─ <b>System:</b> Group: <code>{trade_group_id}</code> • <i>{strategy_name}</i>"
-            )
-        else:
-            lines.append(f"└─ <b>System:</b> <i>{strategy_name}</i>")
+        # Nur Strategie anzeigen – die interne trade_group_id ist für den Empfänger irrelevant
+        lines.append(f"└─ <b>System:</b> <i>{strategy_name}</i>")
 
         message = "\n".join(lines)
         return await self.send_message(message)

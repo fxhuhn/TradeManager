@@ -7,6 +7,7 @@ from app.core.models import LegRow, OrderRow
 from app.services.alert_watcher import AlertState, check_dead_orders
 from app.services.csv_reader import validate_group
 from app.trading.error_codes import ErrorClass, classify_error_code
+from app.trading.order_builder import get_tick_size
 from app.trading.settlement import trigger_settlement
 
 
@@ -384,6 +385,35 @@ def test_build_order_rounds_price_to_tick_size():
     )
     tws_order_us = build_order(order_row_us)
     assert tws_order_us.lmtPrice == 180.12
+
+
+@pytest.mark.parametrize(
+    "symbol, price, expected_tick",
+    [
+        ("SXRV.DE", 55000.0, 10.0),
+        ("SXRV.DE", 25000.0, 5.0),
+        ("SXRV.DE", 12000.0, 2.0),
+        ("SXRV.DE", 6000.0, 1.0),
+        ("SXRV.DE", 3000.0, 0.5),
+        ("SXRV.DE", 1500.0, 0.2),
+        ("SXRV.DE", 600.0, 0.1),
+        ("SXRV.DE", 300.0, 0.05),
+        ("SXRV.DE", 150.0, 0.02),
+        ("SXRV.DE", 60.0, 0.01),
+        ("SXRV.DE", 30.0, 0.005),
+        ("SXRV.DE", 15.0, 0.002),
+        ("SXRV.DE", 6.0, 0.001),
+        ("SXRV.DE", 3.0, 0.0005),
+        ("SXRV.DE", 1.5, 0.0002),
+        ("SXRV.DE", 0.5, 0.0001),
+        ("AAPL", 150.0, 0.01),
+    ],
+)
+def test_get_tick_size_all_brackets(
+    symbol: str, price: float, expected_tick: float
+) -> None:
+    """Verifiziert die korrekte Ermittlung der Tick-Größe für alle Preisstufen."""
+    assert get_tick_size(symbol, price) == expected_tick
 
 
 def test_calculate_settlement_pure():

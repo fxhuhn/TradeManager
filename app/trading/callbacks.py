@@ -23,6 +23,7 @@ from ib_async import IB, CommissionReport, Fill, Trade
 
 from app.core.config import Config
 from app.core.db import transaction
+from app.core.models import parse_positive_decimal
 from app.services.notifier import TelegramNotifier
 from app.trading.error_codes import ErrorClass, classify_error_code
 
@@ -197,17 +198,13 @@ class TwsCallbacksManager:
 
             raw_target_price = order_row["target_price"]
 
-            # Tatsächlichen Kurs bevorzugen (avg_fill_price), falls vorhanden und positiv
-            if (
+            # Tatsächlichen Kurs bevorzugen (avg_fill_price), falls vorhanden und positiv, sonst target_price aus DB
+            price_decimal = parse_positive_decimal(
                 avg_fill_price
-                and isinstance(avg_fill_price, (int, float, Decimal))
-                and avg_fill_price > 0
-            ):
-                price_decimal = Decimal(str(avg_fill_price))
-            elif raw_target_price is not None and float(raw_target_price) > 0:
-                price_decimal = Decimal(str(raw_target_price))
-            else:
-                price_decimal = None
+            ) or parse_positive_decimal(raw_target_price)
+
+            # Limit-Preis aus der DB für die Slippage-Anzeige aufbereiten
+            limit_price_decimal = parse_positive_decimal(raw_target_price)
 
             await self.notifier.send_order_filled(
                 symbol=order_row["symbol"],
@@ -218,6 +215,7 @@ class TwsCallbacksManager:
                 order_type=order_row["order_type"],
                 order_id=order_id,
                 strategy_name=order_row["strategy_name"],
+                limit_price=limit_price_decimal,
             )
 
             bracket_role = order_row["bracket_role"]

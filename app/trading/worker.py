@@ -21,7 +21,11 @@ from app.core.config import Config
 from app.core.db import transaction
 from app.core.models import OrderRow, order_row_from_db_row
 from app.services.notifier import TelegramNotifier
-from app.trading.order_builder import build_order, make_stock_contract
+from app.trading.order_builder import (
+    build_order,
+    extract_transmitted_price,
+    make_stock_contract,
+)
 
 logger = structlog.get_logger()
 
@@ -402,6 +406,18 @@ async def _transmit_entry_order(
     contract = make_stock_contract(entry_order.symbol)
     ib_entry_order = build_order(entry_order)
 
+    # Den tatsächlich an TWS übermittelten (tick-gerundeten) Preis in OrderRow und DB synchronisieren
+    transmitted_price = extract_transmitted_price(ib_entry_order)
+    if transmitted_price is not None and transmitted_price != entry_order.target_price:
+        logger.debug(
+            "Entry price tick-rounded",
+            original=entry_order.target_price,
+            transmitted=transmitted_price,
+            symbol=entry_order.symbol,
+        )
+        entry_order = dataclasses.replace(entry_order, target_price=transmitted_price)
+        await _sync_transmitted_price_to_db(db, tws_order_id, transmitted_price)
+
     has_unsent_children = any(child.status == "Created" for child in child_orders)
     ib_entry_order.transmit = not has_unsent_children
 
@@ -460,6 +476,17 @@ async def _assign_order_id_in_db(
         await db.execute(
             "UPDATE orders SET order_id = ?, status = 'Submitted', transmitted_at = datetime('now') WHERE order_id = ?",
             (tws_order_id, original_order_id),
+        )
+
+
+async def _sync_transmitted_price_to_db(
+    db: aiosqlite.Connection, order_id: int, transmitted_price: Decimal
+) -> None:
+    """Persists the tick-rounded price to the DB so it matches the TWS submission."""
+    async with transaction(db):
+        await db.execute(
+            "UPDATE orders SET target_price = ? WHERE order_id = ?",
+            (str(transmitted_price), order_id),
         )
 
 
@@ -527,6 +554,18 @@ async def _place_single_child_order(
 
     contract = make_stock_contract(child.symbol)
     ib_child_order = build_order(child)
+
+    # Den tatsächlich an TWS übermittelten (tick-gerundeten) Preis in OrderRow und DB synchronisieren
+    transmitted_price = extract_transmitted_price(ib_child_order)
+    if transmitted_price is not None and transmitted_price != child.target_price:
+        logger.debug(
+            "Child price tick-rounded",
+            original=child.target_price,
+            transmitted=transmitted_price,
+            role=child.bracket_role,
+        )
+        child = dataclasses.replace(child, target_price=transmitted_price)
+        await _sync_transmitted_price_to_db(db, tws_order_id, transmitted_price)
 
     if not is_post_fill:
         ib_child_order.parentId = entry_order.order_id

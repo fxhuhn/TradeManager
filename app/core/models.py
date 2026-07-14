@@ -18,7 +18,7 @@ Event-Datenfluss & Timing:
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 
@@ -31,6 +31,19 @@ def decimal_from_db(value: object) -> Decimal | None:
     if value is None:
         return None
     return Decimal(str(value))
+
+
+def parse_positive_decimal(value: object) -> Decimal | None:
+    """Converts a value to Decimal if it represents a positive number (> 0), else returns None."""
+    if value is None:
+        return None
+    try:
+        numeric_val = float(value)
+        if numeric_val <= 0:
+            return None
+        return Decimal(str(value))
+    except (ValueError, TypeError, InvalidOperation):
+        return None
 
 
 @dataclass(frozen=True)

@@ -287,6 +287,7 @@ async def test_recovery_recovers_filled_entry_with_active_child(
         order_type="LMT",
         order_id=177,
         strategy_name="DipBuyer",
+        limit_price=Decimal("115.17"),
     )
 
 
@@ -448,8 +449,55 @@ async def test_recovery_recovers_filled_order_downtime(db, mock_config: Config) 
         order_type="LMT",
         order_id=180,
         strategy_name="DipBuyer",
+        limit_price=Decimal("50.0"),
     )
 
     # Settlement-Trigger muss asynchron aufgerufen worden sein (wir warten kurz, da mit create_task gestartet)
     await asyncio.sleep(0.1)
     mock_trigger_settlement.assert_called_once_with("895_DipBuyer_XYZ", "U19605236")
+
+
+@pytest.mark.asyncio
+async def test_recovery_cancels_ghost_order(db, mock_config: Config) -> None:
+    """Prüft, dass run_recovery Ghost Orders (Submitted in DB, nicht in TWS) storniert."""
+    # 1. Submitted Order in DB anlegen
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name, status
+        ) VALUES (999, 111, NULL, 'G_GHOST', 'U19605236', 'ENTRY', 'GHOST', 'STK', 'SMART', 'BUY', 10, 'LMT', 50.0, 'DAY', 'DipBuyer', 'Submitted')
+        """
+    )
+    await db.commit()
+
+    # 2. TWS hat weder active noch completed trades für ID 999
+    mock_interactive_brokers = MagicMock()
+    mock_interactive_brokers.reqOpenOrdersAsync = AsyncMock()
+    mock_interactive_brokers.reqCompletedOrdersAsync = AsyncMock()
+    mock_interactive_brokers.openTrades.return_value = []
+    mock_interactive_brokers.trades.return_value = []
+    mock_interactive_brokers.positions.return_value = []
+    mock_interactive_brokers.fills.return_value = []
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_message = AsyncMock(return_value=True)
+
+    # 3. Recovery durchführen
+    await run_recovery(
+        database_connection=db,
+        interactive_brokers_session=mock_interactive_brokers,
+        queue=asyncio.Queue(),
+        notifier=mock_notifier,
+        trigger_settlement_callback=AsyncMock(),
+        config=mock_config,
+    )
+
+    # 4. Order muss in DB storniert sein und Notifier benachrichtigt
+    async with db.execute("SELECT status FROM orders WHERE order_id = 999") as cursor:
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row["status"] == "Cancelled"
+
+    mock_notifier.send_message.assert_called_once()
+    assert "GHOST ORDER RECOVERED" in mock_notifier.send_message.call_args[0][0]

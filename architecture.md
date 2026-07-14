@@ -137,6 +137,7 @@ This section provides a detailed reference of all public classes and functions i
 
 ### 4.4 Module: `app.core.models`
 - `decimal_from_db` (Function): Safely extracts Decimal values from DB row representation.
+- `parse_positive_decimal` (Function): Converts a value to Decimal if it represents a positive number (> 0), else returns None.
 - `OrderRow` (Class): Relational structure representing an active IBKR order state.
 - `order_row_from_db_row` (Function): Maps a DB mapping row to an `OrderRow` instance.
 - `ExecutionRow` (Class): Relational structure representing individual transaction execution fills.
@@ -196,6 +197,7 @@ This section provides a detailed reference of all public classes and functions i
 - `get_tick_size` (Function): Returns minimum tick movement of given stock asset.
 - `round_to_tick` (Function): Snaps limit prices to valid tick offsets.
 - `build_order` (Function): Constructs raw `Order` models with stop/limit brackets.
+- `extract_transmitted_price` (Function): Extracts actual tick-rounded price from a constructed `Order`.
 
 ### 4.12 Module: `app.trading.recovery`
 - `run_recovery` (Function): Restores system database matching gateway states.

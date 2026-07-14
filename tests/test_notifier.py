@@ -213,6 +213,7 @@ async def test_send_order_filled_formatting(mock_config: MagicMock) -> None:
             order_type="LMT",
             order_id=123,
             strategy_name="Momentum",
+            limit_price=Decimal("152.00"),
         )
 
         # Assert
@@ -220,10 +221,13 @@ async def test_send_order_filled_formatting(mock_config: MagicMock) -> None:
         called_text = mock_send.call_args[0][0]
         assert "🟢 <b>ORDER GEFÜLLT</b> | <code>AAPL</code>" in called_text
         assert "<b>Typ:</b> <code>ENTRY</code> (BUY)" in called_text
-        assert (
-            "<b>Menge:</b> <code>100</code> @ <code>150.50</code> (LMT)" in called_text
-        )
+        # With limit_price set, Limit → Fill format is used instead of Menge
+        assert "<b>Limit:</b> <code>152.00</code>" in called_text
+        assert "<b>Fill:</b> <code>150.50</code>" in called_text
         assert "<b>Wert:</b> <code>$ 15,050.00</code>" in called_text
+        # Slippage line must appear (negative slippage = below limit)
+        assert "Slippage:" in called_text
+        assert "-1.50" in called_text
         assert "ID: <code>123</code>" in called_text
         assert "<i>Momentum</i>" in called_text
 
@@ -405,7 +409,9 @@ async def test_send_bracket_order_submitted_formatting(
         assert "📤 <b>BRACKET ORDER GESENDET</b> | <code>MSFT</code>" in multi_msg
         assert "ENTRY:</b> <code>BUY 100</code> @ <code>150.00</code>" in multi_msg
         assert "SL:</b> <code>SELL 100</code> @ <code>140.00</code>" in multi_msg
-        assert "Group: <code>G123</code> • <i>Momentum</i>" in multi_msg
+        # Group ID must NOT appear anymore — only strategy name
+        assert "Group:" not in multi_msg
+        assert "<i>Momentum</i>" in multi_msg
 
 
 @pytest.mark.asyncio
