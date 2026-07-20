@@ -23,7 +23,7 @@ jobs:
 
     - name: Run Architecture Sync Validation
       run: |
-        python .agent/skills/architecture-sync/scripts/check_sync.py
+        python .agents/skills/architecture-sync/scripts/check_sync.py
 
   test:
     name: Test on Python ${{ matrix.python-version }}

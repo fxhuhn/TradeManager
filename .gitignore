@@ -75,12 +75,12 @@ brain/
 .brain/
 
 # Erlaube explizit die Agenten-Skills und Workflows auf GitHub
-!/.agent/
-!/.agent/skills/
-!/.agent/skills/**/*
+!/.agents/
+!/.agents/skills/
+!/.agents/skills/**/*
 
-.agent/skills/**/*.pyc
-.agent/skills/**/__pycache__/
+.agents/skills/**/*.pyc
+.agents/skills/**/__pycache__/
 
 # Custom App Data
 /data
