@@ -30,3 +30,11 @@ _.reqAccountSummary
 _.cancelAccountSummary
 _.reqOpenOrders
 _.reqCompletedOrders
+
+# Public entrypoints in app/trading
+TwsCallbacksManager
+register_all
+run_recovery
+handle_retriable_error
+trigger_settlement
+execution_worker
