@@ -347,6 +347,16 @@ class TwsCallbacksManager:
         Nutzt eine Retry-Schleife, falls die Ausführung (execDetailsEvent)
         aufgrund asynchroner Latenzen noch nicht in der Datenbank existiert.
         """
+
+    async def _update_commission(
+        self, exec_id: str, commission: Decimal, currency: str
+    ) -> None:
+        """
+        Aktualisiert die Kommission einer Ausführung in der executions-Tabelle.
+
+        Nutzt eine Retry-Schleife, falls die Ausführung (execDetailsEvent)
+        aufgrund asynchroner Latenzen noch nicht in der Datenbank existiert.
+        """
         max_attempts = 5
         retry_delay_s = 0.05
 
@@ -358,31 +368,29 @@ class TwsCallbacksManager:
                         "UPDATE executions SET commission = ?, currency = ? WHERE exec_id = ?",
                         (str(commission), currency, exec_id),
                     )
-                    rows_updated = cursor.rowcount
+                    if cursor.rowcount > 0:
+                        logger.debug(
+                            "Commission for partial execution updated",
+                            exec_id=exec_id,
+                            attempt=attempt,
+                        )
+                        return
 
-                if rows_updated > 0:
-                    logger.debug(
-                        "Commission for partial execution updated",
-                        exec_id=exec_id,
-                        attempt=attempt,
-                    )
-                    return
-
-                # Falls 0 Zeilen aktualisiert wurden, existiert der Eintrag noch nicht
-                if attempt < max_attempts:
-                    logger.debug(
-                        "Execution row not found yet for commission update. Retrying...",
-                        exec_id=exec_id,
-                        attempt=attempt,
-                        next_retry_in_s=retry_delay_s,
-                    )
-                    await asyncio.sleep(retry_delay_s)
-                else:
+                if attempt == max_attempts:
                     logger.warning(
                         "Failed to update commission: execution row not found after maximum retries",
                         exec_id=exec_id,
                         max_attempts=max_attempts,
                     )
+                    return
+
+                logger.debug(
+                    "Execution row not found yet for commission update. Retrying...",
+                    exec_id=exec_id,
+                    attempt=attempt,
+                    next_retry_in_s=retry_delay_s,
+                )
+                await asyncio.sleep(retry_delay_s)
 
             except Exception as exception:
                 logger.error(
@@ -560,12 +568,12 @@ class TwsCallbacksManager:
                     )
                     if bars:
                         break
-                except Exception as exc:
+                except Exception as historical_data_error:
                     logger.warning(
                         "Attempt to fetch historical close price failed",
                         symbol=symbol,
                         attempt=attempt,
-                        error=str(exc),
+                        error=str(historical_data_error),
                     )
                 await asyncio.sleep(5)
 
@@ -707,9 +715,9 @@ class TwsCallbacksManager:
 
     def on_disconnected(self) -> None:
         """Loggt Verbindungsverlust zu TWS und alarmiert den Betreiber."""
-        from datetime import datetime
+        import datetime as datetime_module
 
-        now = datetime.now()
+        now = datetime_module.datetime.now()
         is_planned = now.hour == 12 and 0 <= now.minute < 5
 
         if is_planned:

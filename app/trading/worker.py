@@ -15,7 +15,7 @@ from typing import Final
 
 import aiosqlite
 import structlog
-from ib_async import IB
+from ib_async import IB, Contract, Order, Trade
 
 from app.core.config import Config
 from app.core.db import transaction
@@ -232,18 +232,18 @@ def _get_account_value(
     return None
 
 
-async def _verify_margin_and_cushion(
+async def _check_cushion_limit(
     db: aiosqlite.Connection,
     interactive_brokers: IB,
     entry_order: OrderRow,
     config: Config,
     notifier: TelegramNotifier,
-) -> tuple[bool, OrderRow]:
+) -> tuple[bool, OrderRow, Decimal]:
+    """Prüft das globale Account-Cushion Limit.
+
+    Returns:
+        (passed_check, updated_entry_order, cushion_percentage)
     """
-    Führt die What-If Simulation und Cushion-Checks aus.
-    Gibt (True, entry_order) bei Erfolg zurück, andernfalls (False, updated_entry_order).
-    """
-    # 1. Cushion Check
     cushion_percentage = Decimal("100.0")
     cushion_value = _get_account_value(
         interactive_brokers, entry_order.account_id, "Cushion"
@@ -260,7 +260,7 @@ async def _verify_margin_and_cushion(
             cushion=f"{cushion_percentage:.1f}%",
             limit=f"{min_cushion * Decimal('100.0'):.1f}%",
         )
-        entry_order = dataclasses.replace(entry_order, status="Error")
+        updated_order = dataclasses.replace(entry_order, status="Error")
         async with transaction(db):
             await db.execute(
                 "UPDATE orders SET status = 'Error' WHERE order_id = ?",
@@ -273,9 +273,76 @@ async def _verify_margin_and_cushion(
             limit_value=Decimal("0.0"),
             cushion_percentage=cushion_percentage,
         )
+        return False, updated_order, cushion_percentage
+
+    return True, entry_order, cushion_percentage
+
+
+async def _evaluate_margin_warnings(
+    interactive_brokers: IB,
+    entry_order: OrderRow,
+    init_margin_after: Decimal,
+    equity_with_loan: Decimal,
+    notifier: TelegramNotifier,
+) -> None:
+    """Sendet bei Bedarf Warnungen bezüglich Cash-Überdeckung oder hoher Margin-Auslastung (>50%)."""
+    total_cash = _get_account_value(
+        interactive_brokers, entry_order.account_id, "TotalCashValue"
+    ) or Decimal("0.0")
+
+    if entry_order.target_price is not None:
+        purchase_value = Decimal(str(entry_order.quantity)) * entry_order.target_price
+        if purchase_value > total_cash:
+            margin_needed = purchase_value - total_cash
+            logger.info(
+                "Trade requires margin usage.",
+                purchase_value=float(purchase_value),
+                available_cash=float(total_cash),
+                margin_needed=float(margin_needed),
+            )
+            await notifier.send_margin_utilization_warning(
+                symbol=entry_order.symbol,
+                account_id=entry_order.account_id,
+                purchase_value=purchase_value,
+                total_cash=total_cash,
+                margin_needed=margin_needed,
+            )
+
+    margin_usage_percentage = Decimal("0.0")
+    if equity_with_loan > Decimal("0.0"):
+        margin_usage_percentage = (init_margin_after / equity_with_loan) * Decimal(
+            "100.0"
+        )
+    if margin_usage_percentage > Decimal("50.0"):
+        logger.warning(
+            "High margin usage warning.",
+            margin_utilization=f"{float(margin_usage_percentage):.1f}%",
+            init_margin=float(init_margin_after),
+            net_liquidation=float(equity_with_loan),
+        )
+        await notifier.send_high_margin_usage_warning(
+            symbol=entry_order.symbol,
+            account_id=entry_order.account_id,
+            usage_percentage=margin_usage_percentage,
+            init_margin_after=init_margin_after,
+            net_liquidation=equity_with_loan,
+        )
+
+
+async def _verify_margin_and_cushion(
+    db: aiosqlite.Connection,
+    interactive_brokers: IB,
+    entry_order: OrderRow,
+    config: Config,
+    notifier: TelegramNotifier,
+) -> tuple[bool, OrderRow]:
+    """Führt die What-If Simulation und Cushion-Checks aus."""
+    passed_cushion, entry_order, cushion_percentage = await _check_cushion_limit(
+        db, interactive_brokers, entry_order, config, notifier
+    )
+    if not passed_cushion:
         return False, entry_order
 
-    # 2. What-If Margin Check & Simulation
     contract = make_stock_contract(entry_order.symbol)
     simulated_order = build_order(entry_order)
 
@@ -335,51 +402,13 @@ async def _verify_margin_and_cushion(
             )
             return False, entry_order
 
-        # Margin-Nutzung Warnung (Kaufwert übersteigt Cash)
-        total_cash = _get_account_value(
-            interactive_brokers, entry_order.account_id, "TotalCashValue"
-        ) or Decimal("0.0")
-
-        if entry_order.target_price is not None:
-            purchase_value = (
-                Decimal(str(entry_order.quantity)) * entry_order.target_price
-            )
-            if purchase_value > total_cash:
-                margin_needed = purchase_value - total_cash
-                logger.info(
-                    "Trade requires margin usage.",
-                    purchase_value=float(purchase_value),
-                    available_cash=float(total_cash),
-                    margin_needed=float(margin_needed),
-                )
-                await notifier.send_margin_utilization_warning(
-                    symbol=entry_order.symbol,
-                    account_id=entry_order.account_id,
-                    purchase_value=purchase_value,
-                    total_cash=total_cash,
-                    margin_needed=margin_needed,
-                )
-
-        # Hohe Margin-Auslastung Warnung (>50%)
-        margin_usage_percentage = Decimal("0.0")
-        if equity_with_loan > Decimal("0.0"):
-            margin_usage_percentage = (init_margin_after / equity_with_loan) * Decimal(
-                "100.0"
-            )
-        if margin_usage_percentage > Decimal("50.0"):
-            logger.warning(
-                "High margin usage warning.",
-                margin_utilization=f"{float(margin_usage_percentage):.1f}%",
-                init_margin=float(init_margin_after),
-                net_liquidation=float(equity_with_loan),
-            )
-            await notifier.send_high_margin_usage_warning(
-                symbol=entry_order.symbol,
-                account_id=entry_order.account_id,
-                usage_percentage=margin_usage_percentage,
-                init_margin_after=init_margin_after,
-                net_liquidation=equity_with_loan,
-            )
+        await _evaluate_margin_warnings(
+            interactive_brokers,
+            entry_order,
+            init_margin_after,
+            equity_with_loan,
+            notifier,
+        )
 
     return True, entry_order
 
@@ -598,8 +627,8 @@ async def _place_single_child_order(
 async def _place_and_verify_order(
     db: aiosqlite.Connection,
     interactive_brokers: IB,
-    contract: object,
-    ib_order: object,
+    contract: Contract,
+    ib_order: Order,
     order_row: OrderRow,
     tws_order_id: int,
     notifier: TelegramNotifier,
@@ -624,7 +653,7 @@ async def _place_and_verify_order(
     return True
 
 
-async def _wait_for_order_submission(trade: object) -> None:
+async def _wait_for_order_submission(trade: Trade) -> None:
     """Kurz warten, um sofortige Ablehnungen (z.B. ValidationError) zu erkennen."""
     for _ in range(20):
         if trade.orderStatus.status not in ("PendingSubmit", "PendingCancel"):
@@ -634,7 +663,7 @@ async def _wait_for_order_submission(trade: object) -> None:
 
 async def _handle_order_rejection(
     db: aiosqlite.Connection,
-    trade: object,
+    trade: Trade,
     order_row: OrderRow,
     tws_order_id: int,
     notifier: TelegramNotifier,
@@ -824,9 +853,7 @@ async def _get_next_non_colliding_order_id(
         row = await cursor.fetchone()
         max_db_id = row[0] if (row and row[0] is not None) else 0
 
-    if max_db_id > 0:
-        current_sequence = getattr(interactive_brokers.client, "_reqIdSeq", None)
-        if isinstance(current_sequence, int):
-            interactive_brokers.client._reqIdSeq = max(current_sequence, max_db_id + 1)
-
-    return interactive_brokers.client.getReqId()
+    tws_next_id = interactive_brokers.client.getReqId()
+    if max_db_id >= tws_next_id:
+        return max_db_id + 1
+    return tws_next_id

@@ -413,7 +413,7 @@ def test_get_tick_size_all_brackets(
     symbol: str, price: float, expected_tick: float
 ) -> None:
     """Verifiziert die korrekte Ermittlung der Tick-Größe für alle Preisstufen."""
-    assert get_tick_size(symbol, price) == expected_tick
+    assert float(get_tick_size(symbol, price)) == expected_tick
 
 
 def test_calculate_settlement_pure():

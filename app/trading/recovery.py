@@ -15,7 +15,7 @@ from decimal import Decimal
 
 import aiosqlite
 import structlog
-from ib_async import IB
+from ib_async import IB, Trade
 
 from app.core.config import Config
 from app.core.db import transaction
@@ -123,8 +123,8 @@ async def _load_local_pending_orders(
 async def _reconcile_orders(
     database_connection: aiosqlite.Connection,
     local_orders: list[OrderRow],
-    tws_active_orders: dict[int, object],
-    tws_completed_orders: dict[int, object],
+    tws_active_orders: dict[int, Trade],
+    tws_completed_orders: dict[int, Trade],
     interactive_brokers_session: IB,
     notifier: TelegramNotifier,
     trigger_settlement_callback: Callable[[str, str], Awaitable[None]],
@@ -177,11 +177,11 @@ async def _reconcile_orders(
 async def _recover_submitted_order(
     database_connection: aiosqlite.Connection,
     order: OrderRow,
-    tws_active: object | None,
-    tws_completed: object | None,
+    tws_active: Trade | None,
+    tws_completed: Trade | None,
     local_orders: list[OrderRow],
-    tws_active_orders: dict[int, object],
-    tws_completed_orders: dict[int, object],
+    tws_active_orders: dict[int, Trade],
+    tws_completed_orders: dict[int, Trade],
     interactive_brokers_session: IB,
     notifier: TelegramNotifier,
     trigger_settlement_callback: Callable[[str, str], Awaitable[None]],
@@ -221,7 +221,7 @@ async def _recover_submitted_order(
 async def _sync_active_order_status(
     database_connection: aiosqlite.Connection,
     order: OrderRow,
-    tws_active: object,
+    tws_active: Trade,
 ) -> None:
     """Recovery Scenario 1: Updates perm_id and status for orders still active in TWS."""
     order_id = order.order_id
@@ -248,7 +248,7 @@ async def _sync_active_order_status(
 async def _handle_filled_during_downtime(
     database_connection: aiosqlite.Connection,
     order: OrderRow,
-    tws_completed: object,
+    tws_completed: Trade,
     interactive_brokers_session: IB,
     notifier: TelegramNotifier,
     trigger_settlement_callback: Callable[[str, str], Awaitable[None]],
@@ -300,8 +300,8 @@ async def _try_recover_indirect_entry_fill(
     database_connection: aiosqlite.Connection,
     order: OrderRow,
     local_orders: list[OrderRow],
-    tws_active_orders: dict[int, object],
-    tws_completed_orders: dict[int, object],
+    tws_active_orders: dict[int, Trade],
+    tws_completed_orders: dict[int, Trade],
     interactive_brokers_session: IB,
     notifier: TelegramNotifier,
 ) -> bool:
@@ -382,7 +382,7 @@ async def _cancel_ghost_order(
 async def _recover_created_order(
     database_connection: aiosqlite.Connection,
     order: OrderRow,
-    tws_active: object | None,
+    tws_active: Trade | None,
     groups_to_requeue: set[str],
 ) -> None:
     """Gleicht den Zustand einer lokalen Created Order mit TWS ab."""

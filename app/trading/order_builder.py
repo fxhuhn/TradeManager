@@ -42,48 +42,50 @@ def make_stock_contract(symbol: str) -> Stock:
 
 # Xetra tick-size table: (lower_bound, tick_size)
 # Source: Deutsche Börse Xetra Tick Size Table (MiFID II liquidity bands)
-_XETRA_TICK_TABLE: list[tuple[float, float]] = [
-    (50000.0, 10.0),
-    (20000.0, 5.0),
-    (10000.0, 2.0),
-    (5000.0, 1.0),
-    (2000.0, 0.5),
-    (1000.0, 0.2),
-    (500.0, 0.1),
-    (200.0, 0.05),
-    (100.0, 0.02),
-    (50.0, 0.01),
-    (20.0, 0.005),
-    (10.0, 0.002),
-    (5.0, 0.001),
-    (2.0, 0.0005),
-    (1.0, 0.0002),
+_XETRA_TICK_TABLE: list[tuple[Decimal, Decimal]] = [
+    (Decimal("50000.0"), Decimal("10.0")),
+    (Decimal("20000.0"), Decimal("5.0")),
+    (Decimal("10000.0"), Decimal("2.0")),
+    (Decimal("5000.0"), Decimal("1.0")),
+    (Decimal("2000.0"), Decimal("0.5")),
+    (Decimal("1000.0"), Decimal("0.2")),
+    (Decimal("500.0"), Decimal("0.1")),
+    (Decimal("200.0"), Decimal("0.05")),
+    (Decimal("100.0"), Decimal("0.02")),
+    (Decimal("50.0"), Decimal("0.01")),
+    (Decimal("20.0"), Decimal("0.005")),
+    (Decimal("10.0"), Decimal("0.002")),
+    (Decimal("5.0"), Decimal("0.001")),
+    (Decimal("2.0"), Decimal("0.0005")),
+    (Decimal("1.0"), Decimal("0.0002")),
 ]
 
-_DEFAULT_US_TICK_SIZE: float = 0.01
-_XETRA_MIN_TICK_SIZE: float = 0.0001
+_DEFAULT_US_TICK_SIZE: Decimal = Decimal("0.01")
+_XETRA_MIN_TICK_SIZE: Decimal = Decimal("0.0001")
 
 
-def get_tick_size(symbol: str, price: float) -> float:
-    """Ermittelt die minimale Preisänderung (Tick Size) für ein Symbol."""
+def get_tick_size(symbol: str, price: Decimal | float) -> Decimal:
+    """Ermittelt die minimale Preisänderung (Tick Size) als Decimal für ein Symbol."""
+    price_decimal = price if isinstance(price, Decimal) else Decimal(str(price))
     if not symbol.upper().endswith(".DE"):
         return _DEFAULT_US_TICK_SIZE
 
     for lower_bound, tick_size in _XETRA_TICK_TABLE:
-        if price >= lower_bound:
+        if price_decimal >= lower_bound:
             return tick_size
 
     return _XETRA_MIN_TICK_SIZE
 
 
-def round_to_tick(price: float, tick_size: float) -> float:
-    """Rundet einen Preis auf das nächste Vielfache der Tick-Größe unter Berücksichtigung von Float-Ungenauigkeiten."""
-    price_dec = Decimal(str(price))
-    tick_dec = Decimal(str(tick_size))
-    rounded = (price_dec / tick_dec).quantize(
+def round_to_tick(price: Decimal | float, tick_size: Decimal | float) -> Decimal:
+    """Rundet einen Preis auf das nächste Vielfache der Tick-Größe als Decimal."""
+    price_decimal = price if isinstance(price, Decimal) else Decimal(str(price))
+    tick_decimal = (
+        tick_size if isinstance(tick_size, Decimal) else Decimal(str(tick_size))
+    )
+    return (price_decimal / tick_decimal).quantize(
         Decimal("1"), rounding=ROUND_HALF_UP
-    ) * tick_dec
-    return float(rounded)
+    ) * tick_decimal
 
 
 def build_order(order_row: OrderRow) -> Order:
@@ -105,14 +107,16 @@ def build_order(order_row: OrderRow) -> Order:
     # Preise setzen (Dezimal-zu-Float-Konvertierung an der API-Schnittstelle)
     # Runden auf die minimale Tick-Größe des Zielmarkts
     if order.orderType in ("LMT", "LOC"):
-        price = float(order_row.target_price)
-        tick_size = get_tick_size(order_row.symbol, price)
-        order.lmtPrice = round_to_tick(price, tick_size)
+        target_price = order_row.target_price or Decimal("0.0")
+        tick_size = get_tick_size(order_row.symbol, target_price)
+        rounded_price = round_to_tick(target_price, tick_size)
+        order.lmtPrice = float(rounded_price)
     elif order.orderType == "STP":
         # TWS Stop-Orders nutzen auxPrice für das Stop-Trigger-Niveau
-        price = float(order_row.target_price)
-        tick_size = get_tick_size(order_row.symbol, price)
-        order.auxPrice = round_to_tick(price, tick_size)
+        target_price = order_row.target_price or Decimal("0.0")
+        tick_size = get_tick_size(order_row.symbol, target_price)
+        rounded_price = round_to_tick(target_price, tick_size)
+        order.auxPrice = float(rounded_price)
     elif order.orderType in ("MKT", "MOC"):
         pass
     else:
