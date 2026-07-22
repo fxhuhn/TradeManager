@@ -33,7 +33,7 @@ Records intended and submitted orders.
 | `action` | `TEXT` | `CHECK IN ('BUY', 'SELL')` | The trade direction side. |
 | `quantity` | `INTEGER` | `NOT NULL`, `CHECK (quantity > 0)` | Scaled quantity of shares to trade. |
 | `order_type` | `TEXT` | `NOT NULL` | Order type class (e.g., LMT, STP, MKT, MOC). |
-| `target_price` | `REAL` | `NULLABLE` (Decimal precision) | Limit/Stop price. Mandatory if type is LMT or STP. |
+| `target_price` | `REAL`/`TEXT` | `NULLABLE` | Limit/Stop price. Mandatory if type is LMT or STP (stored as stringified `Decimal`). |
 | `tif` | `TEXT` | `DEFAULT 'GTC'` | Time-In-Force (e.g., DAY, GTC). |
 | `strategy_name` | `TEXT` | `NULLABLE` | Name of the generating trading logic/strategy. |
 | `status` | `TEXT` | `CHECK IN ('Created', ...)` | Order lifecycle state. |
@@ -54,9 +54,9 @@ Tracks transaction details reported from TWS callbacks.
 | :--- | :--- | :--- | :--- |
 | `exec_id` | `TEXT` | `PRIMARY KEY` | TWS execution ID (uniquely identifies a partial fill). |
 | `order_id` | `INTEGER` | `NOT NULL`, `FOREIGN KEY` | Reference to corresponding order row in database. |
-| `price` | `REAL` | `NOT NULL` (Decimal precision) | Trade fill execution price. |
-| `qty` | `REAL` | `NOT NULL` (Decimal precision) | Number of shares filled in this transaction. |
-| `commission` | `REAL` | `NULLABLE` | Trade commission fee (populated later by commission callback). |
+| `price` | `REAL`/`TEXT` | `NOT NULL` | Trade fill execution price (stored as stringified `Decimal`). |
+| `qty` | `REAL`/`TEXT` | `NOT NULL` | Number of shares filled in this transaction (stored as stringified `Decimal`). |
+| `commission` | `REAL`/`TEXT` | `NULLABLE` | Trade commission fee (stored as stringified `Decimal`, populated by commission callback). |
 | `currency` | `TEXT` | `NULLABLE` | Execution currency (e.g., USD). |
 | `executed_at` | `TIMESTAMP` | `NULLABLE` | Timestamp when the execution event occurred. |
 
@@ -70,11 +70,11 @@ Aggregates and persists final trade results.
 | :--- | :--- | :--- | :--- |
 | `account_id` | `TEXT` | `NOT NULL` | Brokerage account ID. |
 | `trade_group_id` | `TEXT` | `NOT NULL` | Group key connecting the entry and exit legs. |
-| `avg_entry_price` | `REAL` | `NOT NULL` (Decimal precision) | Calculated average VWAP entry price across execution parts. |
-| `avg_exit_price` | `REAL` | `NOT NULL` (Decimal precision) | Calculated average VWAP exit price across execution parts. |
-| `price_diff_slippage`| `REAL` | `NOT NULL` (Decimal precision) | Difference between the intended target price and executed price. |
-| `total_commissions` | `REAL` | `NOT NULL` (Decimal precision) | Sum of commissions from all linked executions. |
-| `net_pnl` | `REAL` | `NOT NULL` (Decimal precision) | Profit or Loss calculated as `(Exit Price - Entry Price) * Qty - Fees`. |
+| `avg_entry_price` | `REAL`/`TEXT` | `NOT NULL` | Calculated average VWAP entry price across execution parts (stored as stringified `Decimal`). |
+| `avg_exit_price` | `REAL`/`TEXT` | `NOT NULL` | Calculated average VWAP exit price across execution parts (stored as stringified `Decimal`). |
+| `price_diff_slippage`| `REAL`/`TEXT` | `NOT NULL` | Difference between intended target price and executed price (stored as stringified `Decimal`). |
+| `total_commissions` | `REAL`/`TEXT` | `NOT NULL` | Sum of commissions from all linked executions (stored as stringified `Decimal`). |
+| `net_pnl` | `REAL`/`TEXT` | `NOT NULL` | Profit or Loss calculated as `(Exit Price - Entry Price) * Qty - Fees` (stored as stringified `Decimal`). |
 | `settled_at` | `TIMESTAMP` | `DEFAULT CURRENT_TIMESTAMP` | Timestamp indicating when settlement calculations finalized. |
 
 * **Constraints**:
