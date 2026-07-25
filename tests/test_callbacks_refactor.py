@@ -81,3 +81,45 @@ async def test_update_commission_handles_missing_execution_row_gracefully(
 
     # Act & Assert (Row does not exist, should exit cleanly after max retries)
     await manager._update_commission("EXEC-NONEXISTENT", Decimal("1.00"), "USD")
+
+
+def test_extract_unassigned_execution_details() -> None:
+    """Verifies that extract_unassigned_execution_details correctly pulls contract and execution fields."""
+    from app.trading.callbacks import (
+        extract_unassigned_execution_details,
+        handle_unassigned_execution,
+    )
+
+    mock_trade = MagicMock()
+    mock_trade.order.action = "SELL"
+    mock_trade.order.account = "U19605236"
+    mock_trade.order.orderRef = "Ref123"
+
+    mock_fill = MagicMock()
+    mock_fill.contract.symbol = "SLB"
+    mock_fill.contract.secType = "STK"
+    mock_fill.contract.exchange = "SMART"
+    mock_fill.contract.currency = "USD"
+    mock_fill.execution.side = "SLD"
+    mock_fill.execution.shares = 51.0
+    mock_fill.execution.price = 52.42
+    mock_fill.execution.acctNumber = "U19605236"
+    mock_fill.execution.orderId = -6
+    mock_fill.execution.permId = 123456
+    mock_fill.execution.execId = "EXEC-999"
+    mock_fill.execution.time = "2026-07-24 22:00:03"
+
+    details = extract_unassigned_execution_details(mock_trade, mock_fill)
+
+    assert details["symbol"] == "SLB"
+    assert details["sec_type"] == "STK"
+    assert details["side"] == "SLD"
+    assert details["qty"] == Decimal("51.0")
+    assert details["price"] == Decimal("52.42")
+    assert details["account_id"] == "U19605236"
+    assert details["order_id"] == -6
+    assert details["perm_id"] == 123456
+    assert details["exec_id"] == "EXEC-999"
+
+    handled = handle_unassigned_execution(mock_trade, mock_fill)
+    assert handled["symbol"] == "SLB"

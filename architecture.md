@@ -187,6 +187,9 @@ This section provides a detailed reference of all public classes and functions i
 - `on_commission_report` (Function/Method): Callback handling trade commission details.
 - `on_error` (Function/Method): Dispatches TWS connection/request errors.
 - `on_disconnected` (Function/Method): Handles disconnection events from the Gateway.
+- `extract_unassigned_execution_details` (Function): Extracts complete contract and execution attributes from unassigned TWS fill objects.
+- `handle_unassigned_execution` (Function): Logs detailed warnings for execution events not matching any local order in SQLite.
+
 
 ### 4.10 Module: `app.trading.error_codes`
 - `ErrorClass` (Class): Enumeration classifying IBKR error severity.

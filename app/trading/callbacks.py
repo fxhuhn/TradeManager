@@ -30,6 +30,93 @@ from app.trading.error_codes import ErrorClass, classify_error_code
 logger = structlog.get_logger()
 
 
+def extract_unassigned_execution_details(
+    trade: object, fill: object
+) -> dict[str, object]:
+    """
+    Extrahiert alle verfügbaren Vertrags- und Ausführungsdetails aus einem TWS Trade- & Fill-Objekt.
+
+    Wird verwendet, um bei unzugeordneten/unbekannten Orders alle Attribute (Symbol, Stückzahl,
+    Preis, Börse, Konto etc.) vollständig zu erfassen.
+    """
+    contract = getattr(fill, "contract", None)
+    execution = getattr(fill, "execution", None)
+    order = getattr(trade, "order", None)
+
+    symbol = getattr(contract, "symbol", "") if contract else ""
+    sec_type = getattr(contract, "secType", "") if contract else ""
+    exchange = (
+        getattr(contract, "exchange", "") or getattr(execution, "exchange", "")
+        if contract or execution
+        else ""
+    )
+    currency = getattr(contract, "currency", "") if contract else ""
+
+    side = (
+        getattr(execution, "side", "") or getattr(order, "action", "")
+        if execution or order
+        else ""
+    )
+    qty_raw = getattr(execution, "shares", None) if execution else None
+    qty = Decimal(str(qty_raw)) if qty_raw is not None else None
+
+    price_raw = getattr(execution, "price", None) if execution else None
+    price = Decimal(str(price_raw)) if price_raw is not None else None
+
+    account_id = (
+        getattr(execution, "acctNumber", "") or getattr(order, "account", "")
+        if execution or order
+        else ""
+    )
+    order_id = getattr(execution, "orderId", 0) if execution else 0
+    perm_id = getattr(execution, "permId", None) if execution else None
+    exec_id = getattr(execution, "execId", "") if execution else ""
+    executed_at = getattr(execution, "time", None) if execution else None
+    order_ref = getattr(order, "orderRef", "") if order else ""
+
+    return {
+        "symbol": symbol,
+        "sec_type": sec_type,
+        "exchange": exchange,
+        "currency": currency,
+        "side": side,
+        "qty": qty,
+        "price": price,
+        "account_id": account_id,
+        "order_id": order_id,
+        "perm_id": perm_id,
+        "exec_id": exec_id,
+        "executed_at": executed_at,
+        "order_ref": order_ref,
+    }
+
+
+def handle_unassigned_execution(trade: object, fill: object) -> dict[str, object]:
+    """
+    Protokolliert eine Ausführung, die keiner bekannten Order in der lokalen DB zugewiesen werden kann.
+
+    Schreibt eine ausführliche Warnung mit allen ausgelesenen Vertragsdaten in das Log.
+    """
+    details = extract_unassigned_execution_details(trade, fill)
+    logger.warning(
+        "Unassigned execution received (order not found in local DB)",
+        symbol=details["symbol"],
+        side=details["side"],
+        qty=details["qty"],
+        price=details["price"],
+        account_id=details["account_id"],
+        order_id=details["order_id"],
+        perm_id=details["perm_id"],
+        exec_id=details["exec_id"],
+        sec_type=details["sec_type"],
+        exchange=details["exchange"],
+        currency=details["currency"],
+        executed_at=str(details["executed_at"]) if details["executed_at"] else None,
+        order_ref=details["order_ref"],
+    )
+    return details
+
+
 class TwsCallbacksManager:
     """
     Registriert und verwaltet alle asynchronen TWS-Callbacks (Events)
@@ -251,17 +338,30 @@ class TwsCallbacksManager:
         qty = Decimal(str(fill.execution.shares))
         currency = fill.contract.currency
         executed_at = fill.execution.time
+        symbol = fill.contract.symbol
+        side = fill.execution.side
 
         logger.info(
             "execDetailsEvent received (partial execution)",
             exec_id=exec_id,
             order_id=order_id,
+            symbol=symbol,
+            side=side,
             price=price,
             qty=qty,
         )
 
         asyncio.create_task(
-            self._save_execution(exec_id, order_id, price, qty, currency, executed_at)
+            self._save_execution(
+                exec_id,
+                order_id,
+                price,
+                qty,
+                currency,
+                executed_at,
+                trade=trade,
+                fill=fill,
+            )
         )
 
     async def _save_execution(
@@ -272,6 +372,8 @@ class TwsCallbacksManager:
         qty: Decimal,
         currency: str,
         executed_at: object,
+        trade: object = None,
+        fill: object = None,
     ) -> None:
         """Speichert ein Ausführungsdetail in der executions-Tabelle."""
         db = await self.db_factory()
@@ -283,11 +385,14 @@ class TwsCallbacksManager:
                 exists = await cursor.fetchone()
 
             if not exists:
-                logger.debug(
-                    "Ignoring execution detail for foreign/manual TWS order (not found in DB)",
-                    order_id=order_id,
-                    exec_id=exec_id,
-                )
+                if trade is not None and fill is not None:
+                    handle_unassigned_execution(trade, fill)
+                else:
+                    logger.warning(
+                        "Unassigned execution received (order not found in local DB)",
+                        order_id=order_id,
+                        exec_id=exec_id,
+                    )
                 return
 
             async with transaction(db):
