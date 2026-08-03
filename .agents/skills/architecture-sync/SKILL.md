@@ -27,10 +27,6 @@ This skill is triggered whenever any of the following code modifications occur i
 ### 3. Pre-Commit Validation Hook
 Every commit runs a local validation script to audit synchronization. To run this check manually:
 ```bash
-poetry run python .agents/skills/architecture-sync/scripts/check_sync.py
-```
-Or if poetry is not used, run via:
-```bash
 python .agents/skills/architecture-sync/scripts/check_sync.py
 ```
 This check must exit with `0` for any commit to succeed.

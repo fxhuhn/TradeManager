@@ -12,6 +12,6 @@ When the user invokes `/full-review` or requests a comprehensive codebase check,
    * **Dead Code Check**: Run `vulture . --exclude .venv,tests`
    * **Security Scan**: Run `bandit -r . -x tests`
    * **Dependency Scan**: Run `pip-audit -r requirements.txt`
-   * **Test Suite Check**: Run `pytest tests/`
+   * **Test Suite Check**: Run `pytest tests/ -v --tb=short --cov=app --cov-report=term-missing --cov-fail-under=80`
 3. **Consolidate Results**: Synthesize the output from the steps above into a condensed, high-density health report.
 4. **Format Requirement**: Return only repository-relative paths, direct code diffs, or structured markdown tables. No generic text summaries.

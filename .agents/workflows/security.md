@@ -3,7 +3,7 @@ description: "Run security and risk assessment using the python-security skill."
 trigger: "/security"
 ---
 
-# /secure Command Workflow
+# /security Command Workflow
 
 When the user invokes `/security` or requests a security audit, you must:
 

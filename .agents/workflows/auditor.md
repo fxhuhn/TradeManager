@@ -3,7 +3,7 @@ description: "Run code quality audit using the python-auditor skill."
 trigger: "/auditor"
 ---
 
-# /audit Command Workflow
+# /auditor Command Workflow
 
 When the user invokes `/auditor` or requests a code quality audit, you must:
 

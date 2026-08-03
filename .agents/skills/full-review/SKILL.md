@@ -40,7 +40,7 @@ Apply the `python-auditor` skill (Quality Pyramid scan) on all modules in `app/`
 
 ### Step 4: Test Suite Verification
 ```bash
-pytest tests/ -v --tb=short
+pytest tests/ -v --tb=short --cov=app --cov-report=term-missing --cov-fail-under=80
 ```
 Then apply the `python-tester` skill to assess test coverage and edge-case robustness.
 
