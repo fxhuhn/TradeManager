@@ -82,3 +82,44 @@ def test_calculate_settlement_handles_short_sell_position_profit() -> None:
     # Gross PnL for SELL: -1 * (190 - 205) * 100 = +1500.00
     # Net PnL: 1500.00 - 2.00 = 1498.00
     assert output.net_profit_loss == Decimal("1498.00")
+
+
+def test_calculate_settlement_handles_none_entry_target_price() -> None:
+    """Verifies that calculate_settlement returns 0.0 slippage when entry_target_price is None (market orders)."""
+    settlement_input = SettlementInput(
+        entry_executions=[
+            ExecutionTuple(quantity=Decimal("10"), price=Decimal("150.00"))
+        ],
+        exit_executions=[
+            ExecutionTuple(quantity=Decimal("10"), price=Decimal("160.00"))
+        ],
+        entry_target_price=None,
+        entry_action="BUY",
+        total_commissions=Decimal("1.00"),
+    )
+
+    output: SettlementOutput = calculate_settlement(settlement_input)
+
+    assert output.avg_entry_price == Decimal("150.00")
+    assert output.avg_exit_price == Decimal("160.00")
+    assert output.price_diff_slippage == Decimal("0.0")
+    assert output.net_profit_loss == Decimal("99.00")
+
+
+def test_calculate_settlement_handles_zero_entry_target_price() -> None:
+    """Verifies that calculate_settlement returns 0.0 slippage when entry_target_price is 0.0."""
+    settlement_input = SettlementInput(
+        entry_executions=[
+            ExecutionTuple(quantity=Decimal("10"), price=Decimal("150.00"))
+        ],
+        exit_executions=[
+            ExecutionTuple(quantity=Decimal("10"), price=Decimal("160.00"))
+        ],
+        entry_target_price=Decimal("0.0"),
+        entry_action="BUY",
+        total_commissions=Decimal("1.00"),
+    )
+
+    output: SettlementOutput = calculate_settlement(settlement_input)
+
+    assert output.price_diff_slippage == Decimal("0.0")

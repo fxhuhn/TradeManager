@@ -250,8 +250,8 @@ async def test_check_high_slippage_sends_alert(temp_db: aiosqlite.Connection) ->
 
     # avg_entry_price = 100.0, price_diff_slippage = 1.05, limit = 1.00 (1%) -> Exceeded
     await temp_db.execute(
-        "INSERT INTO orders (order_id, trade_group_id, symbol, bracket_role, status) "
-        "VALUES (1, 'G1', 'AAPL', 'ENTRY', 'Filled')"
+        "INSERT INTO orders (order_id, trade_group_id, symbol, bracket_role, status, target_price) "
+        "VALUES (1, 'G1', 'AAPL', 'ENTRY', 'Filled', '100.0')"
     )
     await temp_db.execute(
         "INSERT INTO trades_settlement (trade_group_id, price_diff_slippage, avg_entry_price) "
@@ -283,8 +283,8 @@ async def test_check_high_slippage_does_not_alert_within_limits(
 
     # avg_entry_price = 100.0, price_diff_slippage = 0.99, limit = 1.00 -> Within limits
     await temp_db.execute(
-        "INSERT INTO orders (order_id, trade_group_id, symbol, bracket_role, status) "
-        "VALUES (1, 'G1', 'AAPL', 'ENTRY', 'Filled')"
+        "INSERT INTO orders (order_id, trade_group_id, symbol, bracket_role, status, target_price) "
+        "VALUES (1, 'G1', 'AAPL', 'ENTRY', 'Filled', '100.0')"
     )
     await temp_db.execute(
         "INSERT INTO trades_settlement (trade_group_id, price_diff_slippage, avg_entry_price) "
@@ -317,6 +317,35 @@ async def test_check_high_slippage_handles_zero_avg_entry_price(
     await temp_db.execute(
         "INSERT INTO trades_settlement (trade_group_id, price_diff_slippage, avg_entry_price) "
         "VALUES ('G1', 1.00, 0.0)"
+    )
+    await temp_db.commit()
+
+    # Act
+    await check_high_slippage(
+        temp_db, mock_notifier, state, max_slippage_percentage=0.01
+    )
+
+    # Assert
+    mock_notifier.send_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_check_high_slippage_skips_market_orders(
+    temp_db: aiosqlite.Connection,
+) -> None:
+    """Verifies that check_high_slippage skips orders with target_price=0.0 or NULL (e.g. MKT/MOC/MOO)."""
+    # Arrange
+    mock_notifier = MagicMock()
+    mock_notifier.send_message = AsyncMock(return_value=True)
+    state = AlertState()
+
+    await temp_db.execute(
+        "INSERT INTO orders (order_id, trade_group_id, symbol, bracket_role, status, target_price) "
+        "VALUES (1, 'G1', 'AAPL', 'ENTRY', 'Filled', '0.0')"
+    )
+    await temp_db.execute(
+        "INSERT INTO trades_settlement (trade_group_id, price_diff_slippage, avg_entry_price) "
+        "VALUES ('G1', 150.0, 150.0)"
     )
     await temp_db.commit()
 

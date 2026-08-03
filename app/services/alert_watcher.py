@@ -170,7 +170,7 @@ async def check_high_slippage(
     Vergleicht den absoluten Wert von price_diff_slippage mit dem avg_entry_price * max_slippage_percentage.
     """
     query = """
-        SELECT ts.trade_group_id, ts.price_diff_slippage, ts.avg_entry_price, o.symbol
+        SELECT ts.trade_group_id, ts.price_diff_slippage, ts.avg_entry_price, o.symbol, o.target_price
         FROM trades_settlement ts
         JOIN orders o ON ts.trade_group_id = o.trade_group_id AND o.bracket_role = 'ENTRY'
     """
@@ -181,6 +181,14 @@ async def check_high_slippage(
                 price_diff_slippage = Decimal(str(row["price_diff_slippage"]))
                 avg_entry_price = Decimal(str(row["avg_entry_price"]))
                 symbol = row["symbol"]
+                target_price_raw = row["target_price"]
+
+                # Ignoriere Orders ohne echten Target-Preis (z. B. Target 0, MKT, MOC, MOO)
+                if target_price_raw is None:
+                    continue
+                target_price = Decimal(str(target_price_raw))
+                if target_price <= Decimal("0"):
+                    continue
 
                 # Prämisse: ABS(price_diff_slippage) > avg_entry_price * max_slippage_percentage
                 if avg_entry_price > Decimal("0"):

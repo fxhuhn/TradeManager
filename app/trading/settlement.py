@@ -125,7 +125,7 @@ async def _fetch_settlement_data(
     entry_executions: list[ExecutionTuple] = []
     exit_executions: list[ExecutionTuple] = []
     total_commissions = Decimal("0.0")
-    entry_target_price = Decimal("0.0")
+    entry_target_price: Decimal | None = None
     entry_action = "BUY"
 
     async with db.execute(query, (trade_group_id,)) as cursor:
@@ -143,11 +143,13 @@ async def _fetch_settlement_data(
 
             if role == "ENTRY":
                 entry_executions.append(ExecutionTuple(quantity=quantity, price=price))
-                entry_target_price = (
-                    Decimal(str(row["target_price"]))
-                    if row["target_price"] is not None
-                    else Decimal("0.0")
-                )
+                if row["target_price"] is not None:
+                    parsed_target = Decimal(str(row["target_price"]))
+                    entry_target_price = (
+                        parsed_target if parsed_target > Decimal("0.0") else None
+                    )
+                else:
+                    entry_target_price = None
                 entry_action = row["action"]
             elif role in ("SL", "TP", "EXIT"):
                 exit_executions.append(ExecutionTuple(quantity=quantity, price=price))
@@ -207,7 +209,7 @@ async def _send_settlement_notification(
     notifier: TelegramNotifier,
     trade_group_id: str,
     entry_action: str,
-    entry_target_price: Decimal,
+    entry_target_price: Decimal | None,
     outputs: SettlementOutput,
     total_commissions: Decimal,
 ) -> None:
@@ -215,12 +217,19 @@ async def _send_settlement_notification(
     profit_loss_emoji = (
         "🟢 Profit" if outputs.net_profit_loss >= Decimal("0.0") else "🔴 Loss"
     )
+    if entry_target_price is not None and entry_target_price > Decimal("0.0"):
+        target_str = f"{float(entry_target_price):.2f}"
+        slippage_str = f"{float(outputs.price_diff_slippage):+.2f}"
+    else:
+        target_str = "N/A"
+        slippage_str = "N/A"
+
     message = (
         f"✅ <b>TRADE SETTLEMENT</b> | <code>{trade_group_id}</code>\n"
         f"├─ <b>Symbol:</b> <code>{entry_action}</code> Position\n"
-        f"├─ <b>Entry:</b> <code>{float(outputs.avg_entry_price):.2f}</code> (Target: {float(entry_target_price):.2f})\n"
+        f"├─ <b>Entry:</b> <code>{float(outputs.avg_entry_price):.2f}</code> (Target: {target_str})\n"
         f"├─ <b>Exit:</b> <code>{float(outputs.avg_exit_price):.2f}</code>\n"
-        f"├─ <b>Slippage:</b> <code>{float(outputs.price_diff_slippage):+.2f}</code>\n"
+        f"├─ <b>Slippage:</b> <code>{slippage_str}</code>\n"
         f"├─ <b>Gebühren:</b> <code>{float(total_commissions):.2f} USD</code>\n"
         f"└─ <b>Netto-PnL:</b> <b>{float(outputs.net_profit_loss):+.2f} USD</b> ({profit_loss_emoji})"
     )
@@ -255,7 +264,7 @@ class SettlementInput:
 
     entry_executions: list[ExecutionTuple]
     exit_executions: list[ExecutionTuple]
-    entry_target_price: Decimal
+    entry_target_price: Decimal | None
     entry_action: str
     total_commissions: Decimal
 
@@ -298,12 +307,14 @@ def calculate_settlement(inputs: SettlementInput) -> SettlementOutput:
         else Decimal("0.0")
     )
 
-    if inputs.entry_action == "BUY":
+    if inputs.entry_target_price is None or inputs.entry_target_price <= Decimal("0.0"):
+        price_diff_slippage = Decimal("0.0")
+    elif inputs.entry_action == "BUY":
         price_diff_slippage = inputs.entry_target_price - avg_entry_price
-        direction = Decimal("1")
     else:
         price_diff_slippage = avg_entry_price - inputs.entry_target_price
-        direction = Decimal("-1")
+
+    direction = Decimal("1") if inputs.entry_action == "BUY" else Decimal("-1")
 
     gross_profit_loss = (
         direction * (avg_exit_price - avg_entry_price) * entry_sum_quantity

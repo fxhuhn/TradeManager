@@ -36,7 +36,7 @@ def _format_slippage_line(
 
     Returns an empty string when slippage cannot be determined or is zero.
     """
-    if limit_price is None or execution_price is None:
+    if limit_price is None or limit_price <= Decimal("0.0") or execution_price is None:
         return ""
 
     price_difference = execution_price - limit_price
