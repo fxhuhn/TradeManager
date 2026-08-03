@@ -179,6 +179,8 @@ This section provides a detailed reference of all public classes and functions i
   - `send_margin_limit_exceeded` (Method)
   - `send_margin_utilization_warning` (Method)
   - `send_high_margin_usage_warning` (Method)
+  - `send_unassigned_position_recovered` (Method)
+
 
 ### 4.9 Module: `app.trading.callbacks`
 - `register_all` (Function/Method): Binds TwsCallbacksManager event handlers to TWS.
@@ -207,6 +209,8 @@ This section provides a detailed reference of all public classes and functions i
 - `run_recovery` (Function): Restores system database matching gateway states.
 - `fetch_active_orders` (Function): Requests outstanding execution brackets.
 - `fetch_completed_orders` (Function): Fetches finalized bracket details.
+- `reconcile_broker_positions` (Function): Reconciles live IBKR positions with local database, auto-recovering unassigned positions into orders and executions tables.
+
 
 ### 4.13 Module: `app.trading.retry`
 - `handle_retriable_error` (Function): Processes transitory order errors for rescheduling.

@@ -10,6 +10,7 @@ import asyncio
 import logging
 import sys
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import Final
 
@@ -40,10 +41,10 @@ DEFAULT_CLIENT_ID: Final[int] = 99
 class AccountMetrics:
     """Immutable data structure representing key account metrics (Functional Core)."""
 
-    net_liquidation: float
-    total_margin: float
-    available_funds: float
-    cushion_ratio: float
+    net_liquidation: Decimal
+    total_margin: Decimal
+    available_funds: Decimal
+    cushion_ratio: Decimal
 
 
 # =====================================================================
@@ -52,9 +53,9 @@ class AccountMetrics:
 
 
 def calculate_account_metrics(
-    net_liquidation: float,
-    total_margin: float,
-    available_funds: float,
+    net_liquidation: Decimal,
+    total_margin: Decimal,
+    available_funds: Decimal,
 ) -> AccountMetrics:
     """
     Pure Function: Calculates metrics based on raw account parameters.
@@ -67,16 +68,16 @@ def calculate_account_metrics(
     Returns:
         An immutable AccountMetrics object.
     """
-    if net_liquidation <= 0.0:
+    if net_liquidation <= Decimal("0"):
         return AccountMetrics(
             net_liquidation=net_liquidation,
             total_margin=total_margin,
             available_funds=available_funds,
-            cushion_ratio=0.0,
+            cushion_ratio=Decimal("0"),
         )
 
     # Cushion is the percentage of excess equity relative to net liquidation
-    cushion_ratio = max(0.0, available_funds / net_liquidation)
+    cushion_ratio = max(Decimal("0"), available_funds / net_liquidation)
     return AccountMetrics(
         net_liquidation=net_liquidation,
         total_margin=total_margin,
@@ -104,17 +105,17 @@ async def fetch_account_summary(ib: IB) -> AccountMetrics:
     # accountValues() returns a list of AccountValue named tuples for the active account.
     raw_values = ib.accountValues()
 
-    net_liq = 0.0
-    total_margin = 0.0
-    avail_funds = 0.0
+    net_liq = Decimal("0")
+    total_margin = Decimal("0")
+    avail_funds = Decimal("0")
 
     for val in raw_values:
         if val.tag == "NetLiquidation":
-            net_liq = float(val.value)
+            net_liq = Decimal(val.value)
         elif val.tag in {"FullInitMarginReq", "InitMarginReq"}:
-            total_margin = float(val.value)
+            total_margin = Decimal(val.value)
         elif val.tag == "AvailableFunds":
-            avail_funds = float(val.value)
+            avail_funds = Decimal(val.value)
 
     return calculate_account_metrics(net_liq, total_margin, avail_funds)
 
@@ -149,7 +150,7 @@ async def query_ibkr_data(host: str, port: int, client_id: int) -> None:
         logger.info("Net Liquidation: %.2f", metrics.net_liquidation)
         logger.info("Total Margin Req: %.2f", metrics.total_margin)
         logger.info("Available Funds:  %.2f", metrics.available_funds)
-        logger.info("Margin Cushion:   %.2f%%", metrics.cushion_ratio * 100.0)
+        logger.info("Margin Cushion:   %s%%", metrics.cushion_ratio * Decimal("100"))
 
         # 2. Query Open Positions
         positions: list[Position] = ib.positions()

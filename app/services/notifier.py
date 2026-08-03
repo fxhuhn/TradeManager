@@ -339,3 +339,20 @@ class TelegramNotifier:
             f"└─ <b>Netto-Liquidationswert:</b> <code>$ {net_liquidation:,.2f}</code>"
         )
         return await self.send_message(message)
+
+    async def send_unassigned_position_recovered(
+        self,
+        symbol: str,
+        quantity: Decimal,
+        avg_cost: Decimal,
+        account_id: str,
+    ) -> bool:
+        """Sendet eine Info-Meldung über eine automatisch in DB nacherfasste Unassigned-Position."""
+        message = (
+            f"ℹ️ <b>UNASSIGNED POSITION RECOVERED</b> | <code>{symbol}</code>\n"
+            f"├─ <b>Konto:</b> <code>{account_id}</code>\n"
+            f"├─ <b>Menge:</b> <code>{quantity}</code>\n"
+            f"├─ <b>Durchschnittspreis:</b> <code>$ {avg_cost:.2f}</code>\n"
+            f"└─ <b>Info:</b> Position ohne Strategie in der DB synchronisiert."
+        )
+        return await self.send_message(message)

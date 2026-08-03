@@ -286,3 +286,116 @@ async def test_process_trade_group_exit_matching_with_dot_de_suffix(
     called_contract = mock_ib.placeOrder.call_args[0][0]
     assert called_contract.symbol == "SXRV"
     assert called_contract.primaryExchange == "IBIS2"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_broker_positions_recovers_unassigned_position(db) -> None:
+    """
+    Prüft, dass reconcile_broker_positions bei einer Diskrepanz zwischen Broker
+    und DB synthetische ENTRY-Orders (strategy_name=None) und Executions anlegt.
+    """
+    from decimal import Decimal
+
+    from app.trading.recovery import reconcile_broker_positions
+
+    # 1. IB-Mocking: 15 Aktien AKAM im Broker vorhanden
+    mock_position = MagicMock()
+    mock_position.account = "U19605236"
+    mock_position.contract.symbol = "AKAM"
+    mock_position.contract.currency = "USD"
+    mock_position.position = 15.0
+    mock_position.avgCost = 133.48
+
+    mock_ib = MagicMock()
+    mock_ib.positions.return_value = [mock_position]
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_unassigned_position_recovered = AsyncMock()
+
+    # 2. Reconcile ausführen
+    await reconcile_broker_positions(db, mock_ib, mock_notifier)
+
+    # 3. Verifikation in orders: Synthetischer ENTRY-Order-Eintrag
+    async with db.execute(
+        "SELECT order_id, trade_group_id, symbol, action, quantity, bracket_role, status, strategy_name FROM orders WHERE symbol = 'AKAM'"
+    ) as cursor:
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row["order_id"] < 0
+        assert row["trade_group_id"] == "UNASSIGNED_AKAM_U19605236"
+        assert row["action"] == "BUY"
+        assert row["quantity"] == 15
+        assert row["bracket_role"] == "ENTRY"
+        assert row["status"] == "Filled"
+        assert row["strategy_name"] is None
+
+    # 4. Verifikation in executions: Ausführungseintrag
+    async with db.execute(
+        "SELECT exec_id, order_id, price, qty, currency FROM executions WHERE order_id = ?",
+        (row["order_id"],),
+    ) as cursor:
+        exec_row = await cursor.fetchone()
+        assert exec_row is not None
+        assert exec_row["exec_id"] == f"RECOVERED_POS_AKAM_{abs(row['order_id'])}"
+        assert Decimal(str(exec_row["price"])) == Decimal("133.48")
+        assert Decimal(str(exec_row["qty"])) == Decimal("15.0")
+        assert exec_row["currency"] == "USD"
+
+    # 5. Notifier Verifikation
+    mock_notifier.send_unassigned_position_recovered.assert_called_once_with(
+        symbol="AKAM",
+        quantity=Decimal("15"),
+        avg_cost=Decimal("133.48"),
+        account_id="U19605236",
+    )
+
+
+@pytest.mark.asyncio
+async def test_reconcile_broker_positions_skips_when_synced(db) -> None:
+    """
+    Prüft, dass reconcile_broker_positions keine neuen Orders/Executions anlegt,
+    wenn die DB-Stückzahl bereits exakt mit dem Broker übereinstimmt.
+    """
+
+    from app.trading.recovery import reconcile_broker_positions
+
+    # 1. DB-Setup: Bereits 10 Aktien ALAB in DB verzeichnet
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, status)
+        VALUES (100, 'TG_ALAB', 'U19605236', 'ENTRY', 'ALAB', 'STK', 'SMART', 'BUY', 10, 'MKT', 'Filled')
+        """
+    )
+    await db.execute(
+        """
+        INSERT INTO executions (exec_id, order_id, price, qty, commission, currency, executed_at)
+        VALUES ('EXEC_ALAB_1', 100, '400.00', '10.0', '0.0', 'USD', '2026-08-01')
+        """
+    )
+    await db.commit()
+
+    # 2. IB-Mocking: Exakt 10 Aktien ALAB im Broker
+    mock_position = MagicMock()
+    mock_position.account = "U19605236"
+    mock_position.contract.symbol = "ALAB"
+    mock_position.contract.currency = "USD"
+    mock_position.position = 10.0
+    mock_position.avgCost = 400.00
+
+    mock_ib = MagicMock()
+    mock_ib.positions.return_value = [mock_position]
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_unassigned_position_recovered = AsyncMock()
+
+    # 3. Reconcile ausführen
+    await reconcile_broker_positions(db, mock_ib, mock_notifier)
+
+    # 4. Verifikation: Keine neue Order oder Execution für ALAB
+    async with db.execute(
+        "SELECT COUNT(*) as count FROM orders WHERE symbol = 'ALAB'"
+    ) as cursor:
+        row = await cursor.fetchone()
+        assert row["count"] == 1  # Nur die bestehende Order #100
+
+    mock_notifier.send_unassigned_position_recovered.assert_not_called()

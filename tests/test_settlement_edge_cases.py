@@ -3,8 +3,6 @@
 
 from decimal import Decimal
 
-import pytest
-
 from app.trading.settlement import (
     ExecutionTuple,
     SettlementInput,

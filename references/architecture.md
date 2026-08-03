@@ -161,6 +161,8 @@ The lifecycle status changes of a trade group's order are stateful and governed 
 | `PreSubmitted`| `Cancelled` | Execution is halted via manual intervention, auto-purge, or TWS error cancellation. |
 | `PreSubmitted`| `Error` | Connection disconnect limits exceeded, or Gateway reports failed transmission error. |
 | `Submitted` | `Cancelled` | Brokerage cancels the order context before Gateway processing. |
+| — | `Filled` | Automatic position reconciliation (`reconcile_broker_positions`) detects an unassigned broker position discrepancy and creates a synthetic `ENTRY` order (`strategy_name = NULL`, `trade_group_id = UNASSIGNED_*`) and matching execution ticket. |
+
 
 ---
 

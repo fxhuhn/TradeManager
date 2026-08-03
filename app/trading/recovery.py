@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import aiosqlite
@@ -75,6 +76,12 @@ async def run_recovery(
             trade_group_id=trade_group_id,
         )
         await queue.put(trade_group_id)
+
+    await reconcile_broker_positions(
+        database_connection=database_connection,
+        interactive_brokers_session=interactive_brokers_session,
+        notifier=notifier,
+    )
 
     logger.debug("Recovery phase completed")
 
@@ -502,3 +509,131 @@ async def _save_missing_executions(
                 order_id=order_id,
                 error=str(exception),
             )
+
+
+async def reconcile_broker_positions(
+    database_connection: aiosqlite.Connection,
+    interactive_brokers_session: IB,
+    notifier: TelegramNotifier,
+) -> None:
+    """
+    Gleicht Live-Positionen vom IBKR Broker mit der lokalen SQLite-Datenbank ab.
+
+    Falls Positionen im Broker existieren, die nicht oder nur teilweise in der DB erfasst sind,
+    werden synthetische Entry-Orders und Executions mit strategy_name = None (NULL) angelegt,
+    damit die Bestände 100% synchron sind und spätere Settlement-Verkäufe vorbereitet sind.
+    """
+    positions = interactive_brokers_session.positions()
+    if not positions:
+        return
+
+    # Netto-Ausführungen in der DB berechnen (SUM(BUY) - SUM(SELL))
+    db_positions: dict[str, Decimal] = {}
+    query = """
+        SELECT o.symbol,
+               SUM(CASE WHEN o.action = 'BUY' THEN CAST(e.qty AS REAL) ELSE -CAST(e.qty AS REAL) END) as net_qty
+        FROM executions e
+        JOIN orders o ON e.order_id = o.order_id
+        GROUP BY o.symbol
+    """
+    async with database_connection.execute(query) as cursor:
+        async for row in cursor:
+            symbol = normalize_symbol(str(row[0]))
+            net_qty = Decimal(str(row[1])) if row[1] is not None else Decimal("0.0")
+            db_positions[symbol] = net_qty
+
+    for pos in positions:
+        broker_qty = Decimal(str(pos.position))
+        if broker_qty <= Decimal("0.0"):
+            continue
+
+        symbol = normalize_symbol(pos.contract.symbol)
+        account_id = pos.account
+        avg_cost = Decimal(str(round(float(pos.avgCost), 4)))
+
+        db_net_qty = db_positions.get(symbol, Decimal("0.0"))
+        delta_qty = broker_qty - db_net_qty
+
+        if delta_qty > Decimal("0.0"):
+            logger.info(
+                "Unassigned broker position discrepancy detected. Recovering to DB.",
+                symbol=symbol,
+                broker_qty=float(broker_qty),
+                db_net_qty=float(db_net_qty),
+                delta_qty=float(delta_qty),
+                avg_cost=float(avg_cost),
+            )
+
+            # Nächste freie negative Sequenz-ID ermitteln
+            temp_id = await _get_next_recovery_temp_id(database_connection)
+            trade_group_id = f"UNASSIGNED_{symbol}_{account_id}"
+            now_iso = datetime.now(UTC).isoformat()
+
+            async with transaction(database_connection):
+                await database_connection.execute(
+                    """
+                    INSERT INTO orders (
+                        order_id, perm_id, parent_id, trade_group_id, account_id,
+                        bracket_role, symbol, sec_type, exchange, action, quantity,
+                        order_type, target_price, tif, strategy_name, status, transmitted_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        temp_id,
+                        None,
+                        None,
+                        trade_group_id,
+                        account_id,
+                        "ENTRY",
+                        symbol,
+                        "STK",
+                        "SMART",
+                        "BUY",
+                        int(delta_qty),
+                        "MKT",
+                        str(avg_cost),
+                        "GTC",
+                        None,
+                        "Filled",
+                        now_iso,
+                    ),
+                )
+
+                exec_id = f"RECOVERED_POS_{symbol}_{abs(temp_id)}"
+                currency_str = (
+                    pos.contract.currency
+                    if hasattr(pos.contract, "currency") and pos.contract.currency
+                    else "USD"
+                )
+                await database_connection.execute(
+                    """
+                    INSERT OR IGNORE INTO executions (exec_id, order_id, price, qty, commission, currency, executed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        exec_id,
+                        temp_id,
+                        str(avg_cost),
+                        str(delta_qty),
+                        "0.0",
+                        currency_str,
+                        now_iso,
+                    ),
+                )
+
+            await notifier.send_unassigned_position_recovered(
+                symbol=symbol,
+                quantity=delta_qty,
+                avg_cost=avg_cost,
+                account_id=account_id,
+            )
+
+
+async def _get_next_recovery_temp_id(database_connection: aiosqlite.Connection) -> int:
+    """Ermittelt die nächste freie negative Sequenz-ID für synthetische Recovery-Orders."""
+    query = "SELECT MIN(order_id) FROM orders WHERE order_id < 0"
+    async with database_connection.execute(query) as cursor:
+        row = await cursor.fetchone()
+        if row and row[0] is not None and row[0] < 0:
+            return row[0] - 1
+        return -1
