@@ -55,7 +55,7 @@ class TradingSystemOrchestrator:
         config: Config,
         notifier: TelegramNotifier,
         interactive_brokers: IB,
-        queue: asyncio.Queue,
+        queue: asyncio.Queue[str],
     ) -> None:
         """Initialisiert den Orchestrator mit allen benötigten Abhängigkeiten.
 
@@ -72,9 +72,9 @@ class TradingSystemOrchestrator:
         self.config: Config = config
         self.notifier: TelegramNotifier = notifier
         self.interactive_brokers: IB = interactive_brokers
-        self.queue: asyncio.Queue = queue
+        self.queue: asyncio.Queue[str] = queue
         self.is_reconnecting: bool = False
-        self.tasks: tuple[asyncio.Task, ...] = ()
+        self.tasks: tuple[asyncio.Task[None], ...] = ()
         self.shutdown_event: asyncio.Event = asyncio.Event()
         self.callbacks_manager: TwsCallbacksManager | None = None
 

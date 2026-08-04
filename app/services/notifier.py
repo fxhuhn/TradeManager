@@ -9,6 +9,7 @@ import asyncio
 import re
 import time
 from decimal import Decimal
+from typing import Any
 
 import aiohttp
 import structlog
@@ -255,7 +256,11 @@ class TelegramNotifier:
         return await self.send_message(message)
 
     async def send_bracket_order_submitted(
-        self, symbol: str, trade_group_id: str, strategy_name: str, orders: list[dict]
+        self,
+        symbol: str,
+        trade_group_id: str,
+        strategy_name: str,
+        orders: list[dict[str, Any]],
     ) -> bool:
         """
         Sendet eine Zusammenfassung einer Trade-Gruppe (Bracket/OCA).

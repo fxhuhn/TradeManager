@@ -37,7 +37,7 @@ ORDER_ID_LOCK = asyncio.Lock()
 async def execution_worker(
     db_factory: Callable[[], Awaitable[aiosqlite.Connection]],
     interactive_brokers: IB,
-    queue: asyncio.Queue,
+    queue: asyncio.Queue[str],
     notifier: TelegramNotifier,
     config: Config,
 ) -> None:

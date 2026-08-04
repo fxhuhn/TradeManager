@@ -61,3 +61,8 @@ exclude = [".venv", "tests"]
 min_confidence = 60
 paths = ["app", "vulture_whitelist.py"]
 
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
+

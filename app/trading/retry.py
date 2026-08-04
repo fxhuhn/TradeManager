@@ -23,7 +23,7 @@ logger = structlog.get_logger()
 async def handle_retriable_error(
     db_factory: Callable[[], Awaitable[aiosqlite.Connection]],
     order_id: int,
-    queue: asyncio.Queue,
+    queue: asyncio.Queue[str],
     notifier: TelegramNotifier,
     config: Config,
 ) -> None:
@@ -101,7 +101,7 @@ async def _process_retry_backoff(
     order_id: int,
     trade_group_id: str,
     retry_count: int,
-    queue: asyncio.Queue,
+    queue: asyncio.Queue[str],
     config: Config,
 ) -> None:
     """Führt das DB-Update aus und wartet den exponentiellen Backoff ab."""

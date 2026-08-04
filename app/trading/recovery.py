@@ -31,7 +31,7 @@ logger = structlog.get_logger()
 async def run_recovery(
     database_connection: aiosqlite.Connection,
     interactive_brokers_session: IB,
-    queue: asyncio.Queue,
+    queue: asyncio.Queue[str],
     notifier: TelegramNotifier,
     trigger_settlement_callback: Callable[[str, str], Coroutine[Any, Any, None]],
     config: Config,

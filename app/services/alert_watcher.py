@@ -60,7 +60,7 @@ async def alert_watcher(
 async def order_status_sync_loop(
     db_factory: Callable[[], Awaitable[aiosqlite.Connection]],
     interactive_brokers: IB,
-    queue: asyncio.Queue,
+    queue: asyncio.Queue[str],
     notifier: TelegramNotifier,
     trigger_settlement_callback: Callable[[str, str], Coroutine[Any, Any, None]],
     config: Config,

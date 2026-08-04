@@ -41,7 +41,7 @@ async def csv_directory_watcher(
     db_factory: Callable[[], Awaitable[aiosqlite.Connection]],
     interactive_brokers: IB,
     directory_path: Path,
-    queue: asyncio.Queue,
+    queue: asyncio.Queue[str],
     notifier: TelegramNotifier,
     config: Config,
     interval_seconds: int = 60,
@@ -87,10 +87,10 @@ async def _scan_and_process_directory(
     db_factory: Callable[[], Awaitable[aiosqlite.Connection]],
     interactive_brokers: IB,
     directory_path: Path,
-    queue: asyncio.Queue,
+    queue: asyncio.Queue[str],
     notifier: TelegramNotifier,
     config: Config,
-    date_pattern: re.Pattern,
+    date_pattern: re.Pattern[str],
     warned_file_names: set[str],
 ) -> None:
     """Scans the directory for matching CSV files and processes them if connected."""
@@ -152,7 +152,7 @@ async def run_csv_import(
     db: aiosqlite.Connection,
     interactive_brokers: IB,
     csv_path: Path,
-    queue: asyncio.Queue,
+    queue: asyncio.Queue[str],
     notifier: TelegramNotifier,
     config: Config,
 ) -> None:
@@ -207,7 +207,7 @@ async def _process_daily_csv_file(
     db_factory: Callable[[], Awaitable[aiosqlite.Connection]],
     interactive_brokers: IB,
     csv_file: Path,
-    queue: asyncio.Queue,
+    queue: asyncio.Queue[str],
     notifier: TelegramNotifier,
     config: Config,
 ) -> None:
@@ -324,7 +324,7 @@ async def _process_and_upsert_group(
     interactive_brokers: IB,
     trade_group_id: str,
     raw_legs: list[LegRow],
-    queue: asyncio.Queue,
+    queue: asyncio.Queue[str],
     notifier: TelegramNotifier,
     config: Config,
     current_weekday: int | None = None,

@@ -3,6 +3,7 @@ import re
 import sys
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
+from typing import Any
 
 import structlog
 
@@ -20,32 +21,32 @@ def _simplify_ibkr_warning(warning_message: str) -> str:
     order_id_match = re.search(r"orderId=(\d+)", warning_message)
     order_id = order_id_match.group(1) if order_id_match else "UNKNOWN"
 
-    # Extract action
+    # Extract action (BUY/SELL)
     action_match = re.search(r"action='([^']+)'", warning_message)
     action = action_match.group(1) if action_match else "UNKNOWN"
 
-    # Extract quantity
+    # Extract totalQuantity / shares
     qty_match = re.search(r"totalQuantity=([\d.]+)", warning_message)
-    qty = qty_match.group(1) if qty_match else "UNKNOWN"
+    qty = qty_match.group(1) if qty_match else "0"
 
-    # Extract order type
-    order_type_match = re.search(r"orderType='([^']+)'", warning_message)
-    order_type = order_type_match.group(1) if order_type_match else "UNKNOWN"
+    # Extract lmtPrice or auxPrice
+    lmt_match = re.search(r"lmtPrice=([\d.]+)", warning_message)
+    aux_match = re.search(r"auxPrice=([\d.]+)", warning_message)
+    price = (
+        lmt_match.group(1) if lmt_match else (aux_match.group(1) if aux_match else "0")
+    )
 
-    # Extract price (lmtPrice)
-    price_match = re.search(r"lmtPrice=([\d.]+)", warning_message)
-    price = price_match.group(1) if price_match else "UNKNOWN"
+    # Extract orderType
+    type_match = re.search(r"orderType='([^']+)'", warning_message)
+    order_type = type_match.group(1) if type_match else "ORDER"
 
-    # Extract warning/error message from TradeLogEntry
-    messages = re.findall(r"message='([^']*)'", warning_message)
+    # Check for whyHeld warning text
+    why_held_match = re.search(r"whyHeld='([^']+)'", warning_message)
     extracted_warning = ""
-    for message in reversed(messages):
-        if message.strip():
-            extracted_warning = message
-            break
-
-    if not extracted_warning:
-        why_held_match = re.search(r"whyHeld='([^']*)'", warning_message)
+    if why_held_match and why_held_match.group(1):
+        extracted_warning = f"Held: {why_held_match.group(1)}"
+    else:
+        why_held_match = re.search(r"warningText='([^']+)'", warning_message)
         if why_held_match and why_held_match.group(1):
             extracted_warning = f"Held: {why_held_match.group(1)}"
 
@@ -57,8 +58,8 @@ def _simplify_ibkr_warning(warning_message: str) -> str:
 
 
 def clean_ib_async_warnings_processor(
-    logger: object, method_name: str, event_dict: dict
-) -> dict:
+    logger: object, method_name: str, event_dict: dict[str, Any]
+) -> dict[str, Any]:
     """Structlog processor to simplify verbose IBKR wrapper validation warnings."""
     event = event_dict.get("event")
     if isinstance(event, str) and event.startswith(
