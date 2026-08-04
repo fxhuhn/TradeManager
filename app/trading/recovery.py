@@ -10,9 +10,10 @@ Siehe Datenfluss- und Architekturzusammenhang in app.core.models.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 import aiosqlite
 import structlog
@@ -32,7 +33,7 @@ async def run_recovery(
     interactive_brokers_session: IB,
     queue: asyncio.Queue,
     notifier: TelegramNotifier,
-    trigger_settlement_callback: Callable[[str, str], Awaitable[None]],
+    trigger_settlement_callback: Callable[[str, str], Coroutine[Any, Any, None]],
     config: Config,
 ) -> None:
     """
@@ -134,7 +135,7 @@ async def _reconcile_orders(
     tws_completed_orders: dict[int, Trade],
     interactive_brokers_session: IB,
     notifier: TelegramNotifier,
-    trigger_settlement_callback: Callable[[str, str], Awaitable[None]],
+    trigger_settlement_callback: Callable[[str, str], Coroutine[Any, Any, None]],
 ) -> set[str]:
     """Gleicht die ausstehenden lokalen Orders ab und gibt neu einzureihende Trade-Gruppen zurück."""
     groups_to_requeue: set[str] = set()
@@ -191,7 +192,7 @@ async def _recover_submitted_order(
     tws_completed_orders: dict[int, Trade],
     interactive_brokers_session: IB,
     notifier: TelegramNotifier,
-    trigger_settlement_callback: Callable[[str, str], Awaitable[None]],
+    trigger_settlement_callback: Callable[[str, str], Coroutine[Any, Any, None]],
 ) -> None:
     """Gleicht den Zustand einer lokalen Submitted/PreSubmitted Order mit TWS ab."""
     if tws_active:
@@ -258,7 +259,7 @@ async def _handle_filled_during_downtime(
     tws_completed: Trade,
     interactive_brokers_session: IB,
     notifier: TelegramNotifier,
-    trigger_settlement_callback: Callable[[str, str], Awaitable[None]],
+    trigger_settlement_callback: Callable[[str, str], Coroutine[Any, Any, None]],
 ) -> None:
     """Recovery Scenario 2: Process orders filled in TWS while the application was down."""
     order_id = order.order_id
@@ -635,5 +636,5 @@ async def _get_next_recovery_temp_id(database_connection: aiosqlite.Connection) 
     async with database_connection.execute(query) as cursor:
         row = await cursor.fetchone()
         if row and row[0] is not None and row[0] < 0:
-            return row[0] - 1
+            return int(row[0]) - 1
         return -1

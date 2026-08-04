@@ -309,7 +309,7 @@ def resolve_account_id(interactive_brokers: IB, account_id: str) -> str:
     if account_id in managed_accounts:
         return account_id
 
-    fallback_account = managed_accounts[0]
+    fallback_account = str(managed_accounts[0])
     logger.warning(
         "Account ID from CSV not found in TWS managed accounts. Falling back.",
         csv_account_id=account_id,

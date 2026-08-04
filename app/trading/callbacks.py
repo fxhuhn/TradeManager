@@ -12,9 +12,10 @@ Siehe Datenfluss- und Architekturzusammenhang in app.core.models.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import aiosqlite
@@ -39,14 +40,16 @@ def extract_unassigned_execution_details(
     Wird verwendet, um bei unzugeordneten/unbekannten Orders alle Attribute (Symbol, Stückzahl,
     Preis, Börse, Konto etc.) vollständig zu erfassen.
     """
-    contract = getattr(fill, "contract", None)
-    execution = getattr(fill, "execution", None)
-    order = getattr(trade, "order", None)
+    contract = getattr(fill, "contract", None) or (
+        getattr(trade, "contract", None) if trade else None
+    )
+    execution = getattr(fill, "execution", None) if fill else None
+    order = getattr(trade, "order", None) if trade else None
 
     symbol = getattr(contract, "symbol", "") if contract else ""
     sec_type = getattr(contract, "secType", "") if contract else ""
     exchange = (
-        getattr(contract, "exchange", "") or getattr(execution, "exchange", "")
+        getattr(contract, "primaryExchange", "") or getattr(contract, "exchange", "")
         if contract or execution
         else ""
     )
@@ -129,10 +132,10 @@ class TwsCallbacksManager:
         interactive_brokers: IB,
         notifier: TelegramNotifier,
         config: Config,
-        trigger_settlement_callback: Callable[[str, str], Awaitable[None]],
-        handle_retriable_error_callback: Callable[[int], Awaitable[None]],
-        run_recovery_callback: Callable[[], Awaitable[None]],
-        run_reconnect_callback: Callable[[], Awaitable[None]],
+        trigger_settlement_callback: Callable[[str, str], Coroutine[Any, Any, None]],
+        handle_retriable_error_callback: Callable[[int], Coroutine[Any, Any, None]],
+        run_recovery_callback: Callable[[], Coroutine[Any, Any, None]],
+        run_reconnect_callback: Callable[[], Coroutine[Any, Any, None]],
     ) -> None:
         self.db_factory = db_factory
         self.interactive_brokers = interactive_brokers
@@ -442,16 +445,6 @@ class TwsCallbacksManager:
         )
 
         asyncio.create_task(self._update_commission(exec_id, commission, currency))
-
-    async def _update_commission(
-        self, exec_id: str, commission: Decimal, currency: str
-    ) -> None:
-        """
-        Aktualisiert die Kommission einer Ausführung in der executions-Tabelle.
-
-        Nutzt eine Retry-Schleife, falls die Ausführung (execDetailsEvent)
-        aufgrund asynchroner Latenzen noch nicht in der Datenbank existiert.
-        """
 
     async def _update_commission(
         self, exec_id: str, commission: Decimal, currency: str

@@ -38,7 +38,7 @@ def parse_positive_decimal(value: object) -> Decimal | None:
     if value is None:
         return None
     try:
-        numeric_val = float(value)
+        numeric_val = float(str(value))
         if numeric_val <= 0:
             return None
         return Decimal(str(value))

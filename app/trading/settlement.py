@@ -286,10 +286,11 @@ def calculate_settlement(inputs: SettlementInput) -> SettlementOutput:
     Diese Funktion ist pure: Sie enthält keinerlei Seiteneffekte (Datenbank, I/O, etc.).
     """
     entry_sum_quantity = sum(
-        execution.quantity for execution in inputs.entry_executions
+        (execution.quantity for execution in inputs.entry_executions), Decimal("0.0")
     )
     entry_sum_value = sum(
-        execution.quantity * execution.price for execution in inputs.entry_executions
+        (execution.quantity * execution.price for execution in inputs.entry_executions),
+        Decimal("0.0"),
     )
     avg_entry_price = (
         entry_sum_value / entry_sum_quantity
@@ -297,9 +298,12 @@ def calculate_settlement(inputs: SettlementInput) -> SettlementOutput:
         else Decimal("0.0")
     )
 
-    exit_sum_quantity = sum(execution.quantity for execution in inputs.exit_executions)
+    exit_sum_quantity = sum(
+        (execution.quantity for execution in inputs.exit_executions), Decimal("0.0")
+    )
     exit_sum_value = sum(
-        execution.quantity * execution.price for execution in inputs.exit_executions
+        (execution.quantity * execution.price for execution in inputs.exit_executions),
+        Decimal("0.0"),
     )
     avg_exit_price = (
         exit_sum_value / exit_sum_quantity

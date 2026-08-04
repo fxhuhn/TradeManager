@@ -6,9 +6,10 @@ hoher Ausführungs-Slippage und Abgleich offener TWS-Order-Zustände.
 """
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import aiosqlite
@@ -61,7 +62,7 @@ async def order_status_sync_loop(
     interactive_brokers: IB,
     queue: asyncio.Queue,
     notifier: TelegramNotifier,
-    trigger_settlement_callback: Callable[[str, str], Awaitable[None]],
+    trigger_settlement_callback: Callable[[str, str], Coroutine[Any, Any, None]],
     config: Config,
     interval_seconds: int = 300,
 ) -> None:
@@ -250,7 +251,8 @@ async def _fetch_submitted_orders(
         WHERE status = 'Submitted' AND order_type IN ('MKT', 'MOC')
     """
     async with db.execute(query) as cursor:
-        return await cursor.fetchall()
+        rows = await cursor.fetchall()
+        return list(rows)
 
 
 async def _process_single_potential_dead_order(

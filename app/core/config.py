@@ -106,6 +106,22 @@ def load_env(environment_path: Path) -> dict[str, str]:
     return environment_variables
 
 
+def _to_int(val: object, default: int = 0) -> int:
+    if val is None:
+        return default
+    if isinstance(val, int):
+        return val
+    return int(str(val))
+
+
+def _to_float(val: object, default: float = 0.0) -> float:
+    if val is None:
+        return default
+    if isinstance(val, (float, int)):
+        return float(val)
+    return float(str(val))
+
+
 def _parse_tws_config(
     tws_data: dict[str, object], environment_variables: dict[str, str]
 ) -> TwsConfig:
@@ -120,61 +136,65 @@ def _parse_tws_config(
         or environment_variables.get("TWS_PORT")
         or tws_data.get("port")
     )
-    tws_port = int(tws_port_raw) if tws_port_raw is not None else 7497
+    tws_port = _to_int(tws_port_raw, 7497)
 
     tws_client_id_raw = (
         os.environ.get("TWS_CLIENT_ID")
         or environment_variables.get("TWS_CLIENT_ID")
         or tws_data.get("client_id")
     )
-    tws_client_id = int(tws_client_id_raw) if tws_client_id_raw is not None else 0
+    tws_client_id = _to_int(tws_client_id_raw, 0)
 
     return TwsConfig(
         host=tws_host,
         port=tws_port,
         client_id=tws_client_id,
-        connection_timeout_s=float(tws_data.get("connection_timeout_s", 10.0)),
-        reconnect_initial_delay_s=float(tws_data.get("reconnect_initial_delay_s", 5.0)),
-        reconnect_max_attempts=int(tws_data.get("reconnect_max_attempts", 10)),
-        reconnect_max_delay_s=float(tws_data.get("reconnect_max_delay_s", 120.0)),
-        request_timeout_s=float(tws_data.get("request_timeout_s", 10.0)),
-        completed_orders_timeout_s=float(
-            tws_data.get("completed_orders_timeout_s", 15.0)
+        connection_timeout_s=_to_float(tws_data.get("connection_timeout_s"), 10.0),
+        reconnect_initial_delay_s=_to_float(
+            tws_data.get("reconnect_initial_delay_s"), 5.0
         ),
-        heartbeat_interval_s=float(tws_data.get("heartbeat_interval_s", 60.0)),
-        heartbeat_timeout_s=float(tws_data.get("heartbeat_timeout_s", 15.0)),
+        reconnect_max_attempts=_to_int(tws_data.get("reconnect_max_attempts"), 10),
+        reconnect_max_delay_s=_to_float(tws_data.get("reconnect_max_delay_s"), 120.0),
+        request_timeout_s=_to_float(tws_data.get("request_timeout_s"), 10.0),
+        completed_orders_timeout_s=_to_float(
+            tws_data.get("completed_orders_timeout_s"), 15.0
+        ),
+        heartbeat_interval_s=_to_float(tws_data.get("heartbeat_interval_s"), 60.0),
+        heartbeat_timeout_s=_to_float(tws_data.get("heartbeat_timeout_s"), 15.0),
     )
 
 
 def _parse_app_config(app_data: dict[str, object]) -> AppConfig:
     return AppConfig(
-        max_retries=int(app_data.get("max_retries", 3)),
-        order_rate_limit_s=float(app_data.get("order_rate_limit_s", 0.02)),
-        dead_order_threshold_minutes=int(
-            app_data.get("dead_order_threshold_minutes", 15)
+        max_retries=_to_int(app_data.get("max_retries"), 3),
+        order_rate_limit_s=_to_float(app_data.get("order_rate_limit_s"), 0.02),
+        dead_order_threshold_minutes=_to_int(
+            app_data.get("dead_order_threshold_minutes"), 15
         ),
-        alert_watcher_interval_s=int(app_data.get("alert_watcher_interval_s", 60)),
-        csv_watcher_interval_s=int(app_data.get("csv_watcher_interval_s", 60)),
-        order_sync_interval_s=int(app_data.get("order_sync_interval_s", 300)),
-        retry_backoff_base_s=float(app_data.get("retry_backoff_base_s", 5.0)),
-        shutdown_join_timeout_s=float(app_data.get("shutdown_join_timeout_s", 15.0)),
-        database_timeout_s=float(app_data.get("database_timeout_s", 30.0)),
-        max_csv_size_bytes=int(app_data.get("max_csv_size_bytes", 5242880)),
+        alert_watcher_interval_s=_to_int(app_data.get("alert_watcher_interval_s"), 60),
+        csv_watcher_interval_s=_to_int(app_data.get("csv_watcher_interval_s"), 60),
+        order_sync_interval_s=_to_int(app_data.get("order_sync_interval_s"), 300),
+        retry_backoff_base_s=_to_float(app_data.get("retry_backoff_base_s"), 5.0),
+        shutdown_join_timeout_s=_to_float(
+            app_data.get("shutdown_join_timeout_s"), 15.0
+        ),
+        database_timeout_s=_to_float(app_data.get("database_timeout_s"), 30.0),
+        max_csv_size_bytes=_to_int(app_data.get("max_csv_size_bytes"), 5242880),
         log_file_path=str(app_data.get("log_file_path", "data/app.log")),
-        log_rotation_backup_count=int(app_data.get("log_rotation_backup_count", 5)),
-        db_backup_interval_s=int(app_data.get("db_backup_interval_s", 86400)),
+        log_rotation_backup_count=_to_int(app_data.get("log_rotation_backup_count"), 5),
+        db_backup_interval_s=_to_int(app_data.get("db_backup_interval_s"), 86400),
     )
 
 
 def _parse_account_config(account_data: dict[str, object]) -> AccountConfig:
     account_config = AccountConfig(
-        default_limit_pct=float(account_data.get("default_limit_pct", 0.05)),
-        margin_multiplier_factor=float(
-            account_data.get("margin_multiplier_factor", 2.0)
+        default_limit_pct=_to_float(account_data.get("default_limit_pct"), 0.05),
+        margin_multiplier_factor=_to_float(
+            account_data.get("margin_multiplier_factor"), 2.0
         ),
         sizing_mode=str(account_data.get("sizing_mode", "margin_adjusted_capital")),
-        max_margin_usage_pct=float(account_data.get("max_margin_usage_pct", 0.80)),
-        min_cushion_pct=float(account_data.get("min_cushion_pct", 0.10)),
+        max_margin_usage_pct=_to_float(account_data.get("max_margin_usage_pct"), 0.80),
+        min_cushion_pct=_to_float(account_data.get("min_cushion_pct"), 0.10),
     )
 
     if account_config.sizing_mode not in ("margin_adjusted_capital", "total_cash"):
@@ -205,8 +225,8 @@ def _parse_telegram_config(
     return TelegramConfig(
         bot_token=telegram_bot_token,
         chat_id=telegram_chat_id,
-        rate_limit_delay_s=float(telegram_data.get("rate_limit_delay_s", 1.5)),
-        request_timeout_s=float(telegram_data.get("request_timeout_s", 10.0)),
+        rate_limit_delay_s=_to_float(telegram_data.get("rate_limit_delay_s"), 1.5),
+        request_timeout_s=_to_float(telegram_data.get("request_timeout_s"), 10.0),
     )
 
 

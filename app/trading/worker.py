@@ -181,14 +181,14 @@ async def process_trade_group(
         # Sortiere: ENTRY zuerst, dann TP, dann SL
         order_dicts.sort(
             key=lambda order_dict: {"ENTRY": 0, "TP": 1, "SL": 2}.get(
-                order_dict["role"], 3
+                str(order_dict.get("role", "")), 3
             )
         )
 
         await notifier.send_bracket_order_submitted(
             symbol=entry_order.symbol,
             trade_group_id=trade_group_id,
-            strategy_name=entry_order.strategy_name,
+            strategy_name=entry_order.strategy_name or "N/A",
             orders=order_dicts,
         )
 
@@ -851,9 +851,9 @@ async def _get_next_non_colliding_order_id(
     """Ermittelt die nächste gültige Order-ID zur Abwehr von DB-ID-Kollisionen."""
     async with db.execute("SELECT MAX(order_id) FROM orders") as cursor:
         row = await cursor.fetchone()
-        max_db_id = row[0] if (row and row[0] is not None) else 0
+        max_db_id = int(row[0]) if (row and row[0] is not None) else 0
 
-    tws_next_id = interactive_brokers.client.getReqId()
+    tws_next_id = int(interactive_brokers.client.getReqId())
     if max_db_id >= tws_next_id:
         return max_db_id + 1
     return tws_next_id
