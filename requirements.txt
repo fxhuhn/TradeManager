@@ -1,6 +1,6 @@
 # requirements.txt (mit gepinnten Versionen für reproduzierbares Build)
 ib_async>=1.0.0
-aiosqlite>=0.20.0
+aiosqlite>=0.22.1
 aiohttp>=3.9.0
 structlog>=24.0.0
 
