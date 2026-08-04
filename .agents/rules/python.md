@@ -50,6 +50,7 @@ Every code decision must be evaluated against these four quality dimensions, in 
 - **Strict Typing:** All function arguments, return values, and class attributes **MUST** have type hints.
 - **Data Exchange:**
     - Use **`@dataclass(frozen=True)`** for immutable internal business objects to ensure immutability.
+    - Use **`typing.NamedTuple`** for lightweight, tuple-based immutable data structures and return values.
     - Use **`TypedDict`** for dictionary-based data structures (e.g., config files, JSON parsing, API responses).
 - **Modern Syntax:**
     - Use `list[str]` instead of `List[str]`.
@@ -98,6 +99,7 @@ Code must be compliant with `ruff`.
 - **Cognitive Complexity:** Must not exceed **15 per function** (SonarSource model). Use the Early-Return Pattern (see Section 3.5) to reduce nested complexity.
 - **Cyclomatic Complexity:** Must not exceed **10 per function** (measurable via `radon cc`).
 - **Function Length:** Functions should fit on one screen (max ~50 lines). If longer, extract sub-routines.
+- **Parameter Count & Container Objects:** Functions taking more than 5 parameters **SHOULD** encapsulate related parameters into a container object (**`@dataclass(frozen=True)`**, **`TypedDict`**, or **`typing.NamedTuple`**) to maintain clean function signatures and improve maintainability.
 
 ### 3.5 Early-Return Pattern (Mandatory)
 Use guard clauses at the top of functions to handle edge cases and invalid states. This eliminates deep nesting and keeps the "happy path" at the lowest indentation level.

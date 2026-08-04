@@ -10,7 +10,7 @@ Siehe Datenfluss- und Architekturzusammenhang in app.core.models.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any

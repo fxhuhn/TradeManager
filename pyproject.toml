@@ -37,11 +37,11 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "PL"]
 # N802/N803: camelCase für TWS-Callback-Methoden/Argumente (z.B. orderStatus)
 # PLR2004: Magische Zahlen im Vergleich (toleriert für HTTP-Statuscodes und Test-Assertions)
 # PLR0911: Zu viele return-Statements (erlaubt für komplexe Validierungsfunktionen)
-# PLR0912/PLR0913/PLR0915: Komplexitätsprüfungen (Argumente, Verzweigungen und Anweisungen)
+# PLR0912/PLR0913/PLR0915/PLR0917: Komplexitätsprüfungen (Argumente, Verzweigungen und Anweisungen)
 # PLC0415: Lokale Imports (erlaubt zur Vermeidung zirkulärer Abhängigkeiten)
 ignore = [
     "E501", "N802", "N803",
-    "PLR2004", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLC0415"
+    "PLR2004", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLR0917", "PLC0415"
 ]
 
 [tool.ruff.lint.isort]
