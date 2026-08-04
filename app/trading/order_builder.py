@@ -16,18 +16,21 @@ logger = structlog.get_logger()
 
 
 def normalize_symbol(symbol: str) -> str:
-    """Normalisiert ein Aktiensymbol durch Entfernung von Börsensuffixen.
+    """Normalisiert ein Aktiensymbol durch Entfernung von Börsensuffixen
+    und Konvertierung von US-Aktienklassen-Trennzeichen für TWS.
 
     Args:
-        symbol: Das rohe Symbol (z. B. 'SXRV.DE' oder 'AAPL').
+        symbol: Das rohe Symbol (z. B. 'SXRV.DE', 'BF-B', 'BRK.B' oder 'AAPL').
 
     Returns:
-        Das bereinigte Ticker-Symbol in Grossbuchstaben (z. B. 'SXRV').
+        Das bereinigte Ticker-Symbol in Grossbuchstaben (z. B. 'SXRV', 'BF B', 'BRK B').
     """
     cleaned_symbol = symbol.strip().upper()
     if cleaned_symbol.endswith(".DE"):
         return cleaned_symbol[:-3]
-    return cleaned_symbol
+
+    # US-Share-Class Trennzeichen (z. B. 'BF-B' oder 'BRK.B') durch Leerzeichen für IBKR TWS API ersetzen
+    return cleaned_symbol.replace("-", " ").replace(".", " ")
 
 
 def make_stock_contract(symbol: str) -> Stock:

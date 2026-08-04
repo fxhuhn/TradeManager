@@ -21,6 +21,15 @@ def test_normalize_symbol_preserves_standard_symbols() -> None:
     assert normalize_symbol("msft") == "MSFT"
 
 
+def test_normalize_symbol_converts_us_share_class_separators() -> None:
+    """Verifies that normalize_symbol converts hyphens and dots in US share classes to spaces."""
+    assert normalize_symbol("BF-B") == "BF B"
+    assert normalize_symbol("BF.B") == "BF B"
+    assert normalize_symbol("BRK-B") == "BRK B"
+    assert normalize_symbol("BRK.B") == "BRK B"
+    assert normalize_symbol("  bf-b  ") == "BF B"
+
+
 def test_make_stock_contract_with_dot_de_suffix() -> None:
     """Verifies that make_stock_contract configures XETRA parameters for .DE symbols."""
     contract = make_stock_contract("SXRV.DE")
@@ -35,6 +44,15 @@ def test_make_stock_contract_for_us_stock() -> None:
     """Verifies that make_stock_contract configures USD SMART routing for US symbols."""
     contract = make_stock_contract("AAPL")
     assert contract.symbol == "AAPL"
+    assert contract.secType == "STK"
+    assert contract.exchange == "SMART"
+    assert contract.currency == "USD"
+
+
+def test_make_stock_contract_for_us_share_class() -> None:
+    """Verifies that make_stock_contract normalizes US share class symbol BF-B to BF B."""
+    contract = make_stock_contract("BF-B")
+    assert contract.symbol == "BF B"
     assert contract.secType == "STK"
     assert contract.exchange == "SMART"
     assert contract.currency == "USD"
