@@ -26,6 +26,7 @@ The central class is `ib_async.IB`. All communication with the TWS/Gateway passe
 import asyncio
 from ib_async import IB
 
+
 async def main() -> None:
     ib = IB()
     try:
@@ -54,7 +55,9 @@ async def main() -> None:
 # Querying positions
 positions = ib.positions()
 for pos in positions:
-    print(f"Contract: {pos.contract.symbol}, Position Size: {pos.position}, Avg Cost: {pos.averageCost}")
+    print(
+        f"Contract: {pos.contract.symbol}, Position Size: {pos.position}, Avg Cost: {pos.averageCost}"
+    )
 ```
 
 ### B. Placing & Managing Orders

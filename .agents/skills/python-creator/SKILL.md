@@ -69,18 +69,22 @@ class TradeInstruction:
 ```python
 from typing import AsyncIterator
 
+
 async def stream_process_orders(
     database_path: Path,
 ) -> AsyncIterator[OrderRow]:
     """Yields order rows one by one from database to minimize memory footprint."""
     async with aiosqlite.connect(database_path) as connection:
-        async for row in connection.execute("SELECT * FROM orders WHERE status = ?", ("Created",)):
+        async for row in connection.execute(
+            "SELECT * FROM orders WHERE status = ?", ("Created",)
+        ):
             yield order_row_from_db_row(row)
 ```
 
 **3. The "Functional Core" Pattern (Pure Calculation):**
 ```python
 from decimal import Decimal
+
 
 def calculate_position_risk(
     entry_price: Decimal,

@@ -29,6 +29,7 @@ Always use async database transactions via `get_db()` and `transaction()` from `
 ```python
 from app.core.db import get_db, transaction
 
+
 async def save_order_intent(orders: list[OrderRow]) -> None:
     """Persists scaled order intent rows atomically."""
     async with get_db() as db:
@@ -43,13 +44,23 @@ async def save_order_intent(orders: list[OrderRow]) -> None:
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        order.order_id, order.perm_id, order.parent_id,
-                        order.trade_group_id, order.account_id, order.bracket_role,
-                        order.symbol, order.sec_type, order.exchange, order.action,
-                        order.quantity, order.order_type,
+                        order.order_id,
+                        order.perm_id,
+                        order.parent_id,
+                        order.trade_group_id,
+                        order.account_id,
+                        order.bracket_role,
+                        order.symbol,
+                        order.sec_type,
+                        order.exchange,
+                        order.action,
+                        order.quantity,
+                        order.order_type,
                         float(order.target_price) if order.target_price else None,
-                        order.tif, order.strategy_name, order.status
-                    )
+                        order.tif,
+                        order.strategy_name,
+                        order.status,
+                    ),
                 )
 ```
 

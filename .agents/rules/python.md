@@ -61,10 +61,11 @@ Every code decision must be evaluated against these four quality dimensions, in 
     ```python
     from decimal import Decimal
 
+
     @dataclass(frozen=True)
     class OrderRow:
         target_price: Decimal | None  # ✅ Correct
-        quantity: int                 # ✅ Correct (integer shares)
+        quantity: int  # ✅ Correct (integer shares)
         # target_price: float         # ❌ CRITICAL violation
     ```
 
@@ -111,6 +112,7 @@ def process_trade_signal(signal, portfolio, market_data):
         if signal.direction == "BUY":
             if portfolio.has_buying_power:
                 execute_trade(signal)
+
 
 # ✅ REQUIRED: Guard clauses with early return
 def process_trade_signal(
@@ -164,6 +166,7 @@ async def load_strategy_configuration(config_path: Path) -> StrategyConfig:
         raise ConfigurationError("'lookback_period' must be positive")
 
     return StrategyConfig(**raw_config)
+
 
 # Functional Core: Trusts validated data — no defensive checks
 def calculate_moving_average(
@@ -252,13 +255,16 @@ If a function needs both calculation AND I/O, it is a shell function that delega
 # ═══════════════════════════════════════
 from decimal import Decimal
 
+
 @dataclass(frozen=True)
 class RebalanceDecision:
     """Immutable result of a rebalancing calculation."""
+
     ticker_symbol: str
     target_quantity: int
     current_quantity: int
     action: Literal["BUY", "SELL", "HOLD"]
+
 
 def determine_rebalancing_actions(
     current_positions: list[Position],
@@ -273,9 +279,11 @@ def determine_rebalancing_actions(
     """
     ...
 
+
 # ═══════════════════════════════════════
 # IMPERATIVE SHELL — I/O, orchestration
 # ═══════════════════════════════════════
+
 
 async def run_daily_rebalancing(database_path: Path) -> None:
     """
@@ -285,14 +293,10 @@ async def run_daily_rebalancing(database_path: Path) -> None:
     """
     positions = await load_positions_from_database(database_path)
     allocation = await fetch_target_allocation()
-    portfolio_value = sum(
-        (p.market_value for p in positions), start=Decimal("0")
-    )
+    portfolio_value = sum((p.market_value for p in positions), start=Decimal("0"))
 
     # ← Call into the Functional Core (pure)
-    decisions = determine_rebalancing_actions(
-        positions, allocation, portfolio_value
-    )
+    decisions = determine_rebalancing_actions(positions, allocation, portfolio_value)
 
     await persist_rebalancing_decisions(database_path, decisions)
     logger.info("Rebalancing completed: %d decisions", len(decisions))
@@ -331,11 +335,14 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass(frozen=True)
 class TradingStrategyConfiguration:
     """Configuration for technical analysis thresholds."""
+
     trend_window_size: int
     minimum_required_history: int
+
 
 def analyze_market_trends(
     closing_prices: list[Decimal],
@@ -353,9 +360,11 @@ def analyze_market_trends(
 
     return _calculate_trend_thresholds(closing_prices, config.trend_window_size)
 
+
 def _is_history_sufficient(prices: list[Decimal], minimum: int) -> bool:
     """Checks if the provided price list meets the required length."""
     return len(prices) >= minimum
+
 
 def _calculate_trend_thresholds(
     prices: list[Decimal],
@@ -368,7 +377,6 @@ def _calculate_trend_thresholds(
     Uses Decimal arithmetic to preserve financial precision.
     """
     return [
-        sum(prices[i : i + window]) / window
-        for i in range(len(prices) - window + 1)
+        sum(prices[i : i + window]) / window for i in range(len(prices) - window + 1)
     ]
 ```

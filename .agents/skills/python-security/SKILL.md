@@ -82,7 +82,8 @@ Provide specific, code-level fixes for each item in the Kill Chain, referenced b
 * **[SEC-02] Financial Fix:**
     ```python
     from decimal import Decimal
-    price = Decimal("100.05") # Never use float
+
+    price = Decimal("100.05")  # Never use float
     ```
 
 ---
