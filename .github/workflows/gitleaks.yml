@@ -2,9 +2,9 @@ name: Gitleaks Security Scan
 
 on:
   push:
-    branches: [ "main", "next" ]
+    branches: [ "main" ]
   pull_request:
-    branches: [ "main", "next" ]
+    branches: [ "main" ]
 
 permissions:
   contents: read

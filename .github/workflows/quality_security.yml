@@ -2,9 +2,9 @@ name: Code Quality & Security
 
 on:
   push:
-    branches: [ "main", "next" ]
+    branches: [ "main" ]
   pull_request:
-    branches: [ "main", "next" ]
+    branches: [ "main" ]
   schedule:
     - cron: '0 6 * * 1'  # Wöchentlich montags für Security-Scans
 
