@@ -177,7 +177,7 @@ async def test_handle_retriable_error_handles_database_exception_gracefully(
 ) -> None:
     """Verifies that exceptions during retry handling are logged without bubbling up, and DB is closed."""
     # Arrange
-    mock_db = AsyncMock(spec=aiosqlite.Connection)
+    mock_db = MagicMock(spec=aiosqlite.Connection)
     mock_db.execute.side_effect = Exception("Simulated DB connection crash")
     mock_db.close = AsyncMock()
 
