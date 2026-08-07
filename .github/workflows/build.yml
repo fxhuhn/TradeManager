@@ -29,20 +29,22 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set lowercase repository and image tags
+        run: |
+          echo "REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+          echo "IMAGE_TAG=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]'):test" >> $GITHUB_ENV
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ghcr.io/${{ env.REPO_LOWER }}
           tags: |
             type=ref,event=branch
             type=ref,event=pr
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha
-
-      - name: Set local image tag
-        run: echo "IMAGE_TAG=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]'):test" >> $GITHUB_ENV
 
       - name: Build Docker image
         uses: docker/build-push-action@v7
@@ -77,5 +79,5 @@ jobs:
       - name: Push Docker image
         if: github.event_name != 'pull_request'
         run: |
-          docker push --all-tags ghcr.io/${{ github.repository }}
+          docker push --all-tags ghcr.io/${{ env.REPO_LOWER }}
 
