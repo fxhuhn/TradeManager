@@ -21,10 +21,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: 'pip'
@@ -45,10 +45,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: 'pip'
@@ -60,8 +60,8 @@ jobs:
 
       - name: Run Bandit
         run: |
-          bandit -ll -r . -x ".venv,*/test/*,*/tests/*" -f sarif -o bandit-results.sarif || true
-          bandit -ll -r . -x ".venv,*/test/*,*/tests/*" -f screen || true
+          bandit -ll -r . -x ".venv,*/test/*,*/tests/*" -f sarif -o bandit-results.sarif
+          bandit -ll -r . -x ".venv,*/test/*,*/tests/*" -f screen
 
       - name: Upload Bandit SARIF report to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v4
@@ -84,7 +84,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
@@ -107,10 +107,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -126,10 +126,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: 'pip'
@@ -141,3 +141,27 @@ jobs:
 
       - name: Run Vulture
         run: vulture . --exclude .venv,tests
+
+  # Job 6: mypy Static Type Checking (parallel)
+  mypy:
+    name: mypy Type Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install mypy
+
+      - name: Run mypy
+        run: mypy app/ --strict
