@@ -120,14 +120,6 @@ jobs:
           inputs: requirements.txt
           version: 2.7.3
           summary: true
-          format: sarif
-          output: pip-audit-results.sarif
-
-      - name: Upload pip-audit SARIF report to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v4
-        if: always()
-        with:
-          sarif_file: pip-audit-results.sarif
 
   vulture:
     name: Vulture Dead Code Analysis
