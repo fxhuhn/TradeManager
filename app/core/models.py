@@ -16,6 +16,7 @@ Event-Datenfluss & Timing:
 4. Callback triggert das Settlement, welches Einstiegs- und Ausstiegspreise aus `executions` berechnet und in `trades_settlement` sichert.
 """
 
+import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -96,7 +97,7 @@ class OrderRow:
     transmitted_at: str | None = None
 
 
-def order_row_from_db_row(row: Mapping[str, Any]) -> OrderRow:
+def order_row_from_db_row(row: Mapping[str, Any] | sqlite3.Row) -> OrderRow:
     """Centralized OrderRow construction from an aiosqlite database row mapping."""
     return OrderRow(
         order_id=row["order_id"],

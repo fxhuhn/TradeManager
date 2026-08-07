@@ -1,11 +1,13 @@
 import logging
 import re
 import sys
+from collections.abc import MutableMapping
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from typing import Any
 
 import structlog
+from structlog.types import Processor
 
 
 def _simplify_ibkr_warning(warning_message: str) -> str:
@@ -58,8 +60,8 @@ def _simplify_ibkr_warning(warning_message: str) -> str:
 
 
 def clean_ib_async_warnings_processor(
-    logger: object, method_name: str, event_dict: dict[str, Any]
-) -> dict[str, Any]:
+    logger: Any, method_name: str, event_dict: MutableMapping[str, Any]
+) -> MutableMapping[str, Any]:
     """Structlog processor to simplify verbose IBKR wrapper validation warnings."""
     event = event_dict.get("event")
     if isinstance(event, str) and event.startswith(
@@ -108,7 +110,7 @@ def configure_logging(
         root_logger.addHandler(file_handler)
 
     # Gemeinsame Pre-Prozessoren definieren (auch fuer externe Bibliotheken)
-    shared_pre_processors = [
+    shared_pre_processors: list[Processor] = [
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
         structlog.processors.TimeStamper(fmt="%H:%M:%S.%f", utc=False),

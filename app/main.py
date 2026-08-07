@@ -517,7 +517,7 @@ async def _run_database_migrations(
         await run_migrations(database_connection_instance, migrations_directory)
     except Exception as exception:
         logger.critical("Error executing database migrations", error=str(exception))
-        await interactive_brokers.disconnect()
+        interactive_brokers.disconnect()
         await database_connection_instance.close()
         sys.exit(1)
     finally:
@@ -659,9 +659,12 @@ def _enable_socket_keepalive(interactive_brokers: IB) -> None:
         return
 
     try:
-        socket_object = interactive_brokers.client.conn.transport.get_extra_info(
-            "socket"
+        transport = getattr(
+            getattr(interactive_brokers.client, "conn", None), "transport", None
         )
+        if transport is None:
+            return
+        socket_object = transport.get_extra_info("socket")
         if not socket_object:
             return
 
