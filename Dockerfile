@@ -1,7 +1,7 @@
 # Dockerfile
 # Minimales, produktionsbereites Image für das IBKR Equities Trading System
 
-FROM python:3.12-slim
+FROM python:3.12-slim-bookworm
 
 # Systemabhängigkeiten installieren und Sicherheitsupdates anwenden
 RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
