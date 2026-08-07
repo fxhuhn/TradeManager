@@ -1,5 +1,8 @@
-# filename: test_main.py
+# filename: tests/integration/test_main.py
+"""Integration tests for TradingSystemOrchestrator, TWS connection loop, and heartbeat monitoring."""
+
 import asyncio
+import datetime as dt
 import socket
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -16,6 +19,7 @@ from app.main import (
     _verify_database_integrity,
     connect_to_tws,
 )
+from app.trading.callbacks import TwsCallbacksManager
 
 
 @pytest.fixture
@@ -31,8 +35,8 @@ def test_config() -> Config:
         reconnect_max_delay_s=0.1,
         request_timeout_s=5.0,
         completed_orders_timeout_s=5.0,
-        heartbeat_interval_s=60.0,
-        heartbeat_timeout_s=5.0,
+        heartbeat_interval_s=0.1,
+        heartbeat_timeout_s=0.05,
     )
     app = AppConfig(
         max_retries=3,
@@ -42,7 +46,7 @@ def test_config() -> Config:
         csv_watcher_interval_s=60,
         order_sync_interval_s=1,
         retry_backoff_base_s=0.01,
-        shutdown_join_timeout_s=0.05,  # Short timeout for queue join tests
+        shutdown_join_timeout_s=0.05,
         database_timeout_s=30.0,
         max_csv_size_bytes=5242880,
         log_file_path="data/app.log",
@@ -69,15 +73,12 @@ def test_config() -> Config:
 @pytest.mark.asyncio
 async def test_attempt_connection_success(test_config: Config) -> None:
     """Verifies that _attempt_connection returns True when connectAsync succeeds."""
-    # Arrange
     mock_ib = MagicMock()
     mock_ib.connectAsync = AsyncMock()
 
-    # Act
     with patch("app.main._enable_socket_keepalive") as mock_keepalive:
         result = await _attempt_connection(mock_ib, test_config, attempt=1)
 
-        # Assert
         assert result is True
         mock_ib.connectAsync.assert_called_once_with("127.0.0.1", 7496, clientId=0)
         mock_keepalive.assert_called_once_with(mock_ib)
@@ -86,29 +87,22 @@ async def test_attempt_connection_success(test_config: Config) -> None:
 @pytest.mark.asyncio
 async def test_attempt_connection_failure(test_config: Config) -> None:
     """Verifies that _attempt_connection returns False when connectAsync raises exception."""
-    # Arrange
     mock_ib = MagicMock()
     mock_ib.connectAsync = AsyncMock(side_effect=Exception("Connection refused"))
 
-    # Act
     result = await _attempt_connection(mock_ib, test_config, attempt=1)
-
-    # Assert
     assert result is False
 
 
 @pytest.mark.asyncio
 async def test_connect_to_tws_success_on_first_try(test_config: Config) -> None:
     """Verifies that connect_to_tws succeeds immediately if first connection attempt works."""
-    # Arrange
     mock_ib = MagicMock()
 
-    # Act
     with patch("app.main._attempt_connection", new_callable=AsyncMock) as mock_attempt:
         mock_attempt.return_value = True
         result = await connect_to_tws(mock_ib, test_config)
 
-        # Assert
         assert result is True
         mock_attempt.assert_called_once_with(mock_ib, test_config, 1)
 
@@ -116,15 +110,12 @@ async def test_connect_to_tws_success_on_first_try(test_config: Config) -> None:
 @pytest.mark.asyncio
 async def test_connect_to_tws_retries_and_succeeds(test_config: Config) -> None:
     """Verifies that connect_to_tws retries on connection failure and succeeds on subsequent try."""
-    # Arrange
     mock_ib = MagicMock()
 
-    # Act
     with patch("app.main._attempt_connection", new_callable=AsyncMock) as mock_attempt:
         mock_attempt.side_effect = [False, True]
         result = await connect_to_tws(mock_ib, test_config)
 
-        # Assert
         assert result is True
         assert mock_attempt.call_count == 2
 
@@ -134,88 +125,68 @@ async def test_connect_to_tws_exhausts_retries_and_fails(
     test_config: Config,
 ) -> None:
     """Verifies that connect_to_tws returns False after exhausting all reconnect attempts."""
-    # Arrange
     mock_ib = MagicMock()
 
-    # Act
     with patch("app.main._attempt_connection", new_callable=AsyncMock) as mock_attempt:
         mock_attempt.return_value = False
         result = await connect_to_tws(mock_ib, test_config)
 
-        # Assert
         assert result is False
         assert mock_attempt.call_count == test_config.tws.reconnect_max_attempts
 
 
 def test_enable_socket_keepalive_ignores_disconnected_ib() -> None:
     """Verifies that _enable_socket_keepalive returns early if IB client is not connected."""
-    # Arrange
     mock_ib = MagicMock()
     mock_ib.isConnected.return_value = False
 
-    # Act
     _enable_socket_keepalive(mock_ib)
-
-    # Assert
     mock_ib.client.conn.transport.get_extra_info.assert_not_called()
 
 
 def test_enable_socket_keepalive_handles_missing_socket() -> None:
     """Verifies that _enable_socket_keepalive exits cleanly if socket cannot be retrieved."""
-    # Arrange
     mock_ib = MagicMock()
     mock_ib.isConnected.return_value = True
     mock_ib.client.conn.transport.get_extra_info.return_value = None
 
-    # Act
     _enable_socket_keepalive(mock_ib)
-
-    # Assert
     mock_ib.client.conn.transport.get_extra_info.assert_called_once_with("socket")
 
 
 def test_enable_socket_keepalive_applies_socket_options() -> None:
     """Verifies that _enable_socket_keepalive successfully configures socket keepalive options."""
-    # Arrange
     mock_ib = MagicMock()
     mock_ib.isConnected.return_value = True
     mock_socket = MagicMock()
     mock_ib.client.conn.transport.get_extra_info.return_value = mock_socket
 
-    # Act
     _enable_socket_keepalive(mock_ib)
-
-    # Assert
     mock_socket.setsockopt.assert_any_call(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
 
 
 def test_enable_socket_keepalive_handles_socket_exception() -> None:
     """Verifies that _enable_socket_keepalive catches and logs keepalive exceptions cleanly."""
-    # Arrange
     mock_ib = MagicMock()
     mock_ib.isConnected.return_value = True
     mock_socket = MagicMock()
     mock_socket.setsockopt.side_effect = Exception("Socket error")
     mock_ib.client.conn.transport.get_extra_info.return_value = mock_socket
 
-    # Act & Assert (Should not raise exception)
     _enable_socket_keepalive(mock_ib)
 
 
 @pytest.mark.asyncio
 async def test_verify_database_integrity_success() -> None:
     """Verifies that _verify_database_integrity returns database path on success."""
-    # Arrange
     mock_notifier = MagicMock()
 
-    # Act
     with patch(
         "app.main.verify_db_integrity", new_callable=AsyncMock
     ) as mock_integrity:
         mock_integrity.return_value = True
         path = await _verify_database_integrity(Path("/root"), mock_notifier)
 
-        # Assert
         assert path == Path("/root/data/trading.db")
         mock_notifier.send_system_status.assert_not_called()
 
@@ -223,11 +194,9 @@ async def test_verify_database_integrity_success() -> None:
 @pytest.mark.asyncio
 async def test_verify_database_integrity_failure() -> None:
     """Verifies that _verify_database_integrity calls sys.exit(1) on integrity failure."""
-    # Arrange
     mock_notifier = MagicMock()
     mock_notifier.send_system_status = AsyncMock()
 
-    # Act & Assert
     with (
         patch("app.main.verify_db_integrity", new_callable=AsyncMock) as mock_integrity,
         pytest.raises(SystemExit) as exit_info,
@@ -241,12 +210,10 @@ async def test_verify_database_integrity_failure() -> None:
 
 def test_initialize_config_and_logging_success() -> None:
     """Verifies that config is loaded and directory structure is initialized successfully."""
-    # Arrange
     mock_config = MagicMock()
     mock_config.app.log_file_path = "data/app.log"
     mock_config.app.log_rotation_backup_count = 5
 
-    # Act
     with (
         patch("app.main.load_config", return_value=mock_config),
         patch("pathlib.Path.mkdir") as mock_mkdir,
@@ -254,7 +221,6 @@ def test_initialize_config_and_logging_success() -> None:
     ):
         config = _initialize_config_and_logging(Path("/root"))
 
-        # Assert
         assert config == mock_config
         mock_mkdir.assert_called_once()
         mock_logging.assert_called_once()
@@ -262,7 +228,6 @@ def test_initialize_config_and_logging_success() -> None:
 
 def test_initialize_config_and_logging_failure() -> None:
     """Verifies that config loading failures call sys.exit(1)."""
-    # Act & Assert
     with (
         patch("app.main.load_config", side_effect=Exception("TOML error")),
         patch("app.main.configure_logging"),
@@ -275,22 +240,18 @@ def test_initialize_config_and_logging_failure() -> None:
 
 def test_setup_graceful_shutdown() -> None:
     """Verifies that signal handlers are added to the running asyncio loop."""
-    # Arrange
     mock_loop = MagicMock()
     mock_orchestrator = MagicMock()
 
-    # Act
     with patch("asyncio.get_running_loop", return_value=mock_loop):
         _setup_graceful_shutdown(mock_orchestrator)
 
-        # Assert
         assert mock_loop.add_signal_handler.call_count >= 1
 
 
 @pytest.mark.asyncio
 async def test_orchestrator_graceful_shutdown(test_config: Config) -> None:
     """Verifies that graceful_shutdown cancels tasks and disconnects IB connection."""
-    # Arrange
     mock_ib = MagicMock()
     mock_ib.isConnected.return_value = True
     mock_notifier = MagicMock()
@@ -308,10 +269,273 @@ async def test_orchestrator_graceful_shutdown(test_config: Config) -> None:
     )
     orchestrator.tasks = (mock_task,)
 
-    # Act
     await orchestrator.graceful_shutdown()
 
-    # Assert
     mock_task.cancel.assert_called_once()
     mock_ib.disconnect.assert_called_once()
     assert mock_notifier.send_system_status.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_ping_success(test_config: Config) -> None:
+    """Prüft, dass der Heartbeat bei erfolgreichem reqCurrentTimeAsync normal weiterläuft."""
+    mock_ib = MagicMock()
+    future = asyncio.Future()
+    future.set_result(dt.datetime.now())
+    mock_ib.reqCurrentTimeAsync.return_value = future
+    mock_ib.isConnected.return_value = True
+
+    mock_notifier = MagicMock()
+
+    orchestrator = TradingSystemOrchestrator(
+        root_directory_path=MagicMock(),
+        database_path=MagicMock(),
+        config=test_config,
+        notifier=mock_notifier,
+        interactive_brokers=mock_ib,
+        queue=asyncio.Queue(),
+    )
+
+    heartbeat_task = asyncio.create_task(orchestrator.heartbeat_loop())
+    await asyncio.sleep(0.15)
+    heartbeat_task.cancel()
+
+    try:
+        await heartbeat_task
+    except asyncio.CancelledError:
+        pass
+
+    mock_ib.reqCurrentTimeAsync.assert_called()
+    mock_ib.disconnect.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_ping_timeout_disconnects(test_config: Config) -> None:
+    """Prüft, dass der Heartbeat bei Timeout die Verbindung trennt und alarmiert."""
+    mock_ib = MagicMock()
+    future = asyncio.Future()
+    mock_ib.reqCurrentTimeAsync.return_value = future
+    mock_ib.isConnected.return_value = True
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_message = AsyncMock(return_value=True)
+
+    orchestrator = TradingSystemOrchestrator(
+        root_directory_path=MagicMock(),
+        database_path=MagicMock(),
+        config=test_config,
+        notifier=mock_notifier,
+        interactive_brokers=mock_ib,
+        queue=asyncio.Queue(),
+    )
+
+    heartbeat_task = asyncio.create_task(orchestrator.heartbeat_loop())
+    await asyncio.sleep(0.15)
+    heartbeat_task.cancel()
+
+    try:
+        await heartbeat_task
+    except asyncio.CancelledError:
+        pass
+
+    mock_ib.reqCurrentTimeAsync.assert_called()
+    mock_ib.disconnect.assert_called_once()
+    mock_notifier.send_message.assert_called_once()
+    assert "HEARTBEAT TIMEOUT" in mock_notifier.send_message.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_paused_during_restart_window(test_config: Config) -> None:
+    """Prüft, dass der Heartbeat-Ping im Restart-Fenster um 12:00 Uhr ausgesetzt wird."""
+    mock_ib = MagicMock()
+    mock_ib.isConnected.return_value = True
+
+    mock_notifier = MagicMock()
+
+    orchestrator = TradingSystemOrchestrator(
+        root_directory_path=MagicMock(),
+        database_path=MagicMock(),
+        config=test_config,
+        notifier=mock_notifier,
+        interactive_brokers=mock_ib,
+        queue=asyncio.Queue(),
+    )
+
+    mock_now = dt.datetime(2026, 6, 21, 12, 1, 0)
+    with patch("datetime.datetime") as mock_datetime:
+        mock_datetime.side_effect = dt.datetime
+        mock_datetime.now.return_value = mock_now
+        heartbeat_task = asyncio.create_task(orchestrator.heartbeat_loop())
+        await asyncio.sleep(0.15)
+        heartbeat_task.cancel()
+
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
+
+    mock_ib.reqCurrentTimeAsync.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_callbacks_planned_restart_disconnected(test_config: Config) -> None:
+    """Prüft, dass das on_disconnected Callback bei einem geplanten Neustart die richtige Benachrichtigung sendet."""
+    mock_ib = MagicMock()
+    mock_notifier = MagicMock()
+    mock_notifier.send_system_status = AsyncMock(return_value=True)
+
+    callbacks_manager = TwsCallbacksManager(
+        db_factory=AsyncMock(),
+        interactive_brokers=mock_ib,
+        notifier=mock_notifier,
+        config=test_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    mock_now_planned = dt.datetime(2026, 6, 21, 12, 1, 0)
+    with patch("datetime.datetime") as mock_datetime:
+        mock_datetime.side_effect = dt.datetime
+        mock_datetime.now.return_value = mock_now_planned
+        callbacks_manager.on_disconnected()
+        await asyncio.sleep(0.01)
+
+    mock_notifier.send_system_status.assert_called_with(
+        title="GEPLANTER NEUSTART (Gateway wird neu gestartet)",
+        emoji="⏳",
+    )
+
+    mock_now_unexpected = dt.datetime(2026, 6, 21, 14, 0, 0)
+    mock_notifier.send_system_status.reset_mock()
+    with patch("datetime.datetime") as mock_datetime:
+        mock_datetime.side_effect = dt.datetime
+        mock_datetime.now.return_value = mock_now_unexpected
+        callbacks_manager.on_disconnected()
+        await asyncio.sleep(0.01)
+
+    mock_notifier.send_system_status.assert_called_with(
+        title="VERBINDUNGSABBRUCH",
+        emoji="🚨",
+    )
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_callbacks_and_tasks(
+    test_config: Config, tmp_path: Path
+) -> None:
+    """Verifies orchestrator helper callbacks and background task initialization."""
+    mock_ib = MagicMock()
+    mock_ib.isConnected.return_value = True
+    mock_notifier = MagicMock()
+    db_path = tmp_path / "trading.db"
+
+    orchestrator = TradingSystemOrchestrator(
+        root_directory_path=tmp_path,
+        database_path=db_path,
+        config=test_config,
+        notifier=mock_notifier,
+        interactive_brokers=mock_ib,
+        queue=asyncio.Queue(),
+    )
+
+    with (
+        patch("app.main.trigger_settlement", AsyncMock()) as mock_settlement,
+        patch("app.main.handle_retriable_error", AsyncMock()) as mock_retry,
+        patch("app.main.run_recovery", AsyncMock()) as mock_recovery,
+    ):
+        await orchestrator.trigger_settlement_callback("G1", "A1")
+        mock_settlement.assert_called_once()
+
+        await orchestrator.handle_retriable_error_callback(101)
+        mock_retry.assert_called_once()
+
+        await orchestrator.run_recovery_callback()
+        mock_recovery.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_run_reconnect_callback_prevents_concurrent_runs(
+    test_config: Config,
+) -> None:
+    """Verifies that run_reconnect_callback skips if reconnection is already in progress."""
+    mock_ib = MagicMock()
+    mock_notifier = MagicMock()
+
+    orchestrator = TradingSystemOrchestrator(
+        root_directory_path=MagicMock(),
+        database_path=MagicMock(),
+        config=test_config,
+        notifier=mock_notifier,
+        interactive_brokers=mock_ib,
+        queue=asyncio.Queue(),
+    )
+
+    orchestrator.is_reconnecting = True
+    await orchestrator.run_reconnect_callback()
+    assert orchestrator.is_reconnecting is True
+
+
+@pytest.mark.asyncio
+async def test_execute_reconnect_loop_success(test_config: Config) -> None:
+    """Verifies _execute_reconnect_loop triggers recovery run on successful reconnection."""
+    mock_ib = MagicMock()
+    mock_ib.isConnected.side_effect = [False, True]
+    mock_notifier = MagicMock()
+    mock_notifier.send_system_status = AsyncMock()
+
+    orchestrator = TradingSystemOrchestrator(
+        root_directory_path=MagicMock(),
+        database_path=MagicMock(),
+        config=test_config,
+        notifier=mock_notifier,
+        interactive_brokers=mock_ib,
+        queue=asyncio.Queue(),
+    )
+
+    with (
+        patch("asyncio.sleep", AsyncMock()),
+        patch.object(
+            orchestrator, "_attempt_single_reconnect", AsyncMock(return_value=True)
+        ),
+        patch.object(
+            orchestrator, "run_recovery_callback", AsyncMock()
+        ) as mock_recovery,
+    ):
+        await orchestrator._execute_reconnect_loop()
+        mock_notifier.send_system_status.assert_called_once()
+        mock_recovery.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_database_backup_loop_resiliency(
+    test_config: Config, tmp_path: Path
+) -> None:
+    """Verifies database_backup_loop handles non-fatal exceptions gracefully."""
+    mock_ib = MagicMock()
+    mock_notifier = MagicMock()
+
+    orchestrator = TradingSystemOrchestrator(
+        root_directory_path=tmp_path,
+        database_path=tmp_path / "trading.db",
+        config=test_config,
+        notifier=mock_notifier,
+        interactive_brokers=mock_ib,
+        queue=asyncio.Queue(),
+    )
+
+    with (
+        patch(
+            "app.main.run_db_backup",
+            AsyncMock(side_effect=[Exception("Backup fail"), None]),
+        ),
+        patch("asyncio.sleep", AsyncMock()),
+    ):
+        backup_task = asyncio.create_task(orchestrator.database_backup_loop())
+        await asyncio.sleep(0.05)
+        backup_task.cancel()
+        try:
+            await backup_task
+        except asyncio.CancelledError:
+            pass

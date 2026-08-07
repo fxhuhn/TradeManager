@@ -121,7 +121,6 @@ def configure_logging(
             *shared_pre_processors,
             structlog.stdlib.PositionalArgumentsFormatter(),
             structlog.processors.StackInfoRenderer(),
-            structlog.processors.format_exc_info,
             structlog.processors.UnicodeDecoder(),
             # Der Processor fuer das Standard-logging wandelt Event-Dicts in Strings um
             structlog.stdlib.ProcessorFormatter.wrap_for_formatter,

@@ -1,11 +1,20 @@
+# filename: tests/services/test_importer.py
 import asyncio
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from ib_async import AccountValue
 
 from app.core.config import AccountConfig, AppConfig, Config, TelegramConfig, TwsConfig
-from app.services.importer import csv_directory_watcher
+from app.services.importer import (
+    csv_directory_watcher,
+    determine_maximum_capital_allocation,
+    fetch_account_balance_metrics,
+    resolve_account_id,
+    run_csv_import,
+)
 
 
 @pytest.fixture
@@ -46,6 +55,125 @@ def mock_config() -> Config:
     return Config(
         tws=tws, app=app, account=account, telegram=telegram, strategy_limits={}
     )
+
+
+def test_determine_maximum_capital_allocation_total_cash() -> None:
+    """Prüft, dass bei sizing_mode 'total_cash' nur der TotalCashValue zurückgegeben wird."""
+    allocation = determine_maximum_capital_allocation(
+        net_liquidation_value=Decimal("100000.0"),
+        available_funds_value=Decimal("50000.0"),
+        total_cash_value=Decimal("40000.0"),
+        margin_multiplier_factor=Decimal("2.0"),
+        sizing_mode="total_cash",
+        allocation_limit_percentage=Decimal("0.05"),
+    )
+    assert allocation == Decimal("40000.0")
+
+
+def test_determine_maximum_capital_allocation_margin_adjusted() -> None:
+    """Prüft, dass bei margin_adjusted_capital das theoretische Limit (NLV * Margin * Limit) greift."""
+    allocation = determine_maximum_capital_allocation(
+        net_liquidation_value=Decimal("100000.0"),
+        available_funds_value=Decimal("50000.0"),
+        total_cash_value=Decimal("40000.0"),
+        margin_multiplier_factor=Decimal("2.0"),
+        sizing_mode="margin_adjusted_capital",
+        allocation_limit_percentage=Decimal("0.05"),
+    )
+    # 100000 * 2.0 * 0.05 = 10000. Capped by available_funds * 2.0 = 100000.
+    assert allocation == Decimal("10000.0")
+
+
+def test_determine_maximum_capital_allocation_margin_adjusted_limited_by_funds() -> (
+    None
+):
+    """Prüft, dass bei unzureichendem AvailableFunds das Limit durch AvailableFunds * Margin gedeckelt wird."""
+    allocation = determine_maximum_capital_allocation(
+        net_liquidation_value=Decimal("100000.0"),
+        available_funds_value=Decimal("10000.0"),
+        total_cash_value=Decimal("5000.0"),
+        margin_multiplier_factor=Decimal("2.0"),
+        sizing_mode="margin_adjusted_capital",
+        allocation_limit_percentage=Decimal("0.50"),
+    )
+    # 100000 * 2.0 * 0.50 = 100000. Capped by available_funds * 2.0 = 20000.
+    assert allocation == Decimal("20000.0")
+
+
+@pytest.mark.asyncio
+async def test_fetch_account_balance_metrics_from_cache() -> None:
+    """Prüft das Laden der Kontowerte aus dem Cache."""
+    mock_ib = MagicMock()
+    mock_ib.accountValues.return_value = [
+        AccountValue(
+            account="U123",
+            tag="NetLiquidation",
+            value="80000.00",
+            currency="EUR",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U123",
+            tag="AvailableFunds",
+            value="50000.00",
+            currency="EUR",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U123",
+            tag="TotalCashValue",
+            value="35000.00",
+            currency="EUR",
+            modelCode="",
+        ),
+    ]
+
+    metrics = await fetch_account_balance_metrics(mock_ib, "U123")
+    assert metrics.net_liquidation_value == Decimal("80000.00")
+    assert metrics.available_funds_value == Decimal("50000.00")
+    assert metrics.total_cash_value == Decimal("35000.00")
+    mock_ib.reqAccountSummary.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_fetch_account_balance_metrics_from_summary() -> None:
+    """Prüft das Laden der Kontowerte per Fallback via accountSummaryAsync."""
+    mock_ib = MagicMock()
+    # Leerer Cache
+    mock_ib.accountValues.return_value = []
+
+    # Mock für accountSummaryAsync
+    async def mock_account_summary(account: str = "") -> list[AccountValue]:
+        return [
+            AccountValue(
+                account="U123",
+                tag="NetLiquidation",
+                value="90000.0",
+                currency="EUR",
+                modelCode="",
+            ),
+            AccountValue(
+                account="U123",
+                tag="AvailableFunds",
+                value="60000.0",
+                currency="EUR",
+                modelCode="",
+            ),
+            AccountValue(
+                account="U123",
+                tag="TotalCashValue",
+                value="40000.0",
+                currency="EUR",
+                modelCode="",
+            ),
+        ]
+
+    mock_ib.accountSummaryAsync = mock_account_summary
+
+    metrics = await fetch_account_balance_metrics(mock_ib, "U123")
+    assert metrics.net_liquidation_value == Decimal("90000.0")
+    assert metrics.available_funds_value == Decimal("60000.0")
+    assert metrics.total_cash_value == Decimal("40000.0")
 
 
 @pytest.mark.asyncio
@@ -262,8 +390,6 @@ async def test_run_csv_import_handles_standalone_exit_gracefully(
     tmp_path: Path, mock_config: Config, db
 ) -> None:
     """Prüft, dass run_csv_import bei einem Standalone-Exit die Exception abfängt und fortfährt."""
-    from app.services.importer import run_csv_import
-
     csv_file = tmp_path / "orders_2026_07_06.csv"
     # Ein Standalone Exit (kein ENTRY in DB)
     csv_content = (
@@ -289,7 +415,6 @@ async def test_run_csv_import_handles_standalone_exit_gracefully(
         mock_datetime.now.return_value = mock_now
 
         # run_csv_import aufrufen
-        # Sollte ohne Exception durchlaufen, da das ValueError abgefangen wird
         await run_csv_import(
             db=db,
             interactive_brokers=mock_interactive_brokers,
@@ -311,10 +436,6 @@ async def test_run_csv_import_sends_telegram_on_downscaling(
     tmp_path: Path, mock_config: Config, db
 ) -> None:
     """Verifies that run_csv_import triggers a downscaling alert if capital sizing limits the quantity."""
-    from ib_async import AccountValue
-
-    from app.services.importer import run_csv_import
-
     csv_file = tmp_path / "orders_2026_07_06.csv"
     # An entry with high quantity (100) and target price 100.0. Total cost = 10,000.00.
     csv_content = (
@@ -387,8 +508,6 @@ async def test_run_csv_import_aligns_standalone_exit_quantity(
     tmp_path: Path, mock_config: Config, db
 ) -> None:
     """Verifies that a standalone exit quantity is aligned with the existing ENTRY order quantity in the DB."""
-    from app.services.importer import run_csv_import
-
     # 1. Insert an existing ENTRY order with quantity 5 (e.g. downscaled from 6)
     await db.execute(
         """
@@ -445,3 +564,38 @@ async def test_run_csv_import_aligns_standalone_exit_quantity(
     assert kwargs["status"] == "Exit-Menge Angepasst"
     assert kwargs["title"] == "EXIT-SIZING"
     assert "Reduziert von 6 auf 5" in kwargs["details"]
+
+
+def test_resolve_account_id_fallbacks() -> None:
+    """Verifies resolve_account_id handles empty accounts list and fallback account assignment."""
+    mock_ib = MagicMock()
+    mock_ib.managedAccounts.return_value = []
+    assert resolve_account_id(mock_ib, "U12345") == "U12345"
+
+    mock_ib.managedAccounts.return_value = ["U99999"]
+    assert resolve_account_id(mock_ib, "U99999") == "U99999"
+    assert resolve_account_id(mock_ib, "U11111") == "U99999"
+
+
+@pytest.mark.asyncio
+async def test_check_csv_dos_limits_rejects_large_files(
+    tmp_path: Path, mock_config: Config
+) -> None:
+    """Verifies _check_csv_dos_limits rejects files larger than max_csv_size_bytes."""
+    import dataclasses
+
+    from app.services.importer import _check_csv_dos_limits
+
+    large_csv = tmp_path / "orders_large.csv"
+    large_csv.write_bytes(b"x" * 1024)
+
+    small_app_config = dataclasses.replace(mock_config.app, max_csv_size_bytes=500)
+    config = dataclasses.replace(mock_config, app=small_app_config)
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_importer_info = AsyncMock()
+
+    result = await _check_csv_dos_limits(large_csv, config, mock_notifier)
+    assert result is False
+    mock_notifier.send_importer_info.assert_called_once()
+    assert "DoS-Schutz" in mock_notifier.send_importer_info.call_args[1]["status"]

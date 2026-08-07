@@ -1,3 +1,5 @@
+"""Tests for structured logging setup and rotation configuration."""
+
 from pathlib import Path
 
 import pytest
@@ -9,8 +11,8 @@ from app.core.logging_setup import configure_logging
 @pytest.mark.asyncio
 async def test_configure_logging_creates_file_and_writes(tmp_path: Path) -> None:
     """
-    Verifiziert, dass configure_logging() die Logdatei anlegt
-    und structlog-Ausgaben farb- und formatierungsbereinigt in die Datei schreibt.
+    Verifies that configure_logging() creates the log file
+    and structlog output is clean of ANSI colors and formatted properly.
     """
     # 1. Temporaeren Logfile-Pfad festlegen
     temp_log_file = tmp_path / "test_app.log"

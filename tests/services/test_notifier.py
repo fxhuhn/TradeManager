@@ -1,4 +1,4 @@
-# filename: test_notifier.py
+# filename: tests/services/test_notifier.py
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 

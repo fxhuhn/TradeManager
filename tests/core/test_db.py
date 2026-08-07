@@ -1,4 +1,4 @@
-# filename: tests/test_db.py
+# filename: tests/core/test_db.py
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch

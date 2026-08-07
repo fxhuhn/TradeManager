@@ -1,4 +1,4 @@
-# filename: test_retry.py
+# filename: tests/trading/test_retry.py
 """
 Unit tests for app.trading.retry module.
 Verifies retry backoff calculations, re-queueing, max-retry threshold limits,
@@ -43,7 +43,6 @@ async def test_handle_retriable_error_successful_backoff_and_requeue(
     db: aiosqlite.Connection, test_config: Config, mock_notifier: AsyncMock
 ) -> None:
     """Verifies that an order under max_retries undergoes backoff, status update to Created, and requeueing."""
-    # Arrange
     order_id = 101
     trade_group_id = "TG_RETRY_001"
     await db.execute(
@@ -55,7 +54,6 @@ async def test_handle_retriable_error_successful_backoff_and_requeue(
     )
     await db.commit()
 
-    # Prevent handler's finally block from closing shared test DB
     original_close = db.close
     db.close = AsyncMock()
 
@@ -64,7 +62,6 @@ async def test_handle_retriable_error_successful_backoff_and_requeue(
     async def get_db_connection() -> aiosqlite.Connection:
         return db
 
-    # Act
     await handle_retriable_error(
         db_factory=get_db_connection,
         order_id=order_id,
@@ -73,7 +70,6 @@ async def test_handle_retriable_error_successful_backoff_and_requeue(
         config=test_config,
     )
 
-    # Assert
     async with db.execute(
         "SELECT status, retry_count FROM orders WHERE order_id = ?", (order_id,)
     ) as cursor:
@@ -87,7 +83,6 @@ async def test_handle_retriable_error_successful_backoff_and_requeue(
     assert queued_item == trade_group_id
     mock_notifier.send_message.assert_not_called()
 
-    # Restore close
     db.close = original_close
 
 
@@ -96,7 +91,6 @@ async def test_handle_retriable_error_exceeds_max_retries_marks_error_and_notifi
     db: aiosqlite.Connection, test_config: Config, mock_notifier: AsyncMock
 ) -> None:
     """Verifies that an order reaching max_retries is marked as Error and sends Telegram notification."""
-    # Arrange
     order_id = 102
     trade_group_id = "TG_RETRY_MAX"
     await db.execute(
@@ -108,7 +102,6 @@ async def test_handle_retriable_error_exceeds_max_retries_marks_error_and_notifi
     )
     await db.commit()
 
-    # Prevent handler's finally block from closing shared test DB
     original_close = db.close
     db.close = AsyncMock()
 
@@ -117,7 +110,6 @@ async def test_handle_retriable_error_exceeds_max_retries_marks_error_and_notifi
     async def get_db_connection() -> aiosqlite.Connection:
         return db
 
-    # Act
     await handle_retriable_error(
         db_factory=get_db_connection,
         order_id=order_id,
@@ -126,7 +118,6 @@ async def test_handle_retriable_error_exceeds_max_retries_marks_error_and_notifi
         config=test_config,
     )
 
-    # Assert
     async with db.execute(
         "SELECT status, retry_count FROM orders WHERE order_id = ?", (order_id,)
     ) as cursor:
@@ -141,7 +132,6 @@ async def test_handle_retriable_error_exceeds_max_retries_marks_error_and_notifi
     assert "RETRY-LIMIT EXCEEDED" in alert_text
     assert "MSFT" in alert_text
 
-    # Restore close
     db.close = original_close
 
 
@@ -150,14 +140,12 @@ async def test_handle_retriable_error_returns_early_when_order_not_found(
     db: aiosqlite.Connection, test_config: Config, mock_notifier: AsyncMock
 ) -> None:
     """Verifies that handle_retriable_error gracefully handles non-existent order_id."""
-    # Arrange
     non_existent_order_id = 99999
     queue: asyncio.Queue[str] = asyncio.Queue()
 
     async def get_db_connection() -> aiosqlite.Connection:
         return db
 
-    # Act
     await handle_retriable_error(
         db_factory=get_db_connection,
         order_id=non_existent_order_id,
@@ -166,7 +154,6 @@ async def test_handle_retriable_error_returns_early_when_order_not_found(
         config=test_config,
     )
 
-    # Assert
     assert queue.empty()
     mock_notifier.send_message.assert_not_called()
 
@@ -176,7 +163,6 @@ async def test_handle_retriable_error_handles_database_exception_gracefully(
     test_config: Config, mock_notifier: AsyncMock
 ) -> None:
     """Verifies that exceptions during retry handling are logged without bubbling up, and DB is closed."""
-    # Arrange
     mock_db = MagicMock(spec=aiosqlite.Connection)
     mock_db.execute.side_effect = Exception("Simulated DB connection crash")
     mock_db.close = AsyncMock()
@@ -186,7 +172,6 @@ async def test_handle_retriable_error_handles_database_exception_gracefully(
 
     queue: asyncio.Queue[str] = asyncio.Queue()
 
-    # Act & Assert
     try:
         await handle_retriable_error(
             db_factory=get_failing_db,
@@ -206,8 +191,5 @@ async def test_fetch_order_retry_info_returns_none_for_missing_order(
     db: aiosqlite.Connection,
 ) -> None:
     """Directly tests _fetch_order_retry_info returns None when query matches 0 rows."""
-    # Act
     result = await _fetch_order_retry_info(db, order_id=88888)
-
-    # Assert
     assert result is None

@@ -1,6 +1,4 @@
-"""
-Unit-Tests für Hilfsfunktionen in app.core.models.
-"""
+"""Unit tests for domain models and helper functions in app.core.models."""
 
 from decimal import Decimal
 

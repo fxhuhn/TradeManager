@@ -1,3 +1,6 @@
+# filename: tests/trading/test_recovery.py
+"""Unit and integration tests for state recovery and broker position reconciliation in app.trading.recovery."""
+
 import asyncio
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -6,7 +9,7 @@ import pytest
 
 from app.core.config import AccountConfig, AppConfig, Config, TelegramConfig, TwsConfig
 from app.services.alert_watcher import order_status_sync_loop
-from app.trading.recovery import run_recovery
+from app.trading.recovery import reconcile_broker_positions, run_recovery
 
 
 @pytest.fixture
@@ -29,7 +32,7 @@ def mock_config() -> Config:
         dead_order_threshold_minutes=15,
         alert_watcher_interval_s=60,
         csv_watcher_interval_s=60,
-        order_sync_interval_s=1,  # Kurzes Intervall fuer Tests
+        order_sync_interval_s=1,
         retry_backoff_base_s=5.0,
         shutdown_join_timeout_s=15.0,
         database_timeout_s=30.0,
@@ -69,7 +72,6 @@ async def test_order_status_sync_loop_calls_run_recovery(mock_config: Config) ->
     with patch(
         "app.services.alert_watcher.run_recovery", new_callable=AsyncMock
     ) as mock_run_recovery:
-        # Loop starten
         sync_task = asyncio.create_task(
             order_status_sync_loop(
                 db_factory=db_factory,
@@ -101,7 +103,6 @@ async def test_recovery_syncs_presubmitted_order_to_submitted(
     Prueft, dass run_recovery eine lokale Order im Status 'PreSubmitted',
     die in TWS aktiv ist, in der Datenbank auf 'Submitted' aktualisiert.
     """
-    # 1. Test-Order im Status 'PreSubmitted' in die echte In-Memory-Datenbank einfuegen
     await db.execute(
         """
         INSERT INTO orders (
@@ -130,7 +131,6 @@ async def test_recovery_syncs_presubmitted_order_to_submitted(
     )
     await db.commit()
 
-    # 2. IB/TWS Mocking fuer offene Trades
     mock_trade = MagicMock()
     mock_trade.order.orderId = 42
     mock_trade.order.permId = 987654321
@@ -146,7 +146,6 @@ async def test_recovery_syncs_presubmitted_order_to_submitted(
     mock_queue = asyncio.Queue()
     mock_trigger_settlement = AsyncMock()
 
-    # 3. run_recovery ausfuehren
     await run_recovery(
         database_connection=db,
         interactive_brokers_session=mock_interactive_brokers,
@@ -156,7 +155,6 @@ async def test_recovery_syncs_presubmitted_order_to_submitted(
         config=mock_config,
     )
 
-    # 4. Assertions: check the status of order 42 in the database
     async with db.execute(
         "SELECT status, perm_id FROM orders WHERE order_id = 42"
     ) as cursor:
@@ -174,7 +172,6 @@ async def test_recovery_recovers_filled_entry_with_active_child(
     Prüft, dass eine ENTRY-Order, die in TWS nicht mehr aktiv oder abgeschlossen gelistet ist,
     aber eine aktive Child-Order (z. B. TP) besitzt, korrekt als 'Filled' rekonstruiert wird.
     """
-    # 1. Parent-Order (ENTRY) und Child-Order (TP) in die In-Memory-Datenbank einfügen
     await db.execute(
         """
         INSERT INTO orders (
@@ -229,9 +226,6 @@ async def test_recovery_recovers_filled_entry_with_active_child(
     )
     await db.commit()
 
-    # 2. IB/TWS Mocking:
-    # Parent (177) ist nicht in TWS aktiv/komplettiert (wird also von openTrades/trades nicht zurückgegeben).
-    # Child (178) ist in TWS aktiv (openTrades).
     mock_trade_child = MagicMock()
     mock_trade_child.order.orderId = 178
     mock_trade_child.order.permId = 48380411
@@ -243,8 +237,6 @@ async def test_recovery_recovers_filled_entry_with_active_child(
     mock_interactive_brokers.openTrades.return_value = [mock_trade_child]
     mock_interactive_brokers.trades.return_value = [mock_trade_child]
     mock_interactive_brokers.positions.return_value = []
-
-    # Keine Fills in TWS vorhanden -> testet auch den Fallback
     mock_interactive_brokers.fills.return_value = []
 
     mock_notifier = MagicMock()
@@ -252,7 +244,6 @@ async def test_recovery_recovers_filled_entry_with_active_child(
     mock_queue = asyncio.Queue()
     mock_trigger_settlement = AsyncMock()
 
-    # 3. run_recovery ausführen
     await run_recovery(
         database_connection=db,
         interactive_brokers_session=mock_interactive_brokers,
@@ -262,14 +253,11 @@ async def test_recovery_recovers_filled_entry_with_active_child(
         config=mock_config,
     )
 
-    # 4. Assertions:
-    # Parent-Order (177) muss auf 'Filled' aktualisiert worden sein
     async with db.execute("SELECT status FROM orders WHERE order_id = 177") as cursor:
         row = await cursor.fetchone()
         assert row is not None
         assert row["status"] == "Filled"
 
-    # Eine Fallback-Ausführung für die Parent-Order muss angelegt worden sein
     async with db.execute("SELECT * FROM executions WHERE order_id = 177") as cursor:
         row = await cursor.fetchone()
         assert row is not None
@@ -277,7 +265,6 @@ async def test_recovery_recovers_filled_entry_with_active_child(
         assert abs(row["price"] - 115.17) < 0.001
         assert row["qty"] == 21.0
 
-    # Assert Telegram Notifier was called for filled trade
     mock_notifier.send_order_filled.assert_called_once_with(
         symbol="BG",
         bracket_role="ENTRY",
@@ -297,7 +284,6 @@ async def test_recovery_ignores_negative_order_ids(db, mock_config: Config) -> N
     Prüft, dass run_recovery Orders mit negativer ID (temporäre lokale ID)
     ignoriert/nicht mit TWS abgleicht und sie stattdessen neu einreiht.
     """
-    # 1. Test-Order mit negativer ID in die echte In-Memory-Datenbank einfügen
     await db.execute(
         """
         INSERT INTO orders (
@@ -326,7 +312,6 @@ async def test_recovery_ignores_negative_order_ids(db, mock_config: Config) -> N
     )
     await db.commit()
 
-    # 2. IB/TWS Mocking: Ein gefälschter aktiver Trade mit ID -1
     mock_trade = MagicMock()
     mock_trade.order.orderId = -1
     mock_trade.order.permId = 0
@@ -343,7 +328,6 @@ async def test_recovery_ignores_negative_order_ids(db, mock_config: Config) -> N
     mock_queue = asyncio.Queue()
     mock_trigger_settlement = AsyncMock()
 
-    # 3. run_recovery ausführen
     await run_recovery(
         database_connection=db,
         interactive_brokers_session=mock_interactive_brokers,
@@ -353,8 +337,6 @@ async def test_recovery_ignores_negative_order_ids(db, mock_config: Config) -> N
         config=mock_config,
     )
 
-    # 4. Assertions:
-    # Die Order mit ID -1 darf NICHT geändert worden sein (Status bleibt 'Created', perm_id bleibt 0)
     async with db.execute(
         "SELECT status, perm_id FROM orders WHERE order_id = -1"
     ) as cursor:
@@ -363,7 +345,6 @@ async def test_recovery_ignores_negative_order_ids(db, mock_config: Config) -> N
         assert row["status"] == "Created"
         assert row["perm_id"] == 0
 
-    # Aber die Trade-Gruppe muss in der Queue eingereiht worden sein
     assert mock_queue.qsize() == 1
     assert await mock_queue.get() == "918_TurnoverTiming_0.5_MU"
 
@@ -371,10 +352,9 @@ async def test_recovery_ignores_negative_order_ids(db, mock_config: Config) -> N
 @pytest.mark.asyncio
 async def test_recovery_recovers_filled_order_downtime(db, mock_config: Config) -> None:
     """
-    Prüft, dass eine Submitted Order, die während der Downtime in TWS gefüllt wurde (Szenario 2),
+    Prüft, dass eine Submitted Order, die während der Downtime in TWS gefüllt wurde,
     korrekt auf 'Filled' gesetzt wird, eine Benachrichtigung sendet und das Settlement triggert.
     """
-    # 1. Test-Order im Status 'Submitted' in die echte In-Memory-Datenbank einfügen
     await db.execute(
         """
         INSERT INTO orders (
@@ -403,8 +383,6 @@ async def test_recovery_recovers_filled_order_downtime(db, mock_config: Config) 
     )
     await db.commit()
 
-    # 2. IB/TWS Mocking:
-    # Die Order ist in completed trades (nicht in openTrades) mit Status "Filled"
     mock_trade = MagicMock()
     mock_trade.order.orderId = 180
     mock_trade.order.permId = 48380420
@@ -422,7 +400,6 @@ async def test_recovery_recovers_filled_order_downtime(db, mock_config: Config) 
     mock_queue = asyncio.Queue()
     mock_trigger_settlement = AsyncMock()
 
-    # 3. run_recovery ausführen
     await run_recovery(
         database_connection=db,
         interactive_brokers_session=mock_interactive_brokers,
@@ -432,14 +409,11 @@ async def test_recovery_recovers_filled_order_downtime(db, mock_config: Config) 
         config=mock_config,
     )
 
-    # 4. Assertions:
-    # Status muss auf 'Filled' sein
     async with db.execute("SELECT status FROM orders WHERE order_id = 180") as cursor:
         row = await cursor.fetchone()
         assert row is not None
         assert row["status"] == "Filled"
 
-    # Notifier muss gerufen worden sein
     mock_notifier.send_order_filled.assert_called_once_with(
         symbol="XYZ",
         bracket_role="ENTRY",
@@ -452,7 +426,6 @@ async def test_recovery_recovers_filled_order_downtime(db, mock_config: Config) 
         limit_price=Decimal("50.0"),
     )
 
-    # Settlement-Trigger muss asynchron aufgerufen worden sein (wir warten kurz, da mit create_task gestartet)
     await asyncio.sleep(0.1)
     mock_trigger_settlement.assert_called_once_with("895_DipBuyer_XYZ", "U19605236")
 
@@ -460,7 +433,6 @@ async def test_recovery_recovers_filled_order_downtime(db, mock_config: Config) 
 @pytest.mark.asyncio
 async def test_recovery_cancels_ghost_order(db, mock_config: Config) -> None:
     """Prüft, dass run_recovery Ghost Orders (Submitted in DB, nicht in TWS) storniert."""
-    # 1. Submitted Order in DB anlegen
     await db.execute(
         """
         INSERT INTO orders (
@@ -471,7 +443,6 @@ async def test_recovery_cancels_ghost_order(db, mock_config: Config) -> None:
     )
     await db.commit()
 
-    # 2. TWS hat weder active noch completed trades für ID 999
     mock_interactive_brokers = MagicMock()
     mock_interactive_brokers.reqOpenOrdersAsync = AsyncMock()
     mock_interactive_brokers.reqCompletedOrdersAsync = AsyncMock()
@@ -483,7 +454,6 @@ async def test_recovery_cancels_ghost_order(db, mock_config: Config) -> None:
     mock_notifier = MagicMock()
     mock_notifier.send_message = AsyncMock(return_value=True)
 
-    # 3. Recovery durchführen
     await run_recovery(
         database_connection=db,
         interactive_brokers_session=mock_interactive_brokers,
@@ -493,7 +463,6 @@ async def test_recovery_cancels_ghost_order(db, mock_config: Config) -> None:
         config=mock_config,
     )
 
-    # 4. Order muss in DB storniert sein und Notifier benachrichtigt
     async with db.execute("SELECT status FROM orders WHERE order_id = 999") as cursor:
         row = await cursor.fetchone()
         assert row is not None
@@ -501,3 +470,100 @@ async def test_recovery_cancels_ghost_order(db, mock_config: Config) -> None:
 
     mock_notifier.send_message.assert_called_once()
     assert "GHOST ORDER RECOVERED" in mock_notifier.send_message.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_broker_positions_recovers_unassigned_position(db) -> None:
+    """
+    Prüft, dass reconcile_broker_positions bei einer Diskrepanz zwischen Broker
+    und DB synthetische ENTRY-Orders (strategy_name=None) und Executions anlegt.
+    """
+    mock_position = MagicMock()
+    mock_position.account = "U19605236"
+    mock_position.contract.symbol = "AKAM"
+    mock_position.contract.currency = "USD"
+    mock_position.position = 15.0
+    mock_position.avgCost = 133.48
+
+    mock_ib = MagicMock()
+    mock_ib.positions.return_value = [mock_position]
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_unassigned_position_recovered = AsyncMock()
+
+    await reconcile_broker_positions(db, mock_ib, mock_notifier)
+
+    async with db.execute(
+        "SELECT order_id, trade_group_id, symbol, action, quantity, bracket_role, status, strategy_name FROM orders WHERE symbol = 'AKAM'"
+    ) as cursor:
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row["order_id"] < 0
+        assert row["trade_group_id"] == "UNASSIGNED_AKAM_U19605236"
+        assert row["action"] == "BUY"
+        assert row["quantity"] == 15
+        assert row["bracket_role"] == "ENTRY"
+        assert row["status"] == "Filled"
+        assert row["strategy_name"] is None
+
+    async with db.execute(
+        "SELECT exec_id, order_id, price, qty, currency FROM executions WHERE order_id = ?",
+        (row["order_id"],),
+    ) as cursor:
+        exec_row = await cursor.fetchone()
+        assert exec_row is not None
+        assert exec_row["exec_id"] == f"RECOVERED_POS_AKAM_{abs(row['order_id'])}"
+        assert Decimal(str(exec_row["price"])) == Decimal("133.48")
+        assert Decimal(str(exec_row["qty"])) == Decimal("15.0")
+        assert exec_row["currency"] == "USD"
+
+    mock_notifier.send_unassigned_position_recovered.assert_called_once_with(
+        symbol="AKAM",
+        quantity=Decimal("15"),
+        avg_cost=Decimal("133.48"),
+        account_id="U19605236",
+    )
+
+
+@pytest.mark.asyncio
+async def test_reconcile_broker_positions_skips_when_synced(db) -> None:
+    """
+    Prüft, dass reconcile_broker_positions keine neuen Orders/Executions anlegt,
+    wenn die DB-Stückzahl bereits exakt mit dem Broker übereinstimmt.
+    """
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, status)
+        VALUES (100, 'TG_ALAB', 'U19605236', 'ENTRY', 'ALAB', 'STK', 'SMART', 'BUY', 10, 'MKT', 'Filled')
+        """
+    )
+    await db.execute(
+        """
+        INSERT INTO executions (exec_id, order_id, price, qty, commission, currency, executed_at)
+        VALUES ('EXEC_ALAB_1', 100, '400.00', '10.0', '0.0', 'USD', '2026-08-01')
+        """
+    )
+    await db.commit()
+
+    mock_position = MagicMock()
+    mock_position.account = "U19605236"
+    mock_position.contract.symbol = "ALAB"
+    mock_position.contract.currency = "USD"
+    mock_position.position = 10.0
+    mock_position.avgCost = 400.00
+
+    mock_ib = MagicMock()
+    mock_ib.positions.return_value = [mock_position]
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_unassigned_position_recovered = AsyncMock()
+
+    await reconcile_broker_positions(db, mock_ib, mock_notifier)
+
+    async with db.execute(
+        "SELECT COUNT(*) as count FROM orders WHERE symbol = 'ALAB'"
+    ) as cursor:
+        row = await cursor.fetchone()
+        assert row["count"] == 1
+
+    mock_notifier.send_unassigned_position_recovered.assert_not_called()

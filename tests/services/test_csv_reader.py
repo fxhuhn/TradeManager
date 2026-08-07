@@ -1,4 +1,4 @@
-# filename: test_csv_reader.py
+# filename: tests/services/test_csv_reader.py
 from decimal import Decimal
 from pathlib import Path
 
@@ -65,6 +65,82 @@ def test_validate_group_success_with_bracket_pair(base_leg: LegRow) -> None:
 
     # Assert
     assert is_valid is True
+    assert error_message == ""
+
+
+@pytest.mark.asyncio
+async def test_csv_validation_futures_rejected() -> None:
+    """FUT wird abgelehnt: Prüft, dass sec_type='FUT' korrekterweise abgewiesen wird."""
+    invalid_legs = [
+        LegRow(
+            trade_group_id="20260530_Invalid",
+            bracket_role="ENTRY",
+            symbol="ES",
+            sec_type="FUT",  # Ungültig
+            exchange="SMART",
+            account_id="DU12345",
+            action="BUY",
+            quantity=1,
+            order_type="LMT",
+            target_price=Decimal("5100.0"),
+            tif="GTC",
+            strategy_name="FuturesStrategy",
+        )
+    ]
+    is_valid, error_message = validate_group("20260530_Invalid", invalid_legs)
+    assert not is_valid
+    assert "sec_type='STK' ist erlaubt" in error_message
+
+
+@pytest.mark.asyncio
+async def test_csv_validation_valid_bracket() -> None:
+    """Validiert ein korrektes Bracket-Setup."""
+    valid_legs = [
+        LegRow(
+            trade_group_id="20260530_Valid",
+            bracket_role="ENTRY",
+            symbol="AAPL",
+            sec_type="STK",
+            exchange="SMART",
+            account_id="DU12345",
+            action="BUY",
+            quantity=100,
+            order_type="LMT",
+            target_price=Decimal("180.00"),
+            tif="GTC",
+            strategy_name="ValidBracket",
+        ),
+        LegRow(
+            trade_group_id="20260530_Valid",
+            bracket_role="SL",
+            symbol="AAPL",
+            sec_type="STK",
+            exchange="SMART",
+            account_id="DU12345",
+            action="SELL",
+            quantity=100,
+            order_type="STP",
+            target_price=Decimal("175.00"),
+            tif="GTC",
+            strategy_name="ValidBracket",
+        ),
+        LegRow(
+            trade_group_id="20260530_Valid",
+            bracket_role="TP",
+            symbol="AAPL",
+            sec_type="STK",
+            exchange="SMART",
+            account_id="DU12345",
+            action="SELL",
+            quantity=100,
+            order_type="LMT",
+            target_price=Decimal("190.00"),
+            tif="GTC",
+            strategy_name="ValidBracket",
+        ),
+    ]
+    is_valid, error_message = validate_group("20260530_Valid", valid_legs)
+    assert is_valid
     assert error_message == ""
 
 

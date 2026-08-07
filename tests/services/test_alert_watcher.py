@@ -1,6 +1,6 @@
-# filename: test_alert_watcher.py
+# filename: tests/services/test_alert_watcher.py
 import asyncio
-from datetime import datetime
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
 
@@ -74,18 +74,19 @@ async def temp_db():
         """
         CREATE TABLE orders (
             order_id INTEGER PRIMARY KEY,
+            parent_id INTEGER,
             trade_group_id TEXT,
-            symbol TEXT,
-            order_type TEXT,
-            status TEXT,
-            transmitted_at TEXT,
-            bracket_role TEXT,
             account_id TEXT,
+            bracket_role TEXT,
+            symbol TEXT,
+            sec_type TEXT,
+            exchange TEXT,
             action TEXT,
             quantity INTEGER,
+            order_type TEXT,
             target_price REAL,
-            sec_type TEXT,
-            exchange TEXT
+            status TEXT,
+            transmitted_at TEXT
         )
         """
     )
@@ -238,6 +239,95 @@ async def test_check_dead_orders_triggers_alert_when_threshold_exceeded(
         "⚠️ <b>DEAD ORDER</b> | <code>AAPL</code>"
     )
     assert state.is_order_reported(1)
+
+
+@pytest.mark.asyncio
+async def test_alert_watcher_dead_orders_integration(
+    temp_db: aiosqlite.Connection,
+) -> None:
+    """Alert: Dead Order Check meldet hängende offene Orders."""
+    state = AlertState()
+    mock_notifier = MagicMock()
+    mock_notifier.send_message = AsyncMock(return_value=True)
+
+    # Hängende Order eintragen (transmitted_at liegt in der Vergangenheit)
+    await temp_db.execute(
+        """
+        INSERT INTO orders (
+            order_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, status, transmitted_at
+        ) VALUES (1, NULL, 'G1', 'A1', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 100, 'MKT', 180.0, 'Submitted', '2026-05-30 10:00:00')
+        """
+    )
+    await temp_db.commit()
+
+    # 2026-06-04 14:00:00 UTC corresponds to Thursday, 10:00:00 AM NY time (active trading hours)
+    test_time = datetime(2026, 6, 4, 14, 0, 0, tzinfo=UTC)
+    await check_dead_orders(
+        temp_db, mock_notifier, state, threshold_minutes=15, current_time=test_time
+    )
+
+    # Verifizieren, dass der Alarm gesendet wurde
+    mock_notifier.send_message.assert_called_once()
+    assert state.is_order_reported(1)
+
+
+@pytest.mark.asyncio
+async def test_alert_watcher_moc_dead_orders_integration(
+    temp_db: aiosqlite.Connection,
+) -> None:
+    """Alert: MOC-Orders werden tagsüber ignoriert und erst nach 16:00 Uhr gemeldet."""
+    # MOC Order eintragen (transmitted_at liegt weit in der Vergangenheit)
+    await temp_db.execute(
+        """
+        INSERT INTO orders (
+            order_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, status, transmitted_at
+        ) VALUES (2, NULL, 'G2', 'A1', 'EXIT', 'SNDK', 'STK', 'SMART', 'SELL', 100, 'MOC', 0.0, 'Submitted', '2026-06-04 08:00:00')
+        """
+    )
+    await temp_db.commit()
+
+    # 1. Test zur Mittagszeit (12:00 Uhr NY-Zeit = 16:00 Uhr UTC)
+    # Zu diesem Zeitpunkt darf kein Alarm gesendet werden.
+    state = AlertState()
+    mock_notifier = MagicMock()
+    mock_notifier.send_message = AsyncMock(return_value=True)
+
+    lunch_time = datetime(2026, 6, 4, 16, 0, 0, tzinfo=UTC)
+    await check_dead_orders(
+        temp_db, mock_notifier, state, threshold_minutes=15, current_time=lunch_time
+    )
+    mock_notifier.send_message.assert_not_called()
+    assert not state.is_order_reported(2)
+
+    # 2. Test nach Börsenschluss vor Ablauf der Frist (16:05 Uhr NY-Zeit = 20:05 Uhr UTC)
+    # Zu diesem Zeitpunkt darf ebenfalls kein Alarm gesendet werden.
+    mock_notifier.reset_mock()
+    close_time_soon = datetime(2026, 6, 4, 20, 5, 0, tzinfo=UTC)
+    await check_dead_orders(
+        temp_db,
+        mock_notifier,
+        state,
+        threshold_minutes=15,
+        current_time=close_time_soon,
+    )
+    mock_notifier.send_message.assert_not_called()
+    assert not state.is_order_reported(2)
+
+    # 3. Test nach Börsenschluss nach Ablauf der Frist (16:16 Uhr NY-Zeit = 20:16 Uhr UTC)
+    # Zu diesem Zeitpunkt muss der Alarm gesendet werden.
+    mock_notifier.reset_mock()
+    close_time_late = datetime(2026, 6, 4, 20, 16, 0, tzinfo=UTC)
+    await check_dead_orders(
+        temp_db,
+        mock_notifier,
+        state,
+        threshold_minutes=15,
+        current_time=close_time_late,
+    )
+    mock_notifier.send_message.assert_called_once()
+    assert state.is_order_reported(2)
 
 
 @pytest.mark.asyncio
