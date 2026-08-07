@@ -5,7 +5,6 @@ FROM python:3.12-slim-bookworm
 
 # Systemabhängigkeiten installieren und Sicherheitsupdates anwenden
 RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
-    build-essential \
     tzdata \
     && rm -rf /var/lib/apt/lists/*
 
