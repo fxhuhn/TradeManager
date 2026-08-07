@@ -72,7 +72,6 @@ jobs:
           ignore-unfixed: true
           scanners: 'vuln'
           severity: 'CRITICAL,HIGH'
-          trivyopts: '--skip-version-check'
 
       - name: Upload Trivy scan results to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v4
