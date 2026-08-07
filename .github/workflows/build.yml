@@ -13,6 +13,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      security-events: write
 
     steps:
       - name: Checkout repository
@@ -40,12 +41,18 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha
 
-      - name: Build Docker image for scanning
+      - name: Set local image tag
+        run: echo "IMAGE_TAG=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]'):test" >> $GITHUB_ENV
+
+      - name: Build Docker image
         uses: docker/build-push-action@v7
         with:
           context: .
           load: true
-          tags: croc-trader:test
+          tags: |
+            ${{ steps.meta.outputs.tags }}
+            ${{ env.IMAGE_TAG }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -53,20 +60,22 @@ jobs:
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           version: 'v0.72.0'
-          image-ref: 'croc-trader:test'
-          format: 'table'
+          image-ref: ${{ env.IMAGE_TAG }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
           exit-code: '1'
           ignore-unfixed: true
           vuln-type: 'os,library'
           severity: 'CRITICAL,HIGH'
 
-      - name: Build and push
-        if: github.event_name != 'pull_request'
-        uses: docker/build-push-action@v7
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
         with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Push Docker image
+        if: github.event_name != 'pull_request'
+        run: |
+          docker push --all-tags ghcr.io/${{ github.repository }}
 

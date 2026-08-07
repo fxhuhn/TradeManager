@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  security-events: write
 
 jobs:
   trufflehog:
@@ -19,11 +20,14 @@ jobs:
           fetch-depth: 0
 
       - name: Run TruffleHog Scan
-        uses: trufflesecurity/trufflehog-actions-verify@main
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/workdir" trufflesecurity/trufflehog:latest git file:///workdir --head=${{ github.sha }} --sarif > trufflehog-results.sarif
+
+      - name: Upload TruffleHog SARIF report to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
         with:
-          base: ""
-          head: ${{ github.sha }}
-          extra_args: --debug
+          sarif_file: 'trufflehog-results.sarif'
 
   trivy-repo:
     name: Trivy Repository Scan
@@ -37,5 +41,13 @@ jobs:
         with:
           scan-type: 'fs'
           ignore-unfixed: true
-          format: 'table'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          exit-code: '1'
           severity: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'

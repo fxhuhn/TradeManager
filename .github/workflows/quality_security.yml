@@ -11,6 +11,7 @@ on:
 permissions:
   contents: read
   security-events: write
+  pull-requests: write
 
 jobs:
   # Job 1: Ruff Linting & Formatting (schnell)
@@ -55,24 +56,31 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install "bandit[toml]==1.8.0"
+          pip install "bandit[toml]==1.8.0" bandit-sarif-formatter
 
       - name: Run Bandit
         run: |
-          bandit -r . -x ".venv,*/test/*,*/tests/*" -f json -o bandit-report.json  || true
-          bandit -r . -x ".venv,*/test/*,*/tests/*" -f screen
-      - name: Upload Bandit results
+          bandit -ll -r . -x ".venv,*/test/*,*/tests/*" -f sarif -o bandit-results.sarif || true
+          bandit -ll -r . -x ".venv,*/test/*,*/tests/*" -f screen || true
+
+      - name: Upload Bandit SARIF report to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: bandit-results.sarif
+
+      - name: Upload Bandit results artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: bandit-results
-          path: bandit-report.json
+          path: bandit-results.sarif
 
   # Job 3: CodeQL Advanced Security (parallel, dauert länger)
   codeql:
     name: CodeQL Analysis
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
@@ -112,6 +120,14 @@ jobs:
           inputs: requirements.txt
           version: 2.7.3
           summary: true
+          format: sarif
+          output: pip-audit-results.sarif
+
+      - name: Upload pip-audit SARIF report to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: pip-audit-results.sarif
 
   vulture:
     name: Vulture Dead Code Analysis
