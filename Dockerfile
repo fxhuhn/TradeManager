@@ -12,7 +12,8 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
- && pip install --no-cache-dir -r requirements.txt
+ && pip install --no-cache-dir -r requirements.txt \
+ && pip uninstall -y pip setuptools wheel
 
 # ── Stage 2: Runtime ──
 FROM python:3.12-slim-bookworm
@@ -23,7 +24,11 @@ RUN apt-get update && apt-get dist-upgrade -y \
     && apt-get purge -y --auto-remove \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
-              /usr/local/lib/python3.12/site-packages/{pip,pip-*,setuptools,setuptools-*,wheel,wheel-*,pkg_resources}
+    && rm -rf /usr/local/lib/python3.12/site-packages/pip* \
+              /usr/local/lib/python3.12/site-packages/setuptools* \
+              /usr/local/lib/python3.12/site-packages/wheel* \
+              /usr/local/lib/python3.12/site-packages/pkg_resources \
+              /usr/local/bin/pip*
 
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH" \
