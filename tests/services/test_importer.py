@@ -1043,6 +1043,51 @@ async def test_upsert_trade_group_legs_updates_existing_created_orders(db) -> No
 
 
 @pytest.mark.asyncio
+async def test_upsert_trade_group_legs_updates_existing_cancelled_entry_orders(
+    db,
+) -> None:
+    """Verifies that _upsert_trade_group_legs updates existing Cancelled ENTRY orders back to Created status in DB."""
+    from app.services.csv_reader import LegRow
+    from app.services.importer import _upsert_trade_group_legs
+
+    # Insert existing ENTRY order with status 'Cancelled'
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, parent_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name, status, retry_count)
+        VALUES (1052, NULL, 'cancelled_group', 'U12345', 'ENTRY', 'GOOGL', 'STK', 'SMART', 'BUY', 17, 'LMT', '341.11', 'DAY', 'DipBuyer', 'Cancelled', 2)
+        """
+    )
+    await db.commit()
+
+    entry_leg = LegRow(
+        "cancelled_group",
+        "ENTRY",
+        "GOOGL",
+        "STK",
+        "SMART",
+        "U12345",
+        "BUY",
+        17,
+        "LMT",
+        Decimal("341.11"),
+        "DAY",
+        "DipBuyer",
+    )
+
+    mock_notifier = MagicMock()
+    await _upsert_trade_group_legs(
+        db, "cancelled_group", "U12345", entry_leg, [entry_leg], 17, mock_notifier
+    )
+
+    async with db.execute(
+        "SELECT status, retry_count FROM orders WHERE order_id = 1052"
+    ) as cursor:
+        row = await cursor.fetchone()
+        assert row["status"] == "Created"
+        assert row["retry_count"] == 0
+
+
+@pytest.mark.asyncio
 async def test_upsert_trade_group_legs_standalone_exit_error_handling(db) -> None:
     """Verifies that non-standalone-exit errors are re-raised by _upsert_trade_group_legs."""
     from app.services.csv_reader import LegRow

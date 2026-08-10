@@ -568,7 +568,7 @@ async def _upsert_trade_group_legs(
             if row:
                 entry_order_id = row["order_id"]
                 existing_status = row["status"]
-                if existing_status in ("Created", "Error"):
+                if existing_status in ("Created", "Error", "Cancelled"):
                     if entry_leg:
                         await db.execute(
                             """
