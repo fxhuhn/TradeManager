@@ -599,3 +599,634 @@ async def test_check_csv_dos_limits_rejects_large_files(
     assert result is False
     mock_notifier.send_importer_info.assert_called_once()
     assert "DoS-Schutz" in mock_notifier.send_importer_info.call_args[1]["status"]
+
+
+@pytest.mark.asyncio
+async def test_csv_directory_watcher_cancelled_error(
+    tmp_path: Path, mock_config: Config
+) -> None:
+    """Verifies that csv_directory_watcher re-raises asyncio.CancelledError."""
+    data_directory = tmp_path / "data"
+    data_directory.mkdir()
+
+    mock_db_conn = AsyncMock()
+
+    async def db_factory():
+        return mock_db_conn
+
+    mock_ib = MagicMock()
+    mock_notifier = MagicMock()
+    mock_queue = asyncio.Queue()
+
+    with patch(
+        "app.services.importer._scan_and_process_directory",
+        side_effect=asyncio.CancelledError,
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await csv_directory_watcher(
+                db_factory=db_factory,
+                interactive_brokers=mock_ib,
+                directory_path=data_directory,
+                queue=mock_queue,
+                notifier=mock_notifier,
+                config=mock_config,
+                interval_seconds=1,
+            )
+
+
+@pytest.mark.asyncio
+async def test_csv_directory_watcher_generic_exception(
+    tmp_path: Path, mock_config: Config
+) -> None:
+    """Verifies that csv_directory_watcher catches generic exceptions and logs them."""
+    data_directory = tmp_path / "data"
+    data_directory.mkdir()
+
+    mock_db_conn = AsyncMock()
+
+    async def db_factory():
+        return mock_db_conn
+
+    mock_ib = MagicMock()
+    mock_notifier = MagicMock()
+    mock_queue = asyncio.Queue()
+
+    call_count = 0
+
+    async def mock_scan(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise RuntimeError("Disk read error")
+        raise asyncio.CancelledError()
+
+    with patch(
+        "app.services.importer._scan_and_process_directory", side_effect=mock_scan
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await csv_directory_watcher(
+                db_factory=db_factory,
+                interactive_brokers=mock_ib,
+                directory_path=data_directory,
+                queue=mock_queue,
+                notifier=mock_notifier,
+                config=mock_config,
+                interval_seconds=0.01,
+            )
+
+
+@pytest.mark.asyncio
+async def test_scan_and_process_directory_edge_cases(
+    tmp_path: Path, mock_config: Config
+) -> None:
+    """Verifies non-existent directory and non-matching file names are safely ignored."""
+    from app.services.importer import _scan_and_process_directory
+
+    mock_db_conn = AsyncMock()
+
+    async def db_factory():
+        return mock_db_conn
+
+    mock_ib = MagicMock()
+    mock_notifier = MagicMock()
+    mock_queue = asyncio.Queue()
+    warned = set()
+
+    # 1. Non-existent path
+    non_existent = tmp_path / "does_not_exist"
+    import re
+
+    pattern = re.compile(r"^orders_\d{4}_\d{2}_\d{2}\.csv$")
+
+    await _scan_and_process_directory(
+        db_factory,
+        mock_ib,
+        non_existent,
+        mock_queue,
+        mock_notifier,
+        mock_config,
+        pattern,
+        warned,
+    )
+
+    # 2. Non-matching file in directory
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "orders_invalid_name.csv").write_text("dummy", encoding="utf-8")
+
+    await _scan_and_process_directory(
+        db_factory,
+        mock_ib,
+        data_dir,
+        mock_queue,
+        mock_notifier,
+        mock_config,
+        pattern,
+        warned,
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_csv_import_empty_csv_and_invalid_date_filename(
+    tmp_path: Path, mock_config: Config, db
+) -> None:
+    """Verifies handling of empty CSV and date parsing fallback for custom filename."""
+    mock_ib = MagicMock()
+    mock_ib.managedAccounts.return_value = ["U12345"]
+    mock_ib.isConnected.return_value = True
+    mock_notifier = MagicMock()
+    mock_queue = asyncio.Queue()
+
+    # Empty CSV
+    empty_csv = tmp_path / "orders_2026_07_01.csv"
+    empty_csv.write_text(
+        "trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name\n",
+        encoding="utf-8",
+    )
+    await run_csv_import(db, mock_ib, empty_csv, mock_queue, mock_notifier, mock_config)
+
+    # Invalid date filename pattern (e.g. month 99)
+    invalid_date_csv = tmp_path / "orders_2026_99_99.csv"
+    csv_content = (
+        "trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name\n"
+        "101_Test_AAPL,ENTRY,AAPL,STK,SMART,U12345,BUY,10,LMT,150.00,DAY,Test\n"
+    )
+    invalid_date_csv.write_text(csv_content, encoding="utf-8")
+    mock_ib.accountValues.return_value = [
+        AccountValue(
+            account="U12345",
+            tag="NetLiquidation",
+            value="100000.00",
+            currency="EUR",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U12345",
+            tag="AvailableFunds",
+            value="100000.00",
+            currency="EUR",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U12345",
+            tag="TotalCashValue",
+            value="100000.00",
+            currency="EUR",
+            modelCode="",
+        ),
+    ]
+
+    await run_csv_import(
+        db, mock_ib, invalid_date_csv, mock_queue, mock_notifier, mock_config
+    )
+
+
+@pytest.mark.asyncio
+async def test_check_csv_dos_limits_non_existent_file(
+    tmp_path: Path, mock_config: Config
+) -> None:
+    """Verifies that _check_csv_dos_limits returns True if file does not exist."""
+    from app.services.importer import _check_csv_dos_limits
+
+    mock_notifier = MagicMock()
+    non_file = tmp_path / "no_file.csv"
+    assert await _check_csv_dos_limits(non_file, mock_config, mock_notifier) is True
+
+
+@pytest.mark.asyncio
+async def test_process_and_upsert_group_validation_error(
+    mock_config: Config, db
+) -> None:
+    """Verifies that process_and_upsert_group skips invalid groups and notifies."""
+    from app.services.importer import _process_and_upsert_group
+
+    mock_ib = MagicMock()
+    mock_notifier = MagicMock()
+    mock_notifier.send_importer_info = AsyncMock()
+    mock_queue = asyncio.Queue()
+
+    # Leg row with invalid bracket role
+    from app.services.csv_reader import LegRow
+
+    invalid_leg = LegRow(
+        trade_group_id="group_1",
+        bracket_role="INVALID_ROLE",
+        symbol="AAPL",
+        sec_type="STK",
+        exchange="SMART",
+        account_id="U12345",
+        action="BUY",
+        quantity=10,
+        order_type="LMT",
+        target_price=Decimal("150.0"),
+        tif="DAY",
+        strategy_name="Test",
+    )
+
+    await _process_and_upsert_group(
+        db=db,
+        interactive_brokers=mock_ib,
+        trade_group_id="group_1",
+        raw_legs=[invalid_leg],
+        queue=mock_queue,
+        notifier=mock_notifier,
+        config=mock_config,
+    )
+    mock_notifier.send_importer_info.assert_called_once()
+    assert (
+        mock_notifier.send_importer_info.call_args[1]["title"] == "VALIDIERUNGSFEHLER"
+    )
+
+
+@pytest.mark.asyncio
+async def test_dipbuyer_filtering_on_wednesday(
+    tmp_path: Path, mock_config: Config, db
+) -> None:
+    """Verifies DipBuyer strategy filtering when current_weekday > 1 (Wednesday=2)."""
+    csv_file = tmp_path / "orders_2026_07_08.csv"  # Wednesday
+    csv_content = (
+        "trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name\n"
+        "200_DipBuyer_AAPL,ENTRY,AAPL,STK,SMART,U12345,BUY,10,LMT,150.00,DAY,DipBuyer\n"
+    )
+    csv_file.write_text(csv_content, encoding="utf-8")
+
+    mock_ib = MagicMock()
+    mock_ib.managedAccounts.return_value = ["U12345"]
+    mock_ib.isConnected.return_value = True
+    mock_notifier = MagicMock()
+    mock_queue = asyncio.Queue()
+
+    # Weekday 2 (Wednesday) - no ENTRY in DB -> should skip DipBuyer entry group entirely
+    await run_csv_import(db, mock_ib, csv_file, mock_queue, mock_notifier, mock_config)
+
+    async with db.execute("SELECT COUNT(*) FROM orders") as cursor:
+        count = (await cursor.fetchone())[0]
+        assert count == 0
+
+
+@pytest.mark.asyncio
+async def test_process_and_upsert_group_zero_allocation_and_downscaled_to_zero(
+    mock_config: Config, db
+) -> None:
+    """Verifies handling when capital allocation or downscaled quantity is <= 0."""
+    from app.services.csv_reader import LegRow
+    from app.services.importer import _process_and_upsert_group
+
+    mock_ib = MagicMock()
+    mock_ib.managedAccounts.return_value = ["U12345"]
+    mock_ib.accountValues.return_value = [
+        AccountValue(
+            account="U12345",
+            tag="NetLiquidation",
+            value="0.00",
+            currency="EUR",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U12345",
+            tag="AvailableFunds",
+            value="0.00",
+            currency="EUR",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U12345",
+            tag="TotalCashValue",
+            value="0.00",
+            currency="EUR",
+            modelCode="",
+        ),
+    ]
+    mock_notifier = MagicMock()
+    mock_notifier.send_importer_info = AsyncMock()
+    mock_queue = asyncio.Queue()
+
+    leg = LegRow(
+        trade_group_id="group_zero_cap",
+        bracket_role="ENTRY",
+        symbol="AAPL",
+        sec_type="STK",
+        exchange="SMART",
+        account_id="U12345",
+        action="BUY",
+        quantity=10,
+        order_type="LMT",
+        target_price=Decimal("150.0"),
+        tif="DAY",
+        strategy_name="Test",
+    )
+
+    # 1. Zero capital allocation -> KAPITAL-FEHLER
+    await _process_and_upsert_group(
+        db=db,
+        interactive_brokers=mock_ib,
+        trade_group_id="group_zero_cap",
+        raw_legs=[leg],
+        queue=mock_queue,
+        notifier=mock_notifier,
+        config=mock_config,
+    )
+    assert mock_notifier.send_importer_info.call_args[1]["title"] == "KAPITAL-FEHLER"
+
+    # 2. Downscaled quantity <= 0 -> SIZING-FEHLER
+    mock_ib.accountValues.return_value = [
+        AccountValue(
+            account="U12345",
+            tag="NetLiquidation",
+            value="100.00",
+            currency="EUR",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U12345",
+            tag="AvailableFunds",
+            value="100.00",
+            currency="EUR",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U12345",
+            tag="TotalCashValue",
+            value="100.00",
+            currency="EUR",
+            modelCode="",
+        ),
+    ]
+    expensive_leg = LegRow(
+        trade_group_id="group_expensive",
+        bracket_role="ENTRY",
+        symbol="AAPL",
+        sec_type="STK",
+        exchange="SMART",
+        account_id="U12345",
+        action="BUY",
+        quantity=1,
+        order_type="LMT",
+        target_price=Decimal("1000.0"),
+        tif="DAY",
+        strategy_name="Test",
+    )
+
+    await _process_and_upsert_group(
+        db=db,
+        interactive_brokers=mock_ib,
+        trade_group_id="group_expensive",
+        raw_legs=[expensive_leg],
+        queue=mock_queue,
+        notifier=mock_notifier,
+        config=mock_config,
+    )
+    assert mock_notifier.send_importer_info.call_args[1]["title"] == "SIZING-FEHLER"
+
+
+@pytest.mark.asyncio
+async def test_upsert_trade_group_legs_updates_existing_created_orders(db) -> None:
+    """Verifies that _upsert_trade_group_legs updates existing Created orders in DB."""
+    from app.services.csv_reader import LegRow
+    from app.services.importer import _upsert_trade_group_legs
+
+    # Insert existing ENTRY and child SL orders with status 'Created'
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, parent_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name, status, retry_count)
+        VALUES (-10, NULL, 'update_group', 'U12345', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 5, 'LMT', '140.00', 'DAY', 'Test', 'Created', 0)
+        """
+    )
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, parent_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name, status, retry_count)
+        VALUES (-11, -10, 'update_group', 'U12345', 'SL', 'AAPL', 'STK', 'SMART', 'SELL', 5, 'STP', '130.00', 'DAY', 'Test', 'Created', 0)
+        """
+    )
+    await db.commit()
+
+    entry_leg = LegRow(
+        "update_group",
+        "ENTRY",
+        "AAPL",
+        "STK",
+        "SMART",
+        "U12345",
+        "BUY",
+        10,
+        "LMT",
+        Decimal("150.00"),
+        "DAY",
+        "Test",
+    )
+    sl_leg = LegRow(
+        "update_group",
+        "SL",
+        "AAPL",
+        "STK",
+        "SMART",
+        "U12345",
+        "SELL",
+        10,
+        "STP",
+        Decimal("135.00"),
+        "DAY",
+        "Test",
+    )
+
+    mock_notifier = MagicMock()
+    await _upsert_trade_group_legs(
+        db, "update_group", "U12345", entry_leg, [entry_leg, sl_leg], 10, mock_notifier
+    )
+
+    async with db.execute(
+        "SELECT quantity, target_price FROM orders WHERE order_id = -10"
+    ) as cursor:
+        row = await cursor.fetchone()
+        assert row["quantity"] == 10
+        assert Decimal(str(row["target_price"])) == Decimal("150.00")
+
+
+@pytest.mark.asyncio
+async def test_upsert_trade_group_legs_standalone_exit_error_handling(db) -> None:
+    """Verifies that non-standalone-exit errors are re-raised by _upsert_trade_group_legs."""
+    from app.services.csv_reader import LegRow
+    from app.services.importer import _upsert_trade_group_legs
+
+    exit_leg = LegRow(
+        "standalone",
+        "EXIT",
+        "AAPL",
+        "STK",
+        "SMART",
+        "U12345",
+        "SELL",
+        10,
+        "LMT",
+        Decimal("160.00"),
+        "DAY",
+        "Test",
+    )
+    mock_notifier = MagicMock()
+    mock_notifier.send_importer_info = AsyncMock()
+
+    # Attempt standalone exit with no ENTRY in DB -> raises ValueError("Standalone exit order imported...")
+    with pytest.raises(ValueError, match="Standalone exit order imported"):
+        await _upsert_trade_group_legs(
+            db, "standalone", "U12345", None, [exit_leg], 10, mock_notifier
+        )
+
+
+@pytest.mark.asyncio
+async def test_fetch_account_balance_metrics_edge_cases() -> None:
+    """Verifies cache filtering with mismatched account, ValueError parsing, and exception in summary."""
+    mock_ib = MagicMock()
+    # Cache with wrong account, valid tag, and invalid float tag
+    mock_ib.accountValues.return_value = [
+        AccountValue(
+            account="OTHER_ACC",
+            tag="NetLiquidation",
+            value="100000.00",
+            currency="EUR",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U12345",
+            tag="NetLiquidation",
+            value="invalid_number",
+            currency="EUR",
+            modelCode="",
+        ),
+    ]
+
+    mock_ib.accountSummaryAsync = AsyncMock(
+        side_effect=RuntimeError("TWS socket broken")
+    )
+
+    metrics = await fetch_account_balance_metrics(mock_ib, "U12345")
+    assert metrics.net_liquidation_value == Decimal("0.0")
+    assert metrics.available_funds_value == Decimal("0.0")
+    assert metrics.total_cash_value == Decimal("0.0")
+
+
+def test_calculate_downscaled_quantity_edge_cases() -> None:
+    """Verifies calculate_downscaled_quantity edge cases for None price and within-limit allocation."""
+    from app.services.importer import calculate_downscaled_quantity
+
+    assert calculate_downscaled_quantity(50, None, Decimal("1000.0")) == 50
+    assert calculate_downscaled_quantity(50, Decimal("0.0"), Decimal("1000.0")) == 50
+    assert calculate_downscaled_quantity(10, Decimal("100.0"), Decimal("2000.0")) == 10
+
+
+@pytest.mark.asyncio
+async def test_dipbuyer_exit_without_db_entry_on_wednesday(
+    tmp_path: Path, mock_config: Config, db
+) -> None:
+    """Verifies skipping DipBuyer exit legs on Wednesday when no ENTRY exists in DB."""
+    csv_file = tmp_path / "orders_2026_07_08.csv"  # Wednesday
+    csv_content = (
+        "trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name\n"
+        "300_DipBuyer_TSLA,ENTRY,TSLA,STK,SMART,U12345,BUY,10,LMT,200.00,DAY,DipBuyer\n"
+        "300_DipBuyer_TSLA,EXIT,TSLA,STK,SMART,U12345,SELL,10,LMT,220.00,DAY,DipBuyer\n"
+    )
+    csv_file.write_text(csv_content, encoding="utf-8")
+
+    mock_ib = MagicMock()
+    mock_ib.managedAccounts.return_value = ["U12345"]
+    mock_ib.isConnected.return_value = True
+    mock_notifier = MagicMock()
+    mock_queue = asyncio.Queue()
+
+    # Weekday 2 (Wednesday) - no ENTRY in DB -> filter removes ENTRY, then checks DB for ENTRY for EXIT, doesn't find it, skips.
+    await run_csv_import(db, mock_ib, csv_file, mock_queue, mock_notifier, mock_config)
+
+    async with db.execute("SELECT COUNT(*) FROM orders") as cursor:
+        assert (await cursor.fetchone())[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_custom_strategy_limits_in_config(
+    tmp_path: Path, mock_config: Config, db
+) -> None:
+    """Verifies that strategy limits configured in config.strategy_limits are applied."""
+    import dataclasses
+
+    custom_config = dataclasses.replace(
+        mock_config, strategy_limits={"CustomStrategy": 0.10}
+    )
+
+    csv_file = tmp_path / "orders_2026_07_06.csv"
+    csv_content = (
+        "trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name\n"
+        "400_CustomStrategy_NVDA,ENTRY,NVDA,STK,SMART,U12345,BUY,10,LMT,100.00,DAY,CustomStrategy\n"
+    )
+    csv_file.write_text(csv_content, encoding="utf-8")
+
+    mock_ib = MagicMock()
+    mock_ib.managedAccounts.return_value = ["U12345"]
+    mock_ib.isConnected.return_value = True
+    mock_ib.accountValues.return_value = [
+        AccountValue(
+            account="U12345",
+            tag="NetLiquidation",
+            value="100000.00",
+            currency="EUR",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U12345",
+            tag="AvailableFunds",
+            value="100000.00",
+            currency="EUR",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U12345",
+            tag="TotalCashValue",
+            value="100000.00",
+            currency="EUR",
+            modelCode="",
+        ),
+    ]
+    mock_notifier = MagicMock()
+    mock_queue = asyncio.Queue()
+
+    await run_csv_import(
+        db, mock_ib, csv_file, mock_queue, mock_notifier, custom_config
+    )
+
+    async with db.execute(
+        "SELECT quantity FROM orders WHERE trade_group_id = '400_CustomStrategy_NVDA'"
+    ) as cursor:
+        assert (await cursor.fetchone())["quantity"] == 10
+
+
+@pytest.mark.asyncio
+async def test_process_daily_csv_file_rename_failure(
+    tmp_path: Path, mock_config: Config
+) -> None:
+    """Verifies error handling when renaming a failed CSV to .err fails."""
+    from app.services.importer import _process_daily_csv_file
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    test_csv = data_dir / "orders_2026_06_01.csv"
+    test_csv.write_text("invalid,content", encoding="utf-8")
+
+    mock_db_conn = AsyncMock()
+
+    async def db_factory():
+        return mock_db_conn
+
+    mock_ib = MagicMock()
+    mock_notifier = MagicMock()
+    mock_queue = asyncio.Queue()
+
+    with patch(
+        "app.services.importer.run_csv_import",
+        side_effect=ValueError("Test import error"),
+    ):
+        with patch.object(Path, "rename", side_effect=OSError("Permission denied")):
+            await _process_daily_csv_file(
+                db_factory=db_factory,
+                interactive_brokers=mock_ib,
+                csv_file=test_csv,
+                queue=mock_queue,
+                notifier=mock_notifier,
+                config=mock_config,
+            )

@@ -750,7 +750,7 @@ async def fetch_account_balance_metrics(
             continue
         try:
             cache_values[account_value.tag] = Decimal(str(account_value.value))
-        except ValueError as exception:
+        except (ValueError, ArithmeticError) as exception:
             logger.warning(
                 "Invalid account value found in TWS cache",
                 tag=account_value.tag,
@@ -786,7 +786,7 @@ async def fetch_account_balance_metrics(
                 continue
             try:
                 retrieved_values[account_value.tag] = Decimal(str(account_value.value))
-            except ValueError as exception:
+            except (ValueError, ArithmeticError) as exception:
                 logger.warning(
                     "Invalid value found in Account Summary response",
                     tag=account_value.tag,
