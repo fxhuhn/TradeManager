@@ -64,6 +64,16 @@ jobs:
           provenance: false
           sbom: false
 
+      - name: Show Trivy findings (diagnostic table)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE_TAG }}
+          format: 'table'
+          exit-code: '0'
+          ignore-unfixed: true
+          scanners: 'vuln'
+          severity: 'CRITICAL,HIGH'
+
       - name: Run Trivy vulnerability scanner on Docker image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
