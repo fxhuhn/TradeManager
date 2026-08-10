@@ -6,14 +6,18 @@ FROM python:3.12-slim-bookworm AS builder
 
 WORKDIR /build
 
-# Systemabhängigkeiten und aktuelle Build-Tools installieren
+# Build-Abhängigkeiten installieren
 RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
+# Virtuelle Umgebung erstellen & upgraden
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
- && pip install --no-cache-dir --target=/install -r requirements.txt
+ && pip install --no-cache-dir -r requirements.txt
 
 # Stage 2: Production Runtime
 FROM python:3.12-slim-bookworm AS runner
@@ -25,17 +29,15 @@ RUN apt-get update && apt-get dist-upgrade -y && apt-get install -y --no-install
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
+# Virtuelle Umgebung aus Builder kopieren
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
 # Zeitzone und PYTHONPATH festlegen
 ENV TZ=Europe/Berlin
 ENV PYTHONPATH=/app
 
 WORKDIR /app
-
-# Vorinstallierte Produktions-Pakete aus Builder kopieren
-COPY --from=builder /install /usr/local/lib/python3.12/site-packages/
-
-# Python Core Tools im Runtime Image upgraden (behebt Basis-Image CVEs in pip/setuptools)
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # Anwendungsdateien kopieren
 COPY app/ app/
