@@ -1,9 +1,39 @@
+# Version Control & Agent Configuration
 .git
-.venv
-.pytest_cache
-.ruff_cache
-__pycache__
+.gitignore
+.agents/
+.github/
+
+# Virtual Environment & Python Caches
+.venv/
+venv/
+__pycache__/
 *.pyc
-data/
+*.pyo
+*.pyd
+
+# Testing & Quality Tools
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+tests/
+
+# Sensitive Files & Local Configs
 config.toml
 .env
+.env.*
+*.pem
+*.key
+
+# Runtime Data, Logs & Databases
+data/
+*.sqlite
+*.db
+*.log
+
+# OS & Editor Files
+.DS_Store
+.vscode/
+.idea/
