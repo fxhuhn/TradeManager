@@ -503,6 +503,70 @@ async def test_place_and_verify_order_real_error(db) -> None:
 
 
 @pytest.mark.asyncio
+async def test_place_and_verify_order_token_verification_error(db) -> None:
+    """Prüft, dass bei Error 201 der Hinweis auf die erforderliche Anmeldung im Client Portal an Telegram gesendet wird."""
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, status
+        ) VALUES (44, NULL, 'G1', 'A1', 'ENTRY', 'GOOGL', 'STK', 'SMART', 'BUY', 10, 'LMT', 300.0, 'Submitted')
+        """
+    )
+    await db.commit()
+
+    order_row = OrderRow(
+        order_id=44,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="G1",
+        account_id="A1",
+        bracket_role="ENTRY",
+        symbol="GOOGL",
+        sec_type="STK",
+        exchange="SMART",
+        action="BUY",
+        quantity=10,
+        order_type="LMT",
+        target_price=Decimal("300.0"),
+        tif="GTC",
+        strategy_name="DipBuyer",
+        status="Submitted",
+    )
+
+    mock_log_entry = MagicMock()
+    mock_log_entry.errorCode = 201
+    mock_log_entry.status = "ValidationError"
+    mock_log_entry.message = "Order rejected - reason:BEFORE WE CAN ACCEPT YOUR ORDER IN THIS SECURITY, PLEASE LOGIN TO CLIENT PORTAL AND VERIFY USING THE TOKEN WE EMAILED TO YOU."
+
+    mock_trade = MagicMock()
+    mock_trade.orderStatus.status = "Inactive"
+    mock_trade.log = [mock_log_entry]
+
+    mock_ib = MagicMock()
+    mock_ib.placeOrder.return_value = mock_trade
+
+    mock_notifier = AsyncMock()
+
+    result = await _place_and_verify_order(
+        db=db,
+        interactive_brokers=mock_ib,
+        contract=MagicMock(),
+        ib_order=MagicMock(),
+        order_row=order_row,
+        tws_order_id=44,
+        notifier=mock_notifier,
+    )
+
+    assert result is False
+    mock_notifier.send_order_failed.assert_called_once()
+    call_args = mock_notifier.send_order_failed.call_args[1]
+    assert call_args["tws_code"] == 201
+    assert "ANMELDUNG/VERIFIZIERUNG ERFORDERLICH" in call_args["reason"]
+    assert call_args["symbol"] == "GOOGL"
+
+
+@pytest.mark.asyncio
 async def test_process_trade_group_exit_cancelled_if_no_position(
     db, test_config: Config
 ) -> None:

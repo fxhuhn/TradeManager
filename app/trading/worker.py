@@ -669,28 +669,36 @@ async def _handle_order_rejection(
     notifier: TelegramNotifier,
 ) -> bool:
     """Behandelt Fehlermeldungen bei der Order-Übertragung."""
-    log_errors = [
-        entry
-        for entry in trade.log
-        if entry.errorCode != 0 or entry.status in ("ValidationError", "Error")
-    ]
-    is_only_warning_399: bool = len(log_errors) > 0 and all(
-        entry.errorCode == 399 for entry in log_errors
-    )
-
-    if is_only_warning_399:
-        logger.info(
-            "Ignoring Warning 399 (ValidationError/out-of-hours) during order placement",
-            order_id=tws_order_id,
-            symbol=order_row.symbol,
-        )
-        return True
-
     error_msg = "Unknown error"
-    for entry in log_errors:
-        if entry.errorCode != 399:
-            error_msg = entry.message
+    tws_code = 0
+
+    # Kurz auf asynchrones errorEvent von IBKR warten, falls trade.log noch leer/unvollständig ist
+    for _ in range(10):
+        log_errors = [
+            entry
+            for entry in trade.log
+            if entry.errorCode != 0 or entry.status in ("ValidationError", "Error")
+        ]
+        is_only_warning_399: bool = len(log_errors) > 0 and all(
+            entry.errorCode == 399 for entry in log_errors
+        )
+        if is_only_warning_399:
+            logger.info(
+                "Ignoring Warning 399 (ValidationError/out-of-hours) during order placement",
+                order_id=tws_order_id,
+                symbol=order_row.symbol,
+            )
+            return True
+
+        for entry in log_errors:
+            if entry.errorCode != 399:
+                error_msg = entry.message
+                tws_code = entry.errorCode
+                break
+
+        if error_msg != "Unknown error":
             break
+        await asyncio.sleep(0.1)
 
     logger.error(
         "Order transmission failed",
@@ -706,24 +714,36 @@ async def _handle_order_rejection(
             (tws_order_id,),
         )
 
-    if "Read-Only mode" in error_msg or "321" in error_msg:
-        await notifier.send_order_failed(
-            order_id=tws_order_id,
-            tws_code=321,
-            reason=f"API im READ-ONLY Modus. Details: {error_msg}",
-            symbol=order_row.symbol,
-            bracket_role=order_row.bracket_role,
-            is_fatal=True,
+    reason_upper = error_msg.upper()
+    if "Read-Only mode" in error_msg or "321" in error_msg or tws_code == 321:
+        formatted_reason = f"API im READ-ONLY Modus. Details: {error_msg}"
+        is_fatal = True
+        code = 321
+    elif (
+        "LOGIN TO CLIENT PORTAL" in reason_upper
+        or "VERIFY USING THE TOKEN" in reason_upper
+        or "VERIFICATION PROCESS" in reason_upper
+        or ("TOKEN" in reason_upper and "VERIFY" in reason_upper)
+    ):
+        formatted_reason = (
+            f"🔑 ANMELDUNG/VERIFIZIERUNG ERFORDERLICH: IBKR/CapTrader verlangt "
+            f"Token-Bestätigung im Client Portal! Details: {error_msg}"
         )
+        is_fatal = True
+        code = 201 if tws_code == 0 else tws_code
     else:
-        await notifier.send_order_failed(
-            order_id=tws_order_id,
-            tws_code=0,
-            reason=error_msg,
-            symbol=order_row.symbol,
-            bracket_role=order_row.bracket_role,
-            is_fatal=False,
-        )
+        formatted_reason = error_msg
+        is_fatal = False
+        code = tws_code
+
+    await notifier.send_order_failed(
+        order_id=tws_order_id,
+        tws_code=code,
+        reason=formatted_reason,
+        symbol=order_row.symbol,
+        bracket_role=order_row.bracket_role,
+        is_fatal=is_fatal,
+    )
     return False
 
 

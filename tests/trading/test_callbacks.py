@@ -959,7 +959,12 @@ async def test_fail_order_in_db_updates_status_and_notifies(
         assert row["status"] == "Error"
 
     mock_notifier.send_order_failed.assert_called_once_with(
-        order_id=30, tws_code=201, reason="Order rejected by exchange", is_fatal=True
+        order_id=30,
+        tws_code=201,
+        reason="Order rejected by exchange",
+        symbol="AAPL",
+        bracket_role="ENTRY",
+        is_fatal=True,
     )
 
 

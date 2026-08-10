@@ -788,7 +788,16 @@ class TwsCallbacksManager:
     ) -> None:
         """Kennzeichnet Order in DB als fehlerhaft und benachrichtigt via Telegram."""
         db = await self.db_factory()
+        order_row = None
         try:
+            query = """
+                SELECT symbol, bracket_role
+                FROM orders
+                WHERE order_id = ?
+            """
+            async with db.execute(query, (request_id,)) as cursor:
+                order_row = await cursor.fetchone()
+
             async with transaction(db):
                 await db.execute(
                     "UPDATE orders SET status = 'Error' WHERE order_id = ?",
@@ -804,10 +813,28 @@ class TwsCallbacksManager:
         finally:
             await db.close()
 
+        symbol = order_row["symbol"] if order_row else "Unbekannt"
+        bracket_role = order_row["bracket_role"] if order_row else "-"
+
+        reason = error_string
+        reason_upper = error_string.upper()
+        if (
+            "LOGIN TO CLIENT PORTAL" in reason_upper
+            or "VERIFY USING THE TOKEN" in reason_upper
+            or "VERIFICATION PROCESS" in reason_upper
+            or ("TOKEN" in reason_upper and "VERIFY" in reason_upper)
+        ):
+            reason = (
+                f"🔑 ANMELDUNG/VERIFIZIERUNG ERFORDERLICH: IBKR/CapTrader verlangt "
+                f"Token-Bestätigung im Client Portal! Details: {error_string}"
+            )
+
         await self.notifier.send_order_failed(
             order_id=request_id,
             tws_code=error_code,
-            reason=error_string,
+            reason=reason,
+            symbol=symbol,
+            bracket_role=bracket_role,
             is_fatal=True,
         )
 
