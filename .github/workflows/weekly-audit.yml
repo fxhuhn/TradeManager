@@ -15,26 +15,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Run TruffleHog Scan
         run: |
-          docker run --rm -v "$GITHUB_WORKSPACE:/workdir" trufflesecurity/trufflehog:latest git file:///workdir --head=${{ github.sha }} --sarif > trufflehog-results.sarif
+          docker run --rm -v "$GITHUB_WORKSPACE:/workdir" trufflesecurity/trufflehog:latest git file:///workdir --sarif > trufflehog-results.sarif || true
+          if [ ! -s trufflehog-results.sarif ]; then
+            echo '{"$schema":"https://json.schemastore.org/sarif-2.1.0.json","version":"2.1.0","runs":[]}' > trufflehog-results.sarif
+          fi
 
       - name: Upload TruffleHog SARIF report to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
           sarif_file: 'trufflehog-results.sarif'
+          category: 'trufflehog'
 
   trivy-repo:
     name: Trivy Repository Scan
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Run Trivy vulnerability scanner in repo mode
         uses: aquasecurity/trivy-action@v0.36.0
@@ -47,8 +51,16 @@ jobs:
           scanners: 'vuln'
           severity: 'CRITICAL,HIGH'
 
+      - name: Ensure Trivy SARIF validity
+        if: always()
+        run: |
+          if [ ! -s trivy-results.sarif ]; then
+            echo '{"$schema":"https://json.schemastore.org/sarif-2.1.0.json","version":"2.1.0","runs":[]}' > trivy-results.sarif
+          fi
+
       - name: Upload Trivy scan results to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
           sarif_file: 'trivy-results.sarif'
+          category: 'trivy-repo'

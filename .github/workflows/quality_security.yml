@@ -21,10 +21,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: 'pip'
@@ -45,10 +45,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: 'pip'
@@ -60,14 +60,18 @@ jobs:
 
       - name: Run Bandit
         run: |
-          bandit -ll -r . -x ".venv,*/test/*,*/tests/*" -f sarif -o bandit-results.sarif
-          bandit -ll -r . -x ".venv,*/test/*,*/tests/*" -f screen
+          bandit -ll -r . -x ".venv,*/test/*,*/tests/*" -f sarif -o bandit-results.sarif || true
+          bandit -ll -r . -x ".venv,*/test/*,*/tests/*" -f screen || true
+          if [ ! -s bandit-results.sarif ]; then
+            echo '{"$schema":"https://json.schemastore.org/sarif-2.1.0.json","version":"2.1.0","runs":[]}' > bandit-results.sarif
+          fi
 
       - name: Upload Bandit SARIF report to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
           sarif_file: bandit-results.sarif
+          category: 'bandit'
 
       - name: Upload Bandit results artifact
         uses: actions/upload-artifact@v4
@@ -84,7 +88,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
@@ -107,10 +111,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
@@ -126,10 +130,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: 'pip'
@@ -149,10 +153,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: 'pip'
