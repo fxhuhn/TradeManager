@@ -225,9 +225,10 @@ async def test_send_order_filled_formatting(mock_config: MagicMock) -> None:
         assert "<b>Limit:</b> <code>152.00</code>" in called_text
         assert "<b>Fill:</b> <code>150.50</code>" in called_text
         assert "<b>Wert:</b> <code>$ 15,050.00</code>" in called_text
-        # Slippage line must appear (negative slippage = below limit)
+        # Slippage line must appear (positive price difference formatted as absolute value with Vorteil label)
         assert "Slippage:" in called_text
-        assert "-1.50" in called_text
+        assert "1.50" in called_text
+        assert "Vorteil" in called_text
         assert "ID: <code>123</code>" in called_text
         assert "<i>Momentum</i>" in called_text
 
@@ -493,3 +494,40 @@ async def test_send_high_margin_usage_warning(mock_config: MagicMock) -> None:
         assert "55.4%" in called_text
         assert "$ 110,000.00" in called_text
         assert "$ 200,000.00" in called_text
+
+
+def test_format_slippage_line_variants() -> None:
+    """Verifies format of _format_slippage_line for BUY and SELL advantageous and disadvantageous scenarios."""
+    from app.services.notifier import _format_slippage_line
+
+    # 1. BUY favorable (Limit 309.58, Fill 306.71 -> 2.87 Vorteil)
+    line_buy_vorteil = _format_slippage_line(
+        Decimal("309.58"), Decimal("306.71"), "BUY"
+    )
+    assert "📈" in line_buy_vorteil
+    assert "2.87" in line_buy_vorteil
+    assert "0.93% Vorteil" in line_buy_vorteil
+
+    # 2. BUY unfavorable (Limit 300.00, Fill 301.42 -> 1.42 Nachteil)
+    line_buy_nachteil = _format_slippage_line(
+        Decimal("300.00"), Decimal("301.42"), "BUY"
+    )
+    assert "📉" in line_buy_nachteil
+    assert "1.42" in line_buy_nachteil
+    assert "0.47% Nachteil" in line_buy_nachteil
+
+    # 3. SELL favorable (Limit 100.00, Fill 101.50 -> 1.50 Vorteil)
+    line_sell_vorteil = _format_slippage_line(
+        Decimal("100.00"), Decimal("101.50"), "SELL"
+    )
+    assert "📈" in line_sell_vorteil
+    assert "1.50" in line_sell_vorteil
+    assert "1.50% Vorteil" in line_sell_vorteil
+
+    # 4. SELL unfavorable (Limit 100.00, Fill 98.50 -> 1.50 Nachteil)
+    line_sell_nachteil = _format_slippage_line(
+        Decimal("100.00"), Decimal("98.50"), "SELL"
+    )
+    assert "📉" in line_sell_nachteil
+    assert "1.50" in line_sell_nachteil
+    assert "1.50% Nachteil" in line_sell_nachteil

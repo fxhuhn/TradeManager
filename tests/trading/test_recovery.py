@@ -567,3 +567,226 @@ async def test_reconcile_broker_positions_skips_when_synced(db) -> None:
         assert row["count"] == 1
 
     mock_notifier.send_unassigned_position_recovered.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_fetch_orders_timeouts() -> None:
+    """Verifies fetch_active_orders and fetch_completed_orders catch TimeoutError gracefully."""
+    from app.trading.recovery import fetch_active_orders, fetch_completed_orders
+
+    mock_ib = MagicMock()
+    mock_ib.reqOpenOrdersAsync.side_effect = asyncio.TimeoutError
+    mock_ib.reqCompletedOrdersAsync.side_effect = asyncio.TimeoutError
+
+    # Should catch TimeoutError without raising
+    await fetch_active_orders(mock_ib, timeout_seconds=0.01)
+    await fetch_completed_orders(mock_ib, timeout_seconds=0.01)
+
+
+@pytest.mark.asyncio
+async def test_recover_created_order_variants(db) -> None:
+    """Verifies _recover_created_order handles active TWS orders and never-sent orders."""
+    from app.core.models import OrderRow
+    from app.trading.recovery import _recover_created_order
+
+    # Insert Created order
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, status)
+        VALUES (500, 'TG_CREATED', 'A1', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 10, 'LMT', 'Created')
+        """
+    )
+    await db.commit()
+
+    order_row = OrderRow(
+        order_id=500,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG_CREATED",
+        account_id="A1",
+        bracket_role="ENTRY",
+        symbol="AAPL",
+        sec_type="STK",
+        exchange="SMART",
+        action="BUY",
+        quantity=10,
+        order_type="LMT",
+        target_price=Decimal("150.0"),
+        tif="GTC",
+        strategy_name="NDXMomentum",
+        status="Created",
+    )
+
+    # 1. Active in TWS (Mid-crash recovery)
+    mock_trade = MagicMock()
+    mock_trade.order.permId = 98765
+    mock_trade.orderStatus.status = "PreSubmitted"
+
+    requeue_set: set[str] = set()
+    await _recover_created_order(db, order_row, mock_trade, requeue_set)
+
+    async with db.execute(
+        "SELECT status, perm_id FROM orders WHERE order_id = 500"
+    ) as cursor:
+        row = await cursor.fetchone()
+        assert row["status"] == "PreSubmitted"
+        assert row["perm_id"] == 98765
+
+    # 2. Not active in TWS (Re-queueing)
+    requeue_set.clear()
+    await _recover_created_order(db, order_row, None, requeue_set)
+    assert "TG_CREATED" in requeue_set
+
+
+@pytest.mark.asyncio
+async def test_save_missing_executions_with_fills_and_db_errors(db) -> None:
+    """Verifies _save_missing_executions saves TWS fills and handles fallback errors."""
+    from app.core.models import OrderRow
+    from app.trading.recovery import _save_missing_executions
+
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, status)
+        VALUES (600, 'TG_FILLS', 'A1', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 10, 'LMT', 'Filled')
+        """
+    )
+    await db.commit()
+
+    order_row = OrderRow(
+        order_id=600,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG_FILLS",
+        account_id="A1",
+        bracket_role="ENTRY",
+        symbol="AAPL",
+        sec_type="STK",
+        exchange="SMART",
+        action="BUY",
+        quantity=10,
+        order_type="LMT",
+        target_price=Decimal("150.0"),
+        tif="GTC",
+        strategy_name="NDXMomentum",
+        status="Filled",
+    )
+
+    # 1. Fill found with commission report
+    mock_fill = MagicMock()
+    mock_fill.execution.orderId = 600
+    mock_fill.execution.execId = "EXEC_FOUND_600"
+    mock_fill.execution.price = 150.0
+    mock_fill.execution.shares = 10.0
+    mock_fill.contract.currency = "USD"
+    mock_fill.execution.time = "2026-08-11T12:00:00+00:00"
+    mock_fill.commissionReport.commission = 1.0
+
+    mock_ib = MagicMock()
+    mock_ib.fills.return_value = [mock_fill]
+
+    await _save_missing_executions(db, order_row, mock_ib)
+
+    async with db.execute(
+        "SELECT * FROM executions WHERE exec_id = 'EXEC_FOUND_600'"
+    ) as cursor:
+        exec_row = await cursor.fetchone()
+        assert exec_row is not None
+        assert float(exec_row["price"]) == 150.0
+
+    # 2. Fill found but insert raises exception
+    mock_db_fill_err = AsyncMock()
+    mock_db_fill_err.execute.side_effect = RuntimeError("DB Insert Fill Error")
+    # Should catch error gracefully when saving found fill
+    await _save_missing_executions(mock_db_fill_err, order_row, mock_ib)
+
+    # 3. Fallback error handling test
+    mock_db_err = AsyncMock()
+    mock_db_err.execute.side_effect = RuntimeError("DB Lock Error")
+    mock_ib_no_fills = MagicMock()
+    mock_ib_no_fills.fills.return_value = []
+
+    # Should catch error gracefully when saving fallback execution
+    await _save_missing_executions(mock_db_err, order_row, mock_ib_no_fills)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_orders_created_status_and_has_live_position(db) -> None:
+    """Verifies _reconcile_orders handles Created orders and _has_live_position matches symbol & account."""
+    from app.core.models import OrderRow
+    from app.trading.recovery import _has_live_position, _reconcile_orders
+
+    # 1. Test _has_live_position
+    pos_match = MagicMock()
+    pos_match.account = "A1"
+    pos_match.contract.symbol = "AAPL.DE"
+    pos_match.position = 10.0
+
+    mock_ib = MagicMock()
+    mock_ib.positions.return_value = [pos_match]
+    assert _has_live_position(mock_ib, "A1", "AAPL") is True
+    assert _has_live_position(mock_ib, "A1", "MSFT") is False
+
+    # 2. Test _reconcile_orders with Created order (triggers lines 175-176)
+    order_created = OrderRow(
+        order_id=700,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG_REC_CREATED",
+        account_id="A1",
+        bracket_role="ENTRY",
+        symbol="AAPL",
+        sec_type="STK",
+        exchange="SMART",
+        action="BUY",
+        quantity=10,
+        order_type="LMT",
+        target_price=Decimal("150.0"),
+        tif="GTC",
+        strategy_name="NDXMomentum",
+        status="Created",
+    )
+
+    requeue = await _reconcile_orders(
+        database_connection=db,
+        local_orders=[order_created],
+        tws_active_orders={},
+        tws_completed_orders={},
+        interactive_brokers_session=mock_ib,
+        notifier=MagicMock(),
+        trigger_settlement_callback=AsyncMock(),
+    )
+    assert "TG_REC_CREATED" in requeue
+
+
+@pytest.mark.asyncio
+async def test_reconcile_broker_positions_skips_negative_qty_and_decrements_temp_id(
+    db,
+) -> None:
+    """Verifies reconcile_broker_positions skips zero/negative positions and _get_next_recovery_temp_id decrements properly."""
+    from app.trading.recovery import (
+        _get_next_recovery_temp_id,
+        reconcile_broker_positions,
+    )
+
+    # Insert existing negative order_id
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, status)
+        VALUES (-5, 'TG_NEG', 'A1', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 10, 'MKT', 'Filled')
+        """
+    )
+    await db.commit()
+
+    next_id = await _get_next_recovery_temp_id(db)
+    assert next_id == -6
+
+    # Position with 0 quantity
+    mock_position = MagicMock()
+    mock_position.position = 0.0
+
+    mock_ib = MagicMock()
+    mock_ib.positions.return_value = [mock_position]
+    mock_notifier = MagicMock()
+
+    await reconcile_broker_positions(db, mock_ib, mock_notifier)
+    mock_notifier.send_unassigned_position_recovered.assert_not_called()

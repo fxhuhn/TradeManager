@@ -1135,3 +1135,357 @@ async def test_cancel_order_in_db_updates_and_notifies(db, mock_config: Config) 
         bracket_role="ENTRY",
         is_fatal=False,
     )
+
+
+@pytest.mark.asyncio
+async def test_callbacks_additional_coverage_branches(mock_config: Config) -> None:
+    """Verifies error handling, status mappings, commission retries, and LOC verification edge cases."""
+    # 1. _update_order_status_db exception handler
+    db_err = AsyncMock()
+    db_err.execute.side_effect = RuntimeError("DB error")
+    db_err.close = AsyncMock()
+
+    async def db_factory_err():
+        return db_err
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory_err,
+        interactive_brokers=MagicMock(),
+        notifier=MagicMock(),
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+    # Should catch exception internally
+    await manager._update_order_status_db(100, "PreSubmitted", 999)
+
+    # 2. on_order_status status mappings (PreSubmitted, Cancelled, Inactive, Unknown)
+    trade_presubmitted = MagicMock()
+    trade_presubmitted.order.orderId = 100
+    trade_presubmitted.orderStatus.status = "PreSubmitted"
+    trade_presubmitted.orderStatus.permId = 999
+    trade_presubmitted.orderStatus.avgFillPrice = 0.0
+
+    trade_inactive = MagicMock()
+    trade_inactive.order.orderId = 101
+    trade_inactive.orderStatus.status = "Inactive"
+    trade_inactive.orderStatus.permId = 111
+    trade_inactive.orderStatus.avgFillPrice = 0.0
+
+    trade_unknown = MagicMock()
+    trade_unknown.order.orderId = 102
+    trade_unknown.orderStatus.status = "FOOBAR"
+    trade_unknown.orderStatus.permId = 222
+    trade_unknown.orderStatus.avgFillPrice = 0.0
+
+    with patch.object(manager, "_process_status_change", AsyncMock()) as mock_process:
+        manager.on_order_status(trade_presubmitted)
+        await asyncio.sleep(0.01)
+        mock_process.assert_called_with(100, "PreSubmitted", 999, 0.0)
+
+        manager.on_order_status(trade_inactive)
+        await asyncio.sleep(0.01)
+        mock_process.assert_called_with(101, "Cancelled", 111, 0.0)
+
+        manager.on_order_status(trade_unknown)
+        await asyncio.sleep(0.01)
+        mock_process.assert_called_with(102, "Error", 222, 0.0)
+
+    # 3. _process_status_change non-filled status return early
+    with patch.object(manager, "_update_order_status_db", AsyncMock()):
+        await manager._process_status_change(100, "Submitted", 999)
+
+    # 4. _process_status_change missing order_row and exception handler
+    db_empty = AsyncMock()
+    cursor_empty = AsyncMock()
+    cursor_empty.fetchone = AsyncMock(return_value=None)
+    db_empty.execute.return_value.__aenter__ = AsyncMock(return_value=cursor_empty)
+    db_empty.execute.return_value.__aexit__ = AsyncMock(return_value=None)
+    db_empty.close = AsyncMock()
+
+    async def db_factory_empty():
+        return db_empty
+
+    manager.db_factory = db_factory_empty
+    await manager._process_status_change(100, "Filled", 999)
+
+    db_err_process = AsyncMock()
+    db_err_process.execute.side_effect = RuntimeError("Process DB error")
+    db_err_process.close = AsyncMock()
+
+    async def db_factory_err_process():
+        return db_err_process
+
+    manager.db_factory = db_factory_err_process
+    await manager._process_status_change(100, "Filled", 999)
+
+    # 5. _save_execution without trade/fill and exception handler
+    manager.db_factory = db_factory_empty
+    await manager._save_execution(
+        "EXEC_UNASSIGNED", 999, Decimal("10"), Decimal("1"), "USD", "now"
+    )
+
+    manager.db_factory = db_factory_err_process
+    await manager._save_execution(
+        "EXEC_ERR", 999, Decimal("10"), Decimal("1"), "USD", "now"
+    )
+
+    # 6. _cancel_order_in_db and _fail_order_in_db exception handlers
+    await manager._cancel_order_in_db(999, 202, "Cancel error test")
+    await manager._fail_order_in_db(999, 500, "Fatal error test")
+
+    # 7. _update_commission exception retry logic
+    db_comm_err = AsyncMock()
+    db_comm_err.execute.side_effect = RuntimeError("Comm DB error")
+    db_comm_err.close = AsyncMock()
+
+    async def db_factory_comm_err():
+        return db_comm_err
+
+    manager.db_factory = db_factory_comm_err
+    with pytest.raises(RuntimeError):
+        await manager._update_commission("EXEC_ERR_COMM", Decimal("1.0"), "USD")
+
+
+@pytest.mark.asyncio
+async def test_on_error_dispatches_and_fail_order(db, mock_config: Config) -> None:
+    """Verifies on_error dispatching and _fail_order_in_db token warning handling."""
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, status
+        ) VALUES (50, 0, NULL, 'G50', 'A1', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 10, 'LMT', 150.0, 'Submitted')
+        """
+    )
+    await db.commit()
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+    mock_recovery = AsyncMock()
+    mock_retriable = AsyncMock()
+
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=MagicMock(),
+        notifier=mock_notifier,
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=mock_retriable,
+        run_recovery_callback=mock_recovery,
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    try:
+        # INFO code
+        manager.on_error(-1, 2104, "Market data farm OK")
+
+        # RECONNECT code (1101)
+        manager.on_error(-1, 1101, "Connection restored")
+        await asyncio.sleep(0.01)
+        mock_recovery.assert_called_once()
+
+        # RETRIABLE code (1100)
+        manager.on_error(15, 1100, "Connectivity lost")
+        await asyncio.sleep(0.01)
+        mock_retriable.assert_called_once_with(15)
+
+        # CANCEL code (202)
+        with patch.object(manager, "_cancel_order_in_db", AsyncMock()) as mock_cancel:
+            manager.on_error(20, 202, "Order cancelled")
+            await asyncio.sleep(0.01)
+            mock_cancel.assert_called_once_with(20, 202, "Order cancelled")
+
+        # FATAL code (token error string test)
+        await manager._fail_order_in_db(
+            50, 504, "VERIFY USING THE TOKEN IN CLIENT PORTAL"
+        )
+        mock_notifier.send_order_failed.assert_called_once()
+        failed_reason = mock_notifier.send_order_failed.call_args[1]["reason"]
+        assert "ANMELDUNG/VERIFIZIERUNG ERFORDERLICH" in failed_reason
+    finally:
+        db.close = original_close
+
+
+@pytest.mark.asyncio
+async def test_loc_verification_edge_cases_and_on_disconnected(
+    db, mock_config: Config
+) -> None:
+    """Verifies _verify_loc_cancellation errors/date checks and on_disconnected planned restart."""
+    mock_ib = MagicMock()
+    mock_notifier = MagicMock()
+    mock_notifier.send_system_status = AsyncMock()
+    mock_reconnect = AsyncMock()
+
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=mock_ib,
+        notifier=mock_notifier,
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=mock_reconnect,
+    )
+
+    try:
+        # 1. _is_near_or_after_market_close for .DE symbol
+        assert isinstance(manager._is_near_or_after_market_close("SXRV.DE"), bool)
+
+        # 2. _is_bar_from_today helper variants
+        ny_today = datetime.now(ZoneInfo("America/New_York")).date()
+        ny_now = datetime.now(ZoneInfo("America/New_York"))
+        assert manager._is_bar_from_today(ny_today, "AAPL") is True
+        assert manager._is_bar_from_today(ny_now, "AAPL") is True
+        today_str = ny_now.strftime("%Y%m%d")
+        assert manager._is_bar_from_today(today_str, "AAPL") is True
+        assert manager._is_bar_from_today("INVALID_DATE", "AAPL") is False
+        assert manager._is_bar_from_today(12345, "AAPL") is False
+
+        # 8. _process_error for INFO and FATAL
+        await manager._process_error(1, 2104, "Info message", ErrorClass.INFO)
+
+        with patch.object(manager, "_fail_order_in_db", AsyncMock()) as mock_fail:
+            await manager._process_error(1, 500, "Fatal error", ErrorClass.FATAL)
+            mock_fail.assert_called_once_with(1, 500, "Fatal error")
+
+        # 9. _save_execution with trade and fill for unassigned execution (line 394)
+        with patch(
+            "app.trading.callbacks.handle_unassigned_execution"
+        ) as mock_handle_unassigned:
+            await manager._save_execution(
+                "EXEC_UNASSIGNED_2",
+                9999,
+                Decimal("10"),
+                Decimal("1"),
+                "USD",
+                "now",
+                trade=MagicMock(),
+                fill=MagicMock(),
+            )
+            mock_handle_unassigned.assert_called_once()
+
+        # 10. LOC verification branches with market_close mocked to True
+        with (
+            patch.object(manager, "_is_near_or_after_market_close", return_value=True),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            # Historical data exception
+            mock_ib.reqHistoricalDataAsync = AsyncMock(
+                side_effect=RuntimeError("Req failed")
+            )
+            await manager._check_loc_execution_price(
+                1, "AAPL", "BUY", Decimal("150.0"), 10
+            )
+
+            # Empty bars
+            mock_ib.reqHistoricalDataAsync = AsyncMock(return_value=[])
+            await manager._check_loc_execution_price(
+                1, "AAPL", "BUY", Decimal("150.0"), 10
+            )
+
+            # Not today bar
+            mock_bar = MagicMock()
+            mock_bar.date = "20000101"
+            mock_ib.reqHistoricalDataAsync = AsyncMock(return_value=[mock_bar])
+            await manager._check_loc_execution_price(
+                1, "AAPL", "BUY", Decimal("150.0"), 10
+            )
+
+            # Exception inside _check_loc_execution_price loop
+            with patch.object(
+                manager,
+                "_is_bar_from_today",
+                side_effect=RuntimeError("Bar date check crash"),
+            ):
+                await manager._check_loc_execution_price(
+                    1, "AAPL", "BUY", Decimal("150.0"), 10
+                )
+
+        # 4. on_disconnected planned vs unplanned
+        with patch("datetime.datetime") as mock_datetime:
+            # Planned restart at 12:02
+            mock_datetime.now.return_value = datetime(2026, 8, 11, 12, 2, 0)
+            manager.on_disconnected()
+            await asyncio.sleep(0.01)
+            mock_notifier.send_system_status.assert_called()
+
+            # Unplanned restart at 14:00
+            mock_notifier.send_system_status.reset_mock()
+            mock_datetime.now.return_value = datetime(2026, 8, 11, 14, 0, 0)
+            manager.on_disconnected()
+            await asyncio.sleep(0.01)
+            mock_notifier.send_system_status.assert_called()
+    finally:
+        db.close = original_close
+
+
+@pytest.mark.asyncio
+async def test_callbacks_final_missing_lines(db, mock_config: Config) -> None:
+    """Verifies missing order_row in _process_status_change and handle_unassigned_execution call in _save_execution."""
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=MagicMock(),
+        notifier=MagicMock(),
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    try:
+        # 1. _process_status_change when order_id 88888 does not exist in DB (line 287)
+        with patch.object(manager, "_update_order_status_db", AsyncMock()):
+            await manager._process_status_change(88888, "Filled", 7777)
+
+        # 2. _save_execution when order_id 88888 does not exist in DB
+        # Case A: trade and fill provided (line 392)
+        mock_trade = MagicMock()
+        mock_fill = MagicMock()
+        with patch("app.trading.callbacks.handle_unassigned_execution") as mock_handle:
+            await manager._save_execution(
+                "EXEC_UNASSIGNED_88",
+                88888,
+                Decimal("10.0"),
+                Decimal("1.0"),
+                "USD",
+                "2026-08-11T12:00:00+00:00",
+                trade=mock_trade,
+                fill=mock_fill,
+            )
+            mock_handle.assert_called_once_with(mock_trade, mock_fill)
+
+        # Case B: trade and fill are None (line 394)
+        await manager._save_execution(
+            "EXEC_UNASSIGNED_89",
+            88889,
+            Decimal("10.0"),
+            Decimal("1.0"),
+            "USD",
+            "2026-08-11T12:00:00+00:00",
+            trade=None,
+            fill=None,
+        )
+    finally:
+        db.close = original_close

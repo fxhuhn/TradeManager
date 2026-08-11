@@ -1,8 +1,9 @@
 # filename: tests/trading/test_worker.py
 """Unit and integration tests for execution worker logic in app.trading.worker."""
 
+import asyncio
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiosqlite
 import pytest
@@ -711,3 +712,473 @@ async def test_process_trade_group_exit_matching_with_dot_de_suffix(
     called_contract = mock_ib.placeOrder.call_args[0][0]
     assert called_contract.symbol == "SXRV"
     assert called_contract.primaryExchange == "IBIS2"
+
+
+@pytest.mark.asyncio
+async def test_execution_worker_loop_and_exception_handling(
+    test_config: Config,
+) -> None:
+    """Verifies execution_worker connection waiting, processing, error notification, and cancellation."""
+    queue: asyncio.Queue[str] = asyncio.Queue()
+    await queue.put("TG_NORMAL")
+    await queue.put("TG_ERROR")
+    await queue.put("TG_CANCEL")
+
+    mock_ib = MagicMock()
+    # First disconnected once, then connected
+    connected_responses = [False, True, True, True]
+    mock_ib.isConnected.side_effect = (
+        lambda: connected_responses.pop(0) if connected_responses else True
+    )
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_message = AsyncMock()
+
+    db_mock = AsyncMock()
+    db_mock.close = AsyncMock()
+
+    async def db_factory():
+        return db_mock
+
+    # Mock process_trade_group to fail for TG_ERROR and cancel worker on TG_CANCEL
+    async def mock_process(db, ib, tg_id, notif, cfg):
+        if tg_id == "TG_ERROR":
+            raise RuntimeError("Worker process failed")
+        elif tg_id == "TG_CANCEL":
+            raise asyncio.CancelledError()
+
+    with (
+        patch("app.trading.worker.process_trade_group", side_effect=mock_process),
+        patch("asyncio.sleep", AsyncMock()),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            from app.trading.worker import execution_worker
+
+            await execution_worker(
+                db_factory, mock_ib, queue, mock_notifier, test_config
+            )
+
+    mock_notifier.send_message.assert_called_once()
+    assert "FEHLER IM EXECUTION WORKER" in mock_notifier.send_message.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_process_trade_group_empty_or_no_entry(db, test_config: Config) -> None:
+    """Verifies process_trade_group early returns for empty orders or missing ENTRY order."""
+    mock_ib = MagicMock()
+    mock_notifier = MagicMock()
+
+    # Empty trade group
+    await process_trade_group(
+        db, mock_ib, "NON_EXISTENT_TG", mock_notifier, test_config
+    )
+
+    # Trade group with only EXIT order (no ENTRY)
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status)
+        VALUES (99, 'TG_NO_ENTRY', 'ACC1', 'EXIT', 'AAPL', 'STK', 'SMART', 'SELL', 10, 'LMT', 150.0, 'Created')
+        """
+    )
+    await db.commit()
+
+    await process_trade_group(db, mock_ib, "TG_NO_ENTRY", mock_notifier, test_config)
+
+
+@pytest.mark.asyncio
+async def test_get_account_value_filtering_and_value_error() -> None:
+    """Verifies _get_account_value account_id filtering and ValueError handling."""
+    from app.trading.worker import _get_account_value
+
+    val_correct = MagicMock()
+    val_correct.tag = "Cushion"
+    val_correct.account = "ACC_1"
+    val_correct.value = "0.25"
+
+    val_wrong_acc = MagicMock()
+    val_wrong_acc.tag = "Cushion"
+    val_wrong_acc.account = "ACC_OTHER"
+    val_wrong_acc.value = "0.99"
+
+    val_invalid = MagicMock()
+    val_invalid.tag = "NetLiquidation"
+    val_invalid.account = "ACC_1"
+    val_invalid.value = "NOT_A_NUMBER"
+
+    mock_ib = MagicMock()
+    mock_ib.accountValues.return_value = [val_wrong_acc, val_correct, val_invalid]
+
+    # Match correct account
+    res = _get_account_value(mock_ib, "ACC_1", "Cushion")
+    assert res == Decimal("0.25")
+
+    # Invalid Decimal parse returns None
+    res_inv = _get_account_value(mock_ib, "ACC_1", "NetLiquidation")
+    assert res_inv is None
+
+
+@pytest.mark.asyncio
+async def test_verify_margin_and_cushion_whatif_failure(
+    db, test_config: Config
+) -> None:
+    """Verifies _verify_margin_and_cushion fails closed when whatIf simulation raises an exception."""
+    from app.trading.worker import _verify_margin_and_cushion
+
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status)
+        VALUES (88, 'TG_WHATIF_ERR', 'ACC1', 'ENTRY', 'MSFT', 'STK', 'SMART', 'BUY', 10, 'LMT', 300.0, 'Created')
+        """
+    )
+    await db.commit()
+
+    entry_order = OrderRow(
+        order_id=88,
+        perm_id=0,
+        parent_id=None,
+        trade_group_id="TG_WHATIF_ERR",
+        account_id="ACC1",
+        bracket_role="ENTRY",
+        symbol="MSFT",
+        sec_type="STK",
+        exchange="SMART",
+        action="BUY",
+        quantity=10,
+        order_type="LMT",
+        target_price=Decimal("300.0"),
+        tif="DAY",
+        strategy_name="S1",
+        status="Created",
+    )
+
+    mock_ib = MagicMock()
+    mock_ib.accountValues.return_value = []
+    mock_ib.whatIfOrderAsync = AsyncMock(
+        side_effect=RuntimeError("TWS WhatIf simulation failed")
+    )
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+
+    passed, updated_order = await _verify_margin_and_cushion(
+        db, mock_ib, entry_order, test_config, mock_notifier
+    )
+
+    assert passed is False
+    assert updated_order.status == "Error"
+    mock_notifier.send_order_failed.assert_called_once()
+    assert (
+        "Risk validation simulation failed/timed out"
+        in mock_notifier.send_order_failed.call_args[1]["reason"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_transmit_entry_and_child_orders_tick_rounding_and_rejections(
+    db, test_config: Config
+) -> None:
+    """Verifies tick-rounding price synchronization and rejection handling for entry and child orders."""
+    # Insert bracket order group in Created state
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status)
+        VALUES (70, 'TG_TICK', 'ACC1', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 10, 'LMT', 150.001, 'Created')
+        """
+    )
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status)
+        VALUES (71, 'TG_TICK', 'ACC1', 'SL', 'AAPL', 'STK', 'SMART', 'SELL', 10, 'STP', 140.001, 'Created')
+        """
+    )
+    await db.commit()
+
+    mock_ib = MagicMock()
+    mock_ib.accountValues.return_value = []
+    mock_order_state = MagicMock()
+    mock_order_state.initMarginAfter = "100.0"
+    mock_order_state.equityWithLoanAfter = "1000.0"
+    mock_ib.whatIfOrderAsync = AsyncMock(return_value=mock_order_state)
+
+    mock_trade_entry = MagicMock()
+    mock_trade_entry.orderStatus.status = "Submitted"
+
+    mock_trade_child = MagicMock()
+    mock_trade_child.orderStatus.status = "Inactive"
+    log_err = MagicMock()
+    log_err.errorCode = 321
+    log_err.message = "API in Read-Only mode"
+    log_err.status = "Inactive"
+    mock_trade_child.log = [log_err]
+
+    mock_ib.placeOrder.side_effect = [mock_trade_entry, mock_trade_child]
+    mock_ib.client.getReqId.side_effect = [1001, 1002]
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+    mock_notifier.send_bracket_order_submitted = AsyncMock()
+    mock_notifier.send_margin_utilization_warning = AsyncMock()
+    mock_notifier.send_high_margin_usage_warning = AsyncMock()
+
+    with patch("app.trading.worker.asyncio.sleep", AsyncMock()):
+        await process_trade_group(db, mock_ib, "TG_TICK", mock_notifier, test_config)
+
+    # Check child order failed due to Read-Only mode
+    mock_notifier.send_order_failed.assert_called_once()
+    assert "READ-ONLY" in mock_notifier.send_order_failed.call_args[1]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_execution_worker_cancelled_error(test_config: Config) -> None:
+    """Verifies execution_worker handles asyncio.CancelledError on task cancellation (lines 75-77)."""
+    from app.trading.worker import execution_worker
+
+    queue: asyncio.Queue[str] = asyncio.Queue()
+    mock_ib = MagicMock()
+    mock_ib.isConnected.return_value = True
+
+    db_mock = AsyncMock()
+    db_mock.close = AsyncMock()
+
+    worker_task = asyncio.create_task(
+        execution_worker(lambda: db_mock, mock_ib, queue, MagicMock(), test_config)
+    )
+    await asyncio.sleep(0.01)
+    worker_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await worker_task
+
+
+@pytest.mark.asyncio
+async def test_process_trade_group_entry_placement_failure(
+    db, test_config: Config
+) -> None:
+    """Verifies entry placement failure returning Error dataclass (line 467)."""
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status)
+        VALUES (990, 'TG_FAIL_ENTRY', 'ACC1', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 10, 'LMT', 150.0, 'Created')
+        """
+    )
+    await db.commit()
+
+    mock_ib_fail = MagicMock()
+    mock_ib_fail.accountValues.return_value = []
+    mock_order_state = MagicMock()
+    mock_order_state.initMarginAfter = "100.0"
+    mock_order_state.equityWithLoanAfter = "1000.0"
+    mock_ib_fail.whatIfOrderAsync = AsyncMock(return_value=mock_order_state)
+
+    mock_trade_rejected = MagicMock()
+    mock_trade_rejected.orderStatus.status = "Inactive"
+    log_err = MagicMock()
+    log_err.errorCode = 200
+    log_err.message = "Order rejected by exchange"
+    log_err.status = "Inactive"
+    mock_trade_rejected.log = [log_err]
+    mock_ib_fail.placeOrder.return_value = mock_trade_rejected
+    mock_ib_fail.client.getReqId.return_value = 2001
+
+    mock_notifier_fail = MagicMock()
+    mock_notifier_fail.send_order_failed = AsyncMock()
+    mock_notifier_fail.send_margin_utilization_warning = AsyncMock()
+    mock_notifier_fail.send_high_margin_usage_warning = AsyncMock()
+
+    with patch("app.trading.worker.asyncio.sleep", AsyncMock()):
+        await process_trade_group(
+            db, mock_ib_fail, "TG_FAIL_ENTRY", mock_notifier_fail, test_config
+        )
+
+
+@pytest.mark.asyncio
+async def test_wait_for_order_submission_break() -> None:
+    """Verifies _wait_for_order_submission loop break for Submitted status (line 661)."""
+    from app.trading.worker import _wait_for_order_submission
+
+    mock_trade_sub = MagicMock()
+    mock_trade_sub.orderStatus.status = "Submitted"
+    await _wait_for_order_submission(mock_trade_sub)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_order_submission_pending_sleep_loop() -> None:
+    """Verifies line 661: _wait_for_order_submission sleeps while status is PendingSubmit."""
+    from app.trading.worker import _wait_for_order_submission
+
+    mock_trade = MagicMock()
+    # First PendingSubmit (triggers sleep at line 661), then Submitted (triggers break)
+    statuses = ["PendingSubmit", "Submitted"]
+    type(mock_trade.orderStatus).status = property(
+        lambda self: statuses.pop(0) if statuses else "Submitted"
+    )
+
+    with patch("app.trading.worker.asyncio.sleep", AsyncMock()) as mock_sleep:
+        await _wait_for_order_submission(mock_trade)
+        mock_sleep.assert_called_once_with(0.1)
+
+
+@pytest.mark.asyncio
+async def test_handle_order_rejection_log_error_break(db) -> None:
+    """Verifies _handle_order_rejection log error break (line 701)."""
+    from app.trading.worker import _handle_order_rejection
+
+    order_row = OrderRow(
+        order_id=2001,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG_FAIL_ENTRY",
+        account_id="ACC1",
+        bracket_role="ENTRY",
+        symbol="AAPL",
+        sec_type="STK",
+        exchange="SMART",
+        action="BUY",
+        quantity=10,
+        order_type="LMT",
+        target_price=Decimal("150.0"),
+        tif="DAY",
+        strategy_name="S1",
+        status="Submitted",
+    )
+    mock_trade_log = MagicMock()
+    mock_trade_log.orderStatus.status = "Inactive"
+    entry_err = MagicMock()
+    entry_err.errorCode = 105
+    entry_err.message = "Order modified or cancelled"
+    entry_err.status = "Inactive"
+    mock_trade_log.log = [entry_err]
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+
+    with patch("app.trading.worker.asyncio.sleep", AsyncMock()):
+        res = await _handle_order_rejection(
+            db, mock_trade_log, order_row, 2001, mock_notifier
+        )
+        assert res is False
+
+
+@pytest.mark.asyncio
+async def test_handle_order_rejection_unknown_error_sleep_loop(db) -> None:
+    """Verifies line 701: _handle_order_rejection sleeps when error_msg is Unknown error."""
+    from app.trading.worker import _handle_order_rejection
+
+    order_row = OrderRow(
+        order_id=3001,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG_UNKNOWN_ERR",
+        account_id="ACC1",
+        bracket_role="ENTRY",
+        symbol="AAPL",
+        sec_type="STK",
+        exchange="SMART",
+        action="BUY",
+        quantity=10,
+        order_type="LMT",
+        target_price=Decimal("150.0"),
+        tif="DAY",
+        strategy_name="S1",
+        status="Submitted",
+    )
+    mock_trade = MagicMock()
+    mock_trade.orderStatus.status = "Inactive"
+
+    # Iteration 1: log is empty (error_msg = Unknown error, triggers sleep at line 701)
+    # Iteration 2: log has error entry (triggers break at line 699)
+    log_err = MagicMock()
+    log_err.errorCode = 500
+    log_err.message = "Order rejected"
+    log_err.status = "Inactive"
+
+    logs = [[], [log_err]]
+    type(mock_trade).log = property(lambda self: logs.pop(0) if logs else [log_err])
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+
+    with patch("app.trading.worker.asyncio.sleep", AsyncMock()) as mock_sleep:
+        res = await _handle_order_rejection(
+            db, mock_trade, order_row, 3001, mock_notifier
+        )
+        assert res is False
+        mock_sleep.assert_called_once_with(0.1)
+
+
+class StopWorkerError(BaseException):
+    pass
+
+
+@pytest.mark.asyncio
+async def test_execution_worker_telegram_error_handling(test_config: Config) -> None:
+    """Verifies telegram error exception handling inside execution_worker loop (lines 87-88)."""
+    from app.trading.worker import execution_worker
+
+    queue: asyncio.Queue[str] = asyncio.Queue()
+    await queue.put("TG_ERR")
+    await queue.put("TG_STOP")
+
+    mock_ib = MagicMock()
+    mock_ib.isConnected = MagicMock(return_value=True)
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_message = AsyncMock(side_effect=RuntimeError("Telegram fail"))
+
+    db_mock = AsyncMock()
+    db_mock.close = AsyncMock()
+
+    async def mock_process(db, ib, tg_id, notif, cfg):
+        if tg_id == "TG_ERR":
+            raise ValueError("Group fail")
+        raise StopWorkerError()
+
+    async def db_factory():
+        return db_mock
+
+    with (
+        patch("app.trading.worker.process_trade_group", side_effect=mock_process),
+        patch("app.trading.worker.asyncio.sleep", AsyncMock()),
+    ):
+        with pytest.raises(StopWorkerError):
+            await execution_worker(
+                db_factory, mock_ib, queue, mock_notifier, test_config
+            )
+
+
+@pytest.mark.asyncio
+async def test_exit_order_db_exception_handlers(test_config: Config) -> None:
+    """Verifies exception handling when DB update fails in _cancel_empty_exit_order and _reduce_exit_order_quantity (lines 801-802, 838-839)."""
+    from app.trading.worker import _cancel_empty_exit_order, _reduce_exit_order_quantity
+
+    child = OrderRow(
+        order_id=99,
+        perm_id=0,
+        parent_id=None,
+        trade_group_id="TG_ERR",
+        account_id="ACC1",
+        bracket_role="EXIT",
+        symbol="AAPL",
+        sec_type="STK",
+        exchange="SMART",
+        action="SELL",
+        quantity=10,
+        order_type="MKT",
+        target_price=Decimal("0.0"),
+        tif="DAY",
+        strategy_name="S1",
+        status="Created",
+    )
+
+    db_err = AsyncMock()
+    db_err.execute.side_effect = RuntimeError("DB update failed")
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_importer_info = AsyncMock()
+
+    # Should catch exception internally without crashing
+    await _cancel_empty_exit_order(db_err, child, Decimal("0.0"), mock_notifier)
+    await _reduce_exit_order_quantity(
+        db_err, child, Decimal("10"), Decimal("5"), mock_notifier
+    )
+
+    assert mock_notifier.send_importer_info.call_count == 2

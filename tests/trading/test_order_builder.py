@@ -249,3 +249,121 @@ def test_get_tick_size_all_brackets(
     """Verifiziert die korrekte Ermittlung der Tick-Größe für alle Preisstufen."""
     actual_tick = float(get_tick_size(symbol, Decimal(str(price))))
     assert actual_tick == expected_tick
+
+
+def test_build_order_stp_and_oca_type_1() -> None:
+    """Verifies build_order handles STP orderType, auxPrice rounding, and ocaType=1 for SL bracket role."""
+    from app.trading.order_builder import extract_transmitted_price
+
+    order_row = OrderRow(
+        order_id=50,
+        perm_id=None,
+        parent_id=10,
+        trade_group_id="G2",
+        account_id="A1",
+        bracket_role="SL",
+        symbol="AAPL",
+        sec_type="STK",
+        exchange="SMART",
+        action="SELL",
+        quantity=50,
+        order_type="STP",
+        target_price=Decimal("175.456"),
+        tif="GTC",
+        strategy_name="NDXMomentum",
+        status="Created",
+    )
+    tws_order = build_order(order_row)
+    assert tws_order.orderType == "STP"
+    assert tws_order.auxPrice == 175.46
+    assert tws_order.ocaGroup == "OCA_G2_v4"
+    assert tws_order.ocaType == 1
+
+    extracted_price = extract_transmitted_price(tws_order)
+    assert extracted_price == Decimal("175.46")
+
+
+def test_build_order_unknown_order_type() -> None:
+    """Verifies build_order handles unknown orderType gracefully."""
+    order_row = OrderRow(
+        order_id=51,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="G3",
+        account_id="A1",
+        bracket_role="ENTRY",
+        symbol="AAPL",
+        sec_type="STK",
+        exchange="SMART",
+        action="BUY",
+        quantity=10,
+        order_type="FOOBAR",
+        target_price=Decimal("100.00"),
+        tif="GTC",
+        strategy_name="NDXMomentum",
+        status="Created",
+    )
+    tws_order = build_order(order_row)
+    assert tws_order.orderType == "FOOBAR"
+    assert tws_order.lmtPrice > 1e300
+
+
+def test_build_order_mkt_moc_and_extract_none() -> None:
+    """Verifies build_order handles MKT and MOC orderTypes, and extract_transmitted_price returns None when no price is set."""
+    from app.trading.order_builder import extract_transmitted_price
+
+    # MKT order
+    order_row_mkt = OrderRow(
+        order_id=52,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="G4",
+        account_id="A1",
+        bracket_role="ENTRY",
+        symbol="AAPL",
+        sec_type="STK",
+        exchange="SMART",
+        action="BUY",
+        quantity=10,
+        order_type="MKT",
+        target_price=None,
+        tif="DAY",
+        strategy_name="NDXMomentum",
+        status="Created",
+    )
+    tws_mkt = build_order(order_row_mkt)
+    assert tws_mkt.orderType == "MKT"
+    assert extract_transmitted_price(tws_mkt) is None
+
+    # MOC order with SL bracket role (tests ocaType = 3 via orderType in ("LOC", "MOC"))
+    order_row_moc = OrderRow(
+        order_id=53,
+        perm_id=None,
+        parent_id=10,
+        trade_group_id="G4",
+        account_id="A1",
+        bracket_role="SL",
+        symbol="AAPL",
+        sec_type="STK",
+        exchange="SMART",
+        action="SELL",
+        quantity=10,
+        order_type="MOC",
+        target_price=None,
+        tif="DAY",
+        strategy_name="NDXMomentum",
+        status="Created",
+    )
+    tws_moc = build_order(order_row_moc)
+    assert tws_moc.orderType == "MOC"
+    assert tws_moc.ocaType == 3
+
+    # LMT order with lmtPrice = 150.0 returns Decimal("150.0")
+    from ib_async import Order
+
+    lmt_valid = Order(orderType="LMT", lmtPrice=150.0)
+    assert extract_transmitted_price(lmt_valid) == Decimal("150.0")
+
+    # LMT order with lmtPrice = 0.0 returns None
+    lmt_zero = Order(orderType="LMT", lmtPrice=0.0)
+    assert extract_transmitted_price(lmt_zero) is None
