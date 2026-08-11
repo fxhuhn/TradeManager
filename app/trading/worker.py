@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 from collections.abc import Awaitable, Callable
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Final
 
 import aiosqlite
@@ -222,7 +222,7 @@ def _get_account_value(
             continue
         try:
             return Decimal(str(account_value.value))
-        except ValueError as exception:
+        except (ValueError, InvalidOperation) as exception:
             logger.warning(
                 "Failed to parse account value as Decimal",
                 tag=tag,

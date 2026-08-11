@@ -770,10 +770,10 @@ class TwsCallbacksManager:
         )
         today = datetime.now(tz).date()
 
-        if isinstance(bar_date, date):
-            return bar_date == today
-        elif isinstance(bar_date, datetime):
+        if isinstance(bar_date, datetime):
             return bar_date.date() == today
+        elif isinstance(bar_date, date):
+            return bar_date == today
         elif isinstance(bar_date, str):
             try:
                 # Format 'YYYYMMDD' oder 'YYYYMMDD  HH:MM:SS'

@@ -32,8 +32,8 @@ def _format_slippage_line(
     """Formats a slippage indicator line for Telegram if prices diverge.
 
     Evaluates slippage direction relative to the trade action:
-    - BUY:  fill below limit = favorable (saved money)
-    - SELL: fill above limit = favorable (received more)
+    - BUY:  fill below limit = favorable (saved money) -> 📈 Slippage: X.XX (Y.YY% Vorteil)
+    - SELL: fill above limit = favorable (received more) -> 📈 Slippage: X.XX (Y.YY% Vorteil)
 
     Returns an empty string when slippage cannot be determined or is zero.
     """
@@ -51,10 +51,14 @@ def _format_slippage_line(
         not is_buy and price_difference > 0
     )
     direction_emoji = "📈" if is_favorable else "📉"
+    label = "Vorteil" if is_favorable else "Nachteil"
+
+    abs_diff = abs(price_difference)
+    abs_pct = abs(percentage)
 
     return (
         f"├─ {direction_emoji} <b>Slippage:</b> "
-        f"<code>{price_difference:+.2f}</code> (<code>{percentage:+.2f}%</code>)"
+        f"<code>{abs_diff:.2f}</code> (<code>{abs_pct:.2f}% {label}</code>)"
     )
 
 
