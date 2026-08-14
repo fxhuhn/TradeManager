@@ -727,8 +727,8 @@ async def test_execution_worker_loop_and_exception_handling(
     mock_ib = MagicMock()
     # First disconnected once, then connected
     connected_responses = [False, True, True, True]
-    mock_ib.isConnected.side_effect = (
-        lambda: connected_responses.pop(0) if connected_responses else True
+    mock_ib.isConnected.side_effect = lambda: (
+        connected_responses.pop(0) if connected_responses else True
     )
 
     mock_notifier = MagicMock()
