@@ -24,6 +24,12 @@ def validate_group(group_id: str, legs: list[LegRow]) -> tuple[bool, str]:
     if not legs:
         return False, "Gruppe enthält keine Legs"
 
+    if group_id and any(leg.trade_group_id != group_id for leg in legs):
+        return (
+            False,
+            f"Trade-Group-ID '{group_id}' stimmt nicht mit Leg-ID '{legs[0].trade_group_id}' überein",
+        )
+
     is_valid, error_message = _check_group_structure(legs)
     if not is_valid:
         return False, error_message

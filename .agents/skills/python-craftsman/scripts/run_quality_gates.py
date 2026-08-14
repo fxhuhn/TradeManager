@@ -109,40 +109,23 @@ def main() -> int:
             return 1
 
     # Gate 2: Test Suite Verification
-    pytest_bin = resolve_tool("pytest")
-    if pytest_bin:
-        pytest_command = [
-            "pytest",
-            "tests/",
-            "-v",
-            "--tb=short",
-            "--cov=app",
-            "--cov-report=term-missing",
-            "--cov-fail-under=80",
-        ]
-    else:
-        pytest_command = [
-            python_exec,
-            "-m",
-            "pytest",
-            "tests/",
-            "-v",
-            "--tb=short",
-            "--cov=app",
-            "--cov-report=term-missing",
-            "--cov-fail-under=80",
-        ]
+    pytest_command = [
+        python_exec,
+        "-m",
+        "pytest",
+        "tests/",
+        "-v",
+        "--tb=short",
+        "--cov=app",
+        "--cov-report=term-missing",
+        "--cov-fail-under=80",
+    ]
     if not run_gate("Gate 2: Test Suite Verification (Pytest)", pytest_command):
         return 1
 
     # Gate 3: Architecture / Dead Code Audit (Vulture)
     if resolve_tool("vulture"):
-        vulture_command = [
-            "vulture",
-            ".",
-            "--exclude",
-            ".venv,tests",
-        ]
+        vulture_command = ["vulture", "app/", "vulture_whitelist.py"]
         if not run_gate(
             "Gate 3: Architecture Audit (Vulture)",
             vulture_command,

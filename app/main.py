@@ -84,7 +84,9 @@ class TradingSystemOrchestrator:
         Returns:
             aiosqlite.Connection: Eine geöffnete und konfigurierte Datenbankverbindung.
         """
-        return await get_db(self.database_path)
+        return await get_db(
+            self.database_path, timeout_seconds=self.config.app.database_timeout_s
+        )
 
     async def trigger_settlement_callback(
         self, trade_group_id: str, account_id: str

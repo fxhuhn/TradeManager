@@ -60,7 +60,7 @@ def _simplify_ibkr_warning(warning_message: str) -> str:
 
 
 def clean_ib_async_warnings_processor(
-    logger: Any, method_name: str, event_dict: MutableMapping[str, Any]
+    _logger: Any, _method_name: str, event_dict: MutableMapping[str, Any]
 ) -> MutableMapping[str, Any]:
     """Structlog processor to simplify verbose IBKR wrapper validation warnings."""
     event = event_dict.get("event")

@@ -3,15 +3,12 @@
 # Whitelist for unused variables, attributes, and classes identified by Vulture
 
 
-database_timeout_s
 _.row_factory
-method_name
 transmitted_at
 ExecutionRow
 SettlementRow
 net_pnl
 settled_at
-group_id
 CSV_FILE_PATH
 oca_type
 
