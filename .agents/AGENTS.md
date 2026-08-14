@@ -46,13 +46,11 @@ Only AFTER completing Steps 1 and 2 may you perform source code analysis,
 file modifications, and command execution. All work must stay within the
 constraints and invariants established in the architecture documents and skills.
 
-## Enforcement Criteria
+## Code Modification Verification Invariant
 
-A task is considered to "touch the codebase" if it involves ANY of:
-- Reading source files (`.py`, `.html`, `.yaml`, `.toml`, etc.)
-- Searching for patterns in code (`grep_search`)
-- Modifying any file
-- Answering questions about how the system works
-- Analyzing log files that reference application components
-- Debugging runtime behavior
+Before concluding any task that modifies Python code or creating a commit, you **MUST** run the test suite or quality pipeline runner:
+```bash
+python .agents/skills/python-craftsman/scripts/run_quality_gates.py
+```
+A task modifying code is NEVER complete if tests fail or if the quality pipeline fails.
 

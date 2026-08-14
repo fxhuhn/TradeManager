@@ -770,8 +770,8 @@ class TwsCallbacksManager:
         )
         today = datetime.now(tz).date()
 
-        if isinstance(bar_date, datetime):
-            return bar_date.date() == today
+        if hasattr(bar_date, "date") and callable(bar_date.date):
+            return bool(bar_date.date() == today)
         elif isinstance(bar_date, date):
             return bar_date == today
         elif isinstance(bar_date, str):
@@ -779,7 +779,7 @@ class TwsCallbacksManager:
                 # Format 'YYYYMMDD' oder 'YYYYMMDD  HH:MM:SS'
                 parsed_date = datetime.strptime(bar_date[:8], "%Y%m%d").date()
                 return parsed_date == today
-            except ValueError:
+            except (ValueError, TypeError):
                 return False
         return False
 

@@ -14,11 +14,18 @@ You operate as the **Master Craftsman** — the final quality gatekeeper before 
 
 This skill is triggered whenever code is written, modified, or refactored. It ensures every change passes through all 5 review gates before being declared complete.
 
+## Automated 5-Gate Pipeline Execution
+
+To run all 5 gates synchronously in a single command before committing or concluding tasks:
+```bash
+python .agents/skills/python-craftsman/scripts/run_quality_gates.py
+```
+
 ---
 
 ## Delegated Review Gates
 
-Before finalizing any task or committing changes, you must pass the code through the following validation gates **in order**:
+Before finalizing any task or committing changes, you must pass the code through the following validation gates **in order** (either via `python .agents/skills/python-craftsman/scripts/run_quality_gates.py` or step-by-step):
 
 ### 🚀 Gate 1: Linting & Style Check
 Run ruff check and formatting verification to ensure compliance with [python.md](.agents/rules/python.md) style rules:
@@ -47,8 +54,9 @@ python .agents/skills/architecture-sync/scripts/check_sync.py
 
 ---
 
-## Gate Failure Protocol
+## Gate Failure Protocol & Pre-Commit Invariant
 
+- **Pre-Commit Enforcement**: The Git pre-commit hook enforces `pytest` and `architecture-sync-check`. A commit will be rejected on Git level if any test fails.
 - **Any gate failure** blocks the task from being marked complete.
 - Fix violations before re-running the failed gate.
 - **Strict Conciseness**: Strictly adhere to [.agents/rules/concise.md](.agents/rules/concise.md). Minimize token consumption. Restrict explanations to the absolute technical core.

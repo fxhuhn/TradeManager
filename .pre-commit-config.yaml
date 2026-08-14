@@ -45,6 +45,13 @@ repos:
 
   - repo: local
     hooks:
+      - id: pytest-check
+        name: Pytest Unit Test Suite
+        entry: pytest tests/ -v --tb=short
+        language: system
+        pass_filenames: false
+        always_run: true
+
       - id: architecture-sync-check
         name: Architecture Sync Check
         entry: python3 .agents/skills/architecture-sync/scripts/check_sync.py
