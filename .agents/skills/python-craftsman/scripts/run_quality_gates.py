@@ -22,11 +22,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent.parent.parent.parent
 
 
 def resolve_tool(tool_name: str) -> str | None:
-    """Finds tool binary in system PATH or local .venv directory."""
-    which_path = shutil.which(tool_name)
-    if which_path:
-        return which_path
-
+    """Finds tool binary in local .venv directory first, prioritizing workspace isolation."""
     venv_bin = ROOT_DIR / ".venv" / "bin" / tool_name
     if venv_bin.is_file() and venv_bin.stat().st_mode & 0o111:
         return str(venv_bin)
@@ -35,7 +31,7 @@ def resolve_tool(tool_name: str) -> str | None:
     if venv_scripts.is_file():
         return str(venv_scripts)
 
-    return None
+    return shutil.which(tool_name)
 
 
 def get_python_interpreter() -> str:

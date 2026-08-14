@@ -25,7 +25,7 @@ repos:
     rev: v2.14
     hooks:
       - id: vulture
-        args: [".", "--exclude", ".venv,tests"]
+        args: ["app/", "vulture_whitelist.py"]
         pass_filenames: false
 
   - repo: https://github.com/PyCQA/bandit
@@ -47,13 +47,13 @@ repos:
     hooks:
       - id: pytest-check
         name: Pytest Unit Test Suite
-        entry: pytest tests/ -v --tb=short
+        entry: .venv/bin/pytest tests/ -v --tb=short
         language: system
         pass_filenames: false
         always_run: true
 
       - id: architecture-sync-check
         name: Architecture Sync Check
-        entry: python3 .agents/skills/architecture-sync/scripts/check_sync.py
+        entry: .venv/bin/python .agents/skills/architecture-sync/scripts/check_sync.py
         language: system
         pass_filenames: false
