@@ -180,6 +180,7 @@ This section provides a detailed reference of all public classes and functions i
   - `send_margin_utilization_warning` (Method)
   - `send_high_margin_usage_warning` (Method)
   - `send_unassigned_position_recovered` (Method)
+  - `send_broker_connection_status` (Method)
 
 
 ### 4.9 Module: `app.trading.callbacks`

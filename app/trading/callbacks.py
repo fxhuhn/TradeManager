@@ -146,6 +146,7 @@ class TwsCallbacksManager:
         self.run_recovery_callback = run_recovery_callback
         self.run_reconnect_callback = run_reconnect_callback
         self._order_locks: dict[int, asyncio.Lock] = {}
+        self._broker_connected: bool = True
 
     def register_all(self) -> None:
         """Verknüpft die Event-Methoden mit den ib_async Signalen."""
@@ -539,13 +540,32 @@ class TwsCallbacksManager:
         if error_class == ErrorClass.INFO:
             return
 
+        # Systemweite Broker-Konnektivitätsfehler (request_id == -1)
+        if request_id == -1 and error_code in (1100, 2110):
+            if self._broker_connected:
+                self._broker_connected = False
+                await self.notifier.send_broker_connection_status(
+                    is_connected=False,
+                    error_code=error_code,
+                    details=error_string,
+                )
+            return
+
         if error_class == ErrorClass.RECONNECT:
             logger.info("Reconnect signaled. Triggering recovery run.")
+            if not self._broker_connected:
+                self._broker_connected = True
+                await self.notifier.send_broker_connection_status(
+                    is_connected=True,
+                    error_code=error_code,
+                    details=error_string,
+                )
             asyncio.create_task(self.run_recovery_callback())
             return
 
         if error_class == ErrorClass.RETRIABLE:
-            asyncio.create_task(self.handle_retriable_error_callback(request_id))
+            if request_id > 0:
+                asyncio.create_task(self.handle_retriable_error_callback(request_id))
             return
 
         if error_class == ErrorClass.CANCEL:
@@ -840,6 +860,7 @@ class TwsCallbacksManager:
 
     def on_disconnected(self) -> None:
         """Loggt Verbindungsverlust zu TWS und alarmiert den Betreiber."""
+        self._broker_connected = False
         import datetime as datetime_module
 
         now = datetime_module.datetime.now()

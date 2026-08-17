@@ -902,12 +902,62 @@ async def test_on_error_classifications(mock_config: Config) -> None:
     manager.on_error(-1, 2104, "Market data farm connection is OK")
     await asyncio.sleep(0.01)
 
-    # 2. RECONNECT (1101)
-    await manager._process_error(-1, 1101, "Connection lost", ErrorClass.RECONNECT)
+    # 2. Broker Connection lost (-1, 1100) -> sends disconnect status alert and sets _broker_connected=False
+    mock_notifier.send_broker_connection_status = AsyncMock(return_value=True)
+    await manager._process_error(
+        -1,
+        1100,
+        "Connectivity between CapTrader and TWS has been lost.",
+        ErrorClass.RETRIABLE,
+    )
     await asyncio.sleep(0.01)
+    mock_notifier.send_broker_connection_status.assert_called_once_with(
+        is_connected=False,
+        error_code=1100,
+        details="Connectivity between CapTrader and TWS has been lost.",
+    )
+    assert manager._broker_connected is False
+
+    # Second consecutive 1100 event should be debounced (no second alert sent)
+    mock_notifier.send_broker_connection_status.reset_mock()
+    await manager._process_error(
+        -1,
+        1100,
+        "Connectivity between CapTrader and TWS has been lost.",
+        ErrorClass.RETRIABLE,
+    )
+    await asyncio.sleep(0.01)
+    mock_notifier.send_broker_connection_status.assert_not_called()
+
+    # 3. RECONNECT (1101) -> sends reconnect status alert and triggers recovery
+    await manager._process_error(
+        -1,
+        1101,
+        "Connectivity between CapTrader and TWS has been restored.",
+        ErrorClass.RECONNECT,
+    )
+    await asyncio.sleep(0.01)
+    mock_notifier.send_broker_connection_status.assert_called_once_with(
+        is_connected=True,
+        error_code=1101,
+        details="Connectivity between CapTrader and TWS has been restored.",
+    )
+    assert manager._broker_connected is True
     mock_recovery.assert_called_once()
 
-    # 3. RETRIABLE (1100)
+    # Second consecutive 1101 event triggers recovery but debounces alert
+    mock_notifier.send_broker_connection_status.reset_mock()
+    await manager._process_error(
+        -1,
+        1101,
+        "Connectivity between CapTrader and TWS has been restored.",
+        ErrorClass.RECONNECT,
+    )
+    await asyncio.sleep(0.01)
+    mock_notifier.send_broker_connection_status.assert_not_called()
+    assert mock_recovery.call_count == 2
+
+    # 4. RETRIABLE with actual order_id (50, 1100) -> calls retry handler
     await manager._process_error(
         50, 1100, "Connectivity between TWS and Server lost", ErrorClass.RETRIABLE
     )
@@ -991,6 +1041,7 @@ async def test_on_disconnected_triggers_reconnect(mock_config: Config) -> None:
 
     mock_reconnect.assert_called_once()
     mock_notifier.send_system_status.assert_called_once()
+    assert manager._broker_connected is False
 
 
 @pytest.mark.asyncio

@@ -531,3 +531,41 @@ def test_format_slippage_line_variants() -> None:
     assert "📉" in line_sell_nachteil
     assert "1.50" in line_sell_nachteil
     assert "1.50% Nachteil" in line_sell_nachteil
+
+
+@pytest.mark.asyncio
+async def test_send_broker_connection_status_disconnected_and_connected(
+    mock_config: MagicMock,
+) -> None:
+    """Verifies that send_broker_connection_status formats and sends alerts for disconnect and reconnect."""
+    notifier = TelegramNotifier(mock_config)
+    notifier.send_message = AsyncMock(return_value=True)
+
+    # 1. Disconnected
+    result_disconnected = await notifier.send_broker_connection_status(
+        is_connected=False,
+        error_code=1100,
+        details="Connectivity between CapTrader and TWS has been lost.",
+    )
+    assert result_disconnected is True
+    notifier.send_message.assert_called_once()
+    msg_disconnect = notifier.send_message.call_args[0][0]
+    assert "🚨" in msg_disconnect
+    assert "VERBINDUNG ZU BROKER-SERVER UNTERBROCHEN" in msg_disconnect
+    assert "1100" in msg_disconnect
+    assert "Connectivity between CapTrader and TWS has been lost." in msg_disconnect
+
+    # 2. Connected
+    notifier.send_message.reset_mock()
+    result_connected = await notifier.send_broker_connection_status(
+        is_connected=True,
+        error_code=1101,
+        details="Connectivity between CapTrader and TWS has been restored.",
+    )
+    assert result_connected is True
+    notifier.send_message.assert_called_once()
+    msg_connect = notifier.send_message.call_args[0][0]
+    assert "✅" in msg_connect
+    assert "VERBINDUNG ZU BROKER-SERVER WIEDERHERGESTELLT" in msg_connect
+    assert "1101" in msg_connect
+    assert "Connectivity between CapTrader and TWS has been restored." in msg_connect
