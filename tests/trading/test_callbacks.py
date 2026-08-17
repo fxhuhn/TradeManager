@@ -1469,18 +1469,34 @@ async def test_loc_verification_edge_cases_and_on_disconnected(
 
         # 4. on_disconnected planned vs unplanned
         with patch("datetime.datetime") as mock_datetime:
-            # Planned restart at 12:02
+            # Planned restart on Sunday at 12:02
+            mock_datetime.now.return_value = datetime(2026, 8, 16, 12, 2, 0)
+            manager.on_disconnected()
+            await asyncio.sleep(0.01)
+            mock_notifier.send_system_status.assert_called_with(
+                title="GEPLANTER NEUSTART (Gateway wird neu gestartet)",
+                emoji="⏳",
+            )
+
+            # Unplanned restart on Tuesday at 12:02 (wrong day)
+            mock_notifier.send_system_status.reset_mock()
             mock_datetime.now.return_value = datetime(2026, 8, 11, 12, 2, 0)
             manager.on_disconnected()
             await asyncio.sleep(0.01)
-            mock_notifier.send_system_status.assert_called()
+            mock_notifier.send_system_status.assert_called_with(
+                title="VERBINDUNGSABBRUCH",
+                emoji="🚨",
+            )
 
-            # Unplanned restart at 14:00
+            # Unplanned restart on Sunday at 14:00 (wrong time)
             mock_notifier.send_system_status.reset_mock()
-            mock_datetime.now.return_value = datetime(2026, 8, 11, 14, 0, 0)
+            mock_datetime.now.return_value = datetime(2026, 8, 16, 14, 0, 0)
             manager.on_disconnected()
             await asyncio.sleep(0.01)
-            mock_notifier.send_system_status.assert_called()
+            mock_notifier.send_system_status.assert_called_with(
+                title="VERBINDUNGSABBRUCH",
+                emoji="🚨",
+            )
     finally:
         db.close = original_close
 

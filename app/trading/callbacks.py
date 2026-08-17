@@ -864,11 +864,11 @@ class TwsCallbacksManager:
         import datetime as datetime_module
 
         now = datetime_module.datetime.now()
-        is_planned = now.hour == 12 and 0 <= now.minute < 5
+        is_planned = now.weekday() == 6 and now.hour == 12 and 0 <= now.minute < 5
 
         if is_planned:
             logger.info(
-                "Planned daily Gateway restart detected. Suppressing fatal alerts."
+                "Planned weekly Gateway restart detected (Sunday 12:00). Suppressing fatal alerts."
             )
             asyncio.create_task(
                 self.notifier.send_system_status(

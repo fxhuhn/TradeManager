@@ -924,10 +924,10 @@ Um die Stabilität der TCP-Verbindung zur Trader Workstation bzw. zum IB Gateway
 * **Timeout-Überwachung:** Erfolgt innerhalb von `heartbeat_timeout_s` (Standard: 15s) keine Antwort, gilt die API-Verbindung als blockiert ("stalled").
 * **Notfall-Trennung:** Das System sendet einen Telegram-Alarm (`⚠️ HEARTBEAT TIMEOUT | API reagiert nicht`) und ruft `disconnect()` auf. Dies zwingt den Callback-Manager dazu, die automatische Reconnect-Schleife mit exponentiellem Backoff einzuleiten.
 
-#### Behandlung des geplanten Gateway-Neustarts (12:00 Uhr):
-Das parallel ausgeführte `extrange/ibkr-docker` Gateway führt täglich um 12:00 Uhr einen automatischen Neustart durch (Konfiguration: `IBC_AutoRestartTime=12:00`). Das System fängt dies wie folgt ab:
-1. **Heartbeat-Pause:** Im Zeitraum zwischen 12:00 und 12:05 Uhr pausiert die Heartbeat-Schleife ihre Pings, um Fehlalarme während der geplanten Gateway-Offline-Zeit zu verhindern.
-2. **Warnungs-Unterdrückung:** Tritt der Verbindungsabbruch im Zeitraum von 12:00 bis 12:05 Uhr auf, stuft der Callback-Manager dies als geplanten Zustand ein. Es wird kein kritischer Verbindungs-Alarm, sondern eine informative Statusmeldung (`⏳ GEPLANTER NEUSTART`) an Telegram gesendet.
+#### Behandlung des geplanten Gateway-Neustarts (Sonntag 12:00 Uhr):
+Das parallel ausgeführte `extrange/ibkr-docker` Gateway führt wöchentlich am Sonntag um 12:00 Uhr einen automatischen Neustart/Closedown durch (Konfiguration: `ClosedownAt=Sunday 12:00 PM`). Das System fängt dies wie folgt ab:
+1. **Heartbeat-Pause:** Sonntags im Zeitraum zwischen 12:00 und 12:05 Uhr pausiert die Heartbeat-Schleife ihre Pings, um Fehlalarme während der geplanten Gateway-Offline-Zeit zu verhindern.
+2. **Warnungs-Unterdrückung:** Tritt der Verbindungsabbruch an einem Sonntag im Zeitraum von 12:00 bis 12:05 Uhr auf, stuft der Callback-Manager dies als geplanten Zustand ein. Es wird kein kritischer Verbindungs-Alarm, sondern eine informative Statusmeldung (`⏳ GEPLANTER NEUSTART`) an Telegram gesendet.
 3. **Execution Worker Pause:** Während die API-Verbindung getrennt ist (`isConnected() == False`), pausiert der Execution Worker die Verarbeitung neuer Order-Gruppen in der Queue. Er wartet asynchron in einer Schleife und setzt die Ausführung fort, sobald die Verbindung wieder hergestellt ist.
 
 ```mermaid
@@ -1249,7 +1249,7 @@ Wird bei wichtigen Statusänderungen der Anwendung gesendet:
   🚨 <b>IBKR: VERBINDUNGSABBRUCH</b>
   🕒 Time: 21.06.2026 14:22:15
   ```
-* **Geplanter Gateway-Neustart (12:00 Uhr):**
+* **Geplanter Gateway-Neustart (Sonntag 12:00 Uhr):**
   ```html
   ⏳ <b>IBKR: GEPLANTER NEUSTART (Gateway wird neu gestartet)</b>
   🕒 Time: 21.06.2026 12:00:02

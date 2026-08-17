@@ -346,7 +346,7 @@ async def test_heartbeat_ping_timeout_disconnects(test_config: Config) -> None:
 
 @pytest.mark.asyncio
 async def test_heartbeat_paused_during_restart_window(test_config: Config) -> None:
-    """Prüft, dass der Heartbeat-Ping im Restart-Fenster um 12:00 Uhr ausgesetzt wird."""
+    """Prüft, dass der Heartbeat-Ping im Restart-Fenster am Sonntag um 12:00 Uhr ausgesetzt wird."""
     mock_ib = MagicMock()
     mock_ib.isConnected.return_value = True
 
@@ -361,10 +361,11 @@ async def test_heartbeat_paused_during_restart_window(test_config: Config) -> No
         queue=asyncio.Queue(),
     )
 
-    mock_now = dt.datetime(2026, 6, 21, 12, 1, 0)
+    # 1. Sonntag 12:01 Uhr (geplantes Wartungsfenster) -> Heartbeat pausiert
+    mock_now_sunday = dt.datetime(2026, 6, 21, 12, 1, 0)
     with patch("datetime.datetime") as mock_datetime:
         mock_datetime.side_effect = dt.datetime
-        mock_datetime.now.return_value = mock_now
+        mock_datetime.now.return_value = mock_now_sunday
         heartbeat_task = asyncio.create_task(orchestrator.heartbeat_loop())
         await asyncio.sleep(0.15)
         heartbeat_task.cancel()
@@ -376,10 +377,30 @@ async def test_heartbeat_paused_during_restart_window(test_config: Config) -> No
 
     mock_ib.reqCurrentTimeAsync.assert_not_called()
 
+    # 2. Montag 12:01 Uhr (kein Wartungsfenster) -> Heartbeat aktiv
+    mock_now_monday = dt.datetime(2026, 6, 22, 12, 1, 0)
+    future = asyncio.Future()
+    future.set_result(mock_now_monday)
+    mock_ib.reqCurrentTimeAsync.return_value = future
+
+    with patch("datetime.datetime") as mock_datetime:
+        mock_datetime.side_effect = dt.datetime
+        mock_datetime.now.return_value = mock_now_monday
+        heartbeat_task = asyncio.create_task(orchestrator.heartbeat_loop())
+        await asyncio.sleep(0.15)
+        heartbeat_task.cancel()
+
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
+
+    mock_ib.reqCurrentTimeAsync.assert_called()
+
 
 @pytest.mark.asyncio
 async def test_callbacks_planned_restart_disconnected(test_config: Config) -> None:
-    """Prüft, dass das on_disconnected Callback bei einem geplanten Neustart die richtige Benachrichtigung sendet."""
+    """Prüft, dass das on_disconnected Callback nur sonntags um 12:00 Uhr einen geplanten Neustart meldet."""
     mock_ib = MagicMock()
     mock_notifier = MagicMock()
     mock_notifier.send_system_status = AsyncMock(return_value=True)
@@ -395,6 +416,7 @@ async def test_callbacks_planned_restart_disconnected(test_config: Config) -> No
         run_reconnect_callback=AsyncMock(),
     )
 
+    # 1. Sonntag 12:01 Uhr -> Geplanter Neustart
     mock_now_planned = dt.datetime(2026, 6, 21, 12, 1, 0)
     with patch("datetime.datetime") as mock_datetime:
         mock_datetime.side_effect = dt.datetime
@@ -407,6 +429,21 @@ async def test_callbacks_planned_restart_disconnected(test_config: Config) -> No
         emoji="⏳",
     )
 
+    # 2. Montag 12:01 Uhr (Wochentag) -> Unerwarteter Verbindungsabbruch
+    mock_now_weekday = dt.datetime(2026, 6, 22, 12, 1, 0)
+    mock_notifier.send_system_status.reset_mock()
+    with patch("datetime.datetime") as mock_datetime:
+        mock_datetime.side_effect = dt.datetime
+        mock_datetime.now.return_value = mock_now_weekday
+        callbacks_manager.on_disconnected()
+        await asyncio.sleep(0.01)
+
+    mock_notifier.send_system_status.assert_called_with(
+        title="VERBINDUNGSABBRUCH",
+        emoji="🚨",
+    )
+
+    # 3. Sonntag 14:00 Uhr (Falsche Uhrzeit) -> Unerwarteter Verbindungsabbruch
     mock_now_unexpected = dt.datetime(2026, 6, 21, 14, 0, 0)
     mock_notifier.send_system_status.reset_mock()
     with patch("datetime.datetime") as mock_datetime:

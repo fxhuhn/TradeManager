@@ -41,6 +41,9 @@ logger = structlog.get_logger()
 
 # System- und Reconnection-Konstanten
 RECONNECT_DELAYS_SECONDS: tuple[float, ...] = (30.0, 60.0, 120.0, 240.0)
+MAINTENANCE_WINDOW_WEEKDAY: int = (
+    6  # 6 = Sonntag (datetime.weekday: Montag=0, Sonntag=6)
+)
 MAINTENANCE_WINDOW_HOUR: int = 12
 MAINTENANCE_WINDOW_DURATION_MINUTES: int = 5
 
@@ -380,7 +383,7 @@ class TradingSystemOrchestrator:
         """Führt eine einzelne Ausführung des Heartbeat-Pings aus."""
         if self._is_inside_maintenance_window():
             logger.info(
-                f"Inside daily restart window ({MAINTENANCE_WINDOW_HOUR}:00-{MAINTENANCE_WINDOW_HOUR}:0{MAINTENANCE_WINDOW_DURATION_MINUTES}). Pausing heartbeat."
+                f"Inside weekly restart window (Sunday {MAINTENANCE_WINDOW_HOUR}:00-{MAINTENANCE_WINDOW_HOUR}:0{MAINTENANCE_WINDOW_DURATION_MINUTES}). Pausing heartbeat."
             )
             await asyncio.sleep(60.0)
             return
@@ -392,7 +395,7 @@ class TradingSystemOrchestrator:
         await self._send_ping_and_handle_timeout()
 
     def _is_inside_maintenance_window(self) -> bool:
-        """Prüft, ob die aktuelle Uhrzeit im täglichen Restart-Fenster liegt.
+        """Prüft, ob die aktuelle Uhrzeit im wöchentlichen Restart-Fenster (Sonntag 12:00) liegt.
 
         Returns:
             bool: True, falls im Wartungsfenster, andernfalls False.
@@ -400,9 +403,10 @@ class TradingSystemOrchestrator:
         from datetime import datetime
 
         now = datetime.now()
+        is_weekday_matching = now.weekday() == MAINTENANCE_WINDOW_WEEKDAY
         is_hour_matching = now.hour == MAINTENANCE_WINDOW_HOUR
         is_minute_matching = 0 <= now.minute < MAINTENANCE_WINDOW_DURATION_MINUTES
-        return is_hour_matching and is_minute_matching
+        return is_weekday_matching and is_hour_matching and is_minute_matching
 
     async def _send_ping_and_handle_timeout(self) -> None:
         """Sendet einen reqCurrentTime Ping und trennt bei Timeout die Verbindung."""
