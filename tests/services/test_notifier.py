@@ -569,3 +569,58 @@ async def test_send_broker_connection_status_disconnected_and_connected(
     assert "VERBINDUNG ZU BROKER-SERVER WIEDERHERGESTELLT" in msg_connect
     assert "1101" in msg_connect
     assert "Connectivity between CapTrader and TWS has been restored." in msg_connect
+
+
+def test_clean_html_text_removes_br_tags() -> None:
+    """Verifies that _clean_html_text removes <br>, <br/>, <br > tags and handles empty input."""
+    from app.services.notifier import _clean_html_text
+
+    assert _clean_html_text("") == ""
+    assert (
+        _clean_html_text("PLEASE LOGIN <br>AND VERIFY<br/>USING TOKEN<BR />NOW")
+        == "PLEASE LOGIN AND VERIFY USING TOKEN NOW"
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_message_html_parse_error_fallback(mock_config: MagicMock) -> None:
+    """Verifies that send_message retries with plain text when Telegram returns 400 HTML parse error."""
+    notifier = TelegramNotifier(mock_config)
+
+    mock_error_response = AsyncMock()
+    mock_error_response.status = 400
+    mock_error_response.text.return_value = '{"ok":false,"error_code":400,"description":"Bad Request: can\'t parse entities"}'
+
+    mock_success_response = AsyncMock()
+    mock_success_response.status = 200
+
+    mock_post_context_1 = MagicMock()
+    mock_post_context_1.__aenter__ = AsyncMock(return_value=mock_error_response)
+    mock_post_context_1.__aexit__ = AsyncMock(return_value=False)
+
+    mock_post_context_2 = MagicMock()
+    mock_post_context_2.__aenter__ = AsyncMock(return_value=mock_success_response)
+    mock_post_context_2.__aexit__ = AsyncMock(return_value=False)
+
+    mock_session = AsyncMock()
+    mock_session.post = MagicMock(
+        side_effect=[mock_post_context_1, mock_post_context_2]
+    )
+
+    mock_client_session_context = MagicMock()
+    mock_client_session_context.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_client_session_context.__aexit__ = AsyncMock(return_value=False)
+
+    with (
+        patch("aiohttp.ClientSession", return_value=mock_client_session_context),
+        patch.object(notifier.limiter, "wait", new_callable=AsyncMock),
+    ):
+        result = await notifier.send_message(
+            "<b>Header</b>\n<i>Some <unsupported>text</i>"
+        )
+
+        assert result is True
+        assert mock_session.post.call_count == 2
+        second_call_payload = mock_session.post.call_args_list[1][1]["json"]
+        assert "parse_mode" not in second_call_payload
+        assert second_call_payload["text"] == "Header\nSome text"

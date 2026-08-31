@@ -12,6 +12,7 @@ Siehe Datenfluss- und Architekturzusammenhang in app.core.models.
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Awaitable, Callable, Coroutine
 from datetime import date, datetime
 from decimal import Decimal
@@ -609,11 +610,14 @@ class TwsCallbacksManager:
 
         symbol = order_row["symbol"] if order_row else "Unbekannt"
         bracket_role = order_row["bracket_role"] if order_row else "-"
+        clean_error_string = re.sub(
+            r"[ \t]+", " ", re.sub(r"(?i)<br\s*/?>", " ", error_string)
+        ).strip()
 
         await self.notifier.send_order_failed(
             order_id=request_id,
             tws_code=error_code,
-            reason=error_string,
+            reason=clean_error_string,
             symbol=symbol,
             bracket_role=bracket_role,
             is_fatal=False,
@@ -836,8 +840,10 @@ class TwsCallbacksManager:
         symbol = order_row["symbol"] if order_row else "Unbekannt"
         bracket_role = order_row["bracket_role"] if order_row else "-"
 
-        reason = error_string
-        reason_upper = error_string.upper()
+        clean_error_string = re.sub(
+            r"[ \t]+", " ", re.sub(r"(?i)<br\s*/?>", " ", error_string)
+        ).strip()
+        reason_upper = clean_error_string.upper()
         if (
             "LOGIN TO CLIENT PORTAL" in reason_upper
             or "VERIFY USING THE TOKEN" in reason_upper
@@ -846,8 +852,10 @@ class TwsCallbacksManager:
         ):
             reason = (
                 f"🔑 ANMELDUNG/VERIFIZIERUNG ERFORDERLICH: IBKR/CapTrader verlangt "
-                f"Token-Bestätigung im Client Portal! Details: {error_string}"
+                f"Token-Bestätigung im Client Portal! Details: {clean_error_string}"
             )
+        else:
+            reason = clean_error_string
 
         await self.notifier.send_order_failed(
             order_id=request_id,

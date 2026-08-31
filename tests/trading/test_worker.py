@@ -1182,3 +1182,59 @@ async def test_exit_order_db_exception_handlers(test_config: Config) -> None:
     )
 
     assert mock_notifier.send_importer_info.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_handle_order_rejection_token_verification_with_br_tags(
+    db, test_config: Config
+) -> None:
+    """Verifies that _handle_order_rejection detects token verification and strips <br> tags."""
+    from app.trading.worker import _handle_order_rejection
+
+    order_row = OrderRow(
+        order_id=1272,
+        perm_id=0,
+        parent_id=None,
+        trade_group_id="1396_DipBuyer_UAL",
+        account_id="U19605236",
+        bracket_role="ENTRY",
+        symbol="UAL",
+        sec_type="STK",
+        exchange="SMART",
+        action="BUY",
+        quantity=56,
+        order_type="LMT",
+        target_price=Decimal("106.88"),
+        tif="GTC",
+        strategy_name="DipBuyer",
+        status="Submitted",
+    )
+
+    mock_trade = MagicMock()
+    mock_trade.orderStatus.status = "Inactive"
+    log_err = MagicMock()
+    log_err.errorCode = 201
+    log_err.message = (
+        "Order rejected - reason:BEFORE WE CAN ACCEPT YOUR ORDER IN THIS SECURITY, "
+        "PLEASE LOGIN TO CLIENT PORTAL AND VERIFY USING THE TOKEN WE <br>EMAILED TO YOU."
+    )
+    log_err.status = "Inactive"
+    mock_trade.log = [log_err]
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock(return_value=True)
+
+    result = await _handle_order_rejection(
+        db, mock_trade, order_row, 1272, mock_notifier
+    )
+
+    assert result is False
+    mock_notifier.send_order_failed.assert_called_once()
+    call_kwargs = mock_notifier.send_order_failed.call_args[1]
+    assert call_kwargs["order_id"] == 1272
+    assert call_kwargs["tws_code"] == 201
+    assert call_kwargs["symbol"] == "UAL"
+    assert call_kwargs["is_fatal"] is True
+    assert "ANMELDUNG/VERIFIZIERUNG ERFORDERLICH" in call_kwargs["reason"]
+    assert "<br>" not in call_kwargs["reason"]
+    assert "TOKEN WE EMAILED TO YOU" in call_kwargs["reason"]

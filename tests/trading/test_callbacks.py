@@ -1355,13 +1355,23 @@ async def test_on_error_dispatches_and_fail_order(db, mock_config: Config) -> No
             await asyncio.sleep(0.01)
             mock_cancel.assert_called_once_with(20, 202, "Order cancelled")
 
-        # FATAL code (token error string test)
+        # FATAL code (token error string test with <br>)
         await manager._fail_order_in_db(
-            50, 504, "VERIFY USING THE TOKEN IN CLIENT PORTAL"
+            50, 504, "VERIFY USING THE TOKEN <br>IN CLIENT PORTAL"
         )
         mock_notifier.send_order_failed.assert_called_once()
         failed_reason = mock_notifier.send_order_failed.call_args[1]["reason"]
         assert "ANMELDUNG/VERIFIZIERUNG ERFORDERLICH" in failed_reason
+        assert "<br>" not in failed_reason
+        assert "TOKEN IN CLIENT PORTAL" in failed_reason
+
+        # CANCEL code with <br>
+        mock_notifier.send_order_failed.reset_mock()
+        await manager._cancel_order_in_db(50, 202, "Order cancelled <br>by system")
+        mock_notifier.send_order_failed.assert_called_once()
+        cancel_reason = mock_notifier.send_order_failed.call_args[1]["reason"]
+        assert "<br>" not in cancel_reason
+        assert cancel_reason == "Order cancelled by system"
     finally:
         db.close = original_close
 

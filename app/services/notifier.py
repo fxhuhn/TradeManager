@@ -24,6 +24,15 @@ def _strip_html(text: str) -> str:
     return re.sub(r"<[^>]+>", "", text)
 
 
+def _clean_html_text(text: str) -> str:
+    """Removes or converts unsupported HTML tags (like <br>) from text before formatting into Telegram HTML."""
+    if not text:
+        return ""
+    # Convert <br>, <br/>, <br /> into space and collapse extra spaces
+    cleaned = re.sub(r"(?i)<br\s*/?>", " ", text)
+    return re.sub(r"[ \t]+", " ", cleaned).strip()
+
+
 def _format_slippage_line(
     limit_price: Decimal | None,
     execution_price: Decimal | None,
@@ -132,6 +141,39 @@ class TelegramNotifier:
                         return True
                     else:
                         response_text = await response.text()
+                        if response.status == 400 and (
+                            "can't parse entities" in response_text.lower()
+                            or "unsupported start tag" in response_text.lower()
+                        ):
+                            logger.warning(
+                                "Telegram HTML parse error, retrying with plain text fallback",
+                                status=response.status,
+                                response=response_text,
+                            )
+                            plain_text = _strip_html(text)
+                            plain_payload: dict[str, Any] = {
+                                "chat_id": self.chat_id,
+                                "text": plain_text,
+                                "disable_web_page_preview": True,
+                            }
+                            async with session.post(
+                                url, json=plain_payload, timeout=request_timeout
+                            ) as retry_response:
+                                if retry_response.status == 200:
+                                    logger.info(
+                                        "Telegram Alert sent (plain text fallback)",
+                                        length=len(plain_text),
+                                    )
+                                    return True
+                                else:
+                                    retry_text = await retry_response.text()
+                                    logger.error(
+                                        "Telegram plain text fallback failed",
+                                        status=retry_response.status,
+                                        response=retry_text,
+                                    )
+                                    return False
+
                         logger.error(
                             "Telegram API returned error",
                             status=response.status,
@@ -164,11 +206,12 @@ class TelegramNotifier:
             emoji = "🚨"
             title = "VERBINDUNG ZU BROKER-SERVER UNTERBROCHEN (TWS offline)"
 
+        clean_details = _clean_html_text(details)
         message = (
             f"{emoji} <b>IBKR: {title}</b>\n"
             f"🕒 Time: {now_str}\n"
             f"├─ <b>Fehlercode:</b> <code>{error_code}</code>\n"
-            f"└─ <b>Details:</b> <i>{details}</i>"
+            f"└─ <b>Details:</b> <i>{clean_details}</i>"
         )
         return await self.send_message(message)
 
@@ -234,12 +277,13 @@ class TelegramNotifier:
         """Sendet eine Fehler/Warnmeldung für eine fehlgeschlagene oder stornierte Order."""
         emoji = "🚨" if is_fatal else "🚫"
         title = "ORDER FEHLGESCHLAGEN" if is_fatal else "ORDER CANCELED"
+        clean_reason = _clean_html_text(reason)
 
         message = (
             f"{emoji} <b>{title}</b> | <code>ID: {order_id}</code>\n"
             f"├─ <b>Symbol/Typ:</b> <code>{symbol}</code> ({bracket_role})\n"
             f"├─ <b>TWS-Code:</b> <code>{tws_code}</code>\n"
-            f"└─ <b>Grund:</b> <i>{reason}</i>"
+            f"└─ <b>Grund:</b> <i>{clean_reason}</i>"
         )
         return await self.send_message(message)
 
@@ -274,10 +318,11 @@ class TelegramNotifier:
         title: str = "DATEN IMPORT",
     ) -> bool:
         """Sendet eine Info-Meldung über importierte Daten oder Validierungsfehler."""
+        clean_details = _clean_html_text(details)
         message = (
             f"{emoji} <b>{title}</b> | <code>{file_name}</code>\n"
             f"├─ <b>Status:</b> <code>{status}</code>\n"
-            f"└─ <b>Details:</b> <i>{details}</i>"
+            f"└─ <b>Details:</b> <i>{clean_details}</i>"
         )
         return await self.send_message(message)
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import re
 from collections.abc import Awaitable, Callable
 from decimal import Decimal, InvalidOperation
 from typing import Final
@@ -714,9 +715,12 @@ async def _handle_order_rejection(
             (tws_order_id,),
         )
 
-    reason_upper = error_msg.upper()
+    clean_error_msg = re.sub(
+        r"[ \t]+", " ", re.sub(r"(?i)<br\s*/?>", " ", error_msg)
+    ).strip()
+    reason_upper = clean_error_msg.upper()
     if "Read-Only mode" in error_msg or "321" in error_msg or tws_code == 321:
-        formatted_reason = f"API im READ-ONLY Modus. Details: {error_msg}"
+        formatted_reason = f"API im READ-ONLY Modus. Details: {clean_error_msg}"
         is_fatal = True
         code = 321
     elif (
@@ -727,12 +731,12 @@ async def _handle_order_rejection(
     ):
         formatted_reason = (
             f"🔑 ANMELDUNG/VERIFIZIERUNG ERFORDERLICH: IBKR/CapTrader verlangt "
-            f"Token-Bestätigung im Client Portal! Details: {error_msg}"
+            f"Token-Bestätigung im Client Portal! Details: {clean_error_msg}"
         )
         is_fatal = True
         code = 201 if tws_code == 0 else tws_code
     else:
-        formatted_reason = error_msg
+        formatted_reason = clean_error_msg
         is_fatal = False
         code = tws_code
 
