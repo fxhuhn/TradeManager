@@ -117,7 +117,7 @@ def _to_int(val: object, default: int = 0) -> int:
 def _to_float(val: object, default: float = 0.0) -> float:
     if val is None:
         return default
-    if isinstance(val, (float, int)):
+    if isinstance(val, float | int):
         return float(val)
     return float(str(val))
 

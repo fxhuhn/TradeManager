@@ -64,7 +64,7 @@ def extract_public_definitions(source_dir: Path) -> set[str]:
                     if isinstance(node, ast.ClassDef):
                         if not node.name.startswith("_"):
                             public_definitions.add(node.name)
-                    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
                         if not node.name.startswith("_"):
                             public_definitions.add(node.name)
 
