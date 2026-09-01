@@ -167,47 +167,78 @@ class TwsCallbacksManager:
         return self._order_locks[order_id]
 
     async def _update_order_status_db(
-        self, order_id: int, status: str, permanent_id: int
-    ) -> None:
-        """Schreibt das Status-Update atomar in die Datenbank."""
+        self,
+        order_id: int,
+        status: str,
+        permanent_id: int,
+        event_symbol: str | None = None,
+        event_sec_type: str | None = None,
+    ) -> bool:
+        """Schreibt das Status-Update atomar in die Datenbank.
+
+        Gibt True zurück, wenn die Statusaktualisierung erfolgreich durchgeführt wurde.
+        Gibt False zurück bei Nichtexistenz, Symbol-Mismatch (ID-Kollision) oder bereits terminalem Zustand.
+        """
         db = await self.db_factory()
         try:
             async with transaction(db):
-                # Aktuellen Status abfragen, um ungültige Zustandsübergänge zu verhindern
+                # Aktuellen Status und Vertragsmetadaten abfragen
                 async with db.execute(
-                    "SELECT status FROM orders WHERE order_id = ?", (order_id,)
+                    "SELECT status, symbol, sec_type FROM orders WHERE order_id = ?",
+                    (order_id,),
                 ) as cursor:
                     row = await cursor.fetchone()
 
-                if row:
-                    current_status = row["status"]
+                if not row:
+                    logger.debug(
+                        "Order not found in database for status update",
+                        order_id=order_id,
+                        status=status,
+                    )
+                    return False
 
-                    # Terminale Zustände dürfen nicht überschrieben werden
-                    if current_status in ("Filled", "Cancelled"):
-                        logger.debug(
-                            "Ignoring status update for order in terminal state",
-                            order_id=order_id,
-                            current_status=current_status,
-                            new_status=status,
-                        )
-                        return
+                current_status = row["status"]
+                db_symbol = row["symbol"]
+                db_sec_type = row["sec_type"]
 
-                    # Ein Fehler-Status darf einen aktiven Zustand nicht überschreiben
-                    if status == "Error" and current_status in (
-                        "PreSubmitted",
-                        "Submitted",
-                    ):
-                        logger.info(
-                            "Ignoring error status update for active order (likely warning/ValidationError)",
-                            order_id=order_id,
-                            current_status=current_status,
+                # Plausibilitätsprüfung: Symbol-Mismatch verhindert ID-Kollisionen aus fremden TWS-Sessions/Clients
+                if event_symbol is not None and event_symbol != db_symbol:
+                    logger.warning(
+                        "Ignoring order status update due to symbol mismatch (ID collision)",
+                        order_id=order_id,
+                        event_symbol=event_symbol,
+                        db_symbol=db_symbol,
+                        event_sec_type=event_sec_type,
+                        db_sec_type=db_sec_type,
+                    )
+                    return False
+
+                # Terminale Zustände dürfen nicht überschrieben werden
+                if current_status in ("Filled", "Cancelled"):
+                    logger.debug(
+                        "Ignoring status update for order in terminal state",
+                        order_id=order_id,
+                        current_status=current_status,
+                        new_status=status,
+                    )
+                    return False
+
+                # Ein Fehler-Status darf einen aktiven Zustand nicht überschreiben
+                if status == "Error" and current_status in (
+                    "PreSubmitted",
+                    "Submitted",
+                ):
+                    logger.info(
+                        "Ignoring error status update for active order (likely warning/ValidationError)",
+                        order_id=order_id,
+                        current_status=current_status,
+                    )
+                    if permanent_id:
+                        await db.execute(
+                            "UPDATE orders SET perm_id = ? WHERE order_id = ?",
+                            (permanent_id, order_id),
                         )
-                        if permanent_id:
-                            await db.execute(
-                                "UPDATE orders SET perm_id = ? WHERE order_id = ?",
-                                (permanent_id, order_id),
-                            )
-                        return
+                    return False
 
                 await db.execute(
                     "UPDATE orders SET status = ?, perm_id = ? WHERE order_id = ?",
@@ -216,12 +247,14 @@ class TwsCallbacksManager:
                 logger.debug(
                     "Order status updated in database", order_id=order_id, status=status
                 )
+                return True
         except Exception as exception:
             logger.error(
                 "Error updating order status in database",
                 order_id=order_id,
                 error=str(exception),
             )
+            return False
         finally:
             await db.close()
 
@@ -253,10 +286,17 @@ class TwsCallbacksManager:
         )
 
         avg_fill_price = trade.orderStatus.avgFillPrice if trade.orderStatus else None
+        event_symbol = trade.contract.symbol if trade.contract else None
+        event_sec_type = trade.contract.secType if trade.contract else None
 
         asyncio.create_task(
             self._process_status_change(
-                order_id, mapped_status, permanent_id, avg_fill_price
+                order_id,
+                mapped_status,
+                permanent_id,
+                avg_fill_price=avg_fill_price,
+                event_symbol=event_symbol,
+                event_sec_type=event_sec_type,
             )
         )
 
@@ -266,12 +306,20 @@ class TwsCallbacksManager:
         mapped_status: str,
         permanent_id: int,
         avg_fill_price: float | None = None,
+        event_symbol: str | None = None,
+        event_sec_type: str | None = None,
     ) -> None:
         """Verarbeitet Statusänderung asynchron und triggert ggf. Settlement."""
         async with self._get_order_lock(order_id):
-            await self._update_order_status_db(order_id, mapped_status, permanent_id)
+            updated = await self._update_order_status_db(
+                order_id,
+                mapped_status,
+                permanent_id,
+                event_symbol=event_symbol,
+                event_sec_type=event_sec_type,
+            )
 
-        if mapped_status != "Filled":
+        if not updated or mapped_status != "Filled":
             return
 
         db = await self.db_factory()
@@ -364,6 +412,7 @@ class TwsCallbacksManager:
                 qty,
                 currency,
                 executed_at,
+                symbol=symbol,
                 trade=trade,
                 fill=fill,
             )
@@ -377,26 +426,29 @@ class TwsCallbacksManager:
         qty: Decimal,
         currency: str,
         executed_at: object,
+        symbol: str | None = None,
         trade: object = None,
         fill: object = None,
     ) -> None:
         """Speichert ein Ausführungsdetail in der executions-Tabelle."""
         db = await self.db_factory()
         try:
-            # Überprüfen, ob die Order in unserer DB existiert (verhindert FK-Fehler bei TWS-manuellen Orders)
+            # Überprüfen, ob die Order in unserer DB existiert und das Symbol übereinstimmt
             async with db.execute(
-                "SELECT 1 FROM orders WHERE order_id = ?", (order_id,)
+                "SELECT symbol FROM orders WHERE order_id = ?", (order_id,)
             ) as cursor:
-                exists = await cursor.fetchone()
+                order_row = await cursor.fetchone()
 
-            if not exists:
+            if not order_row or (symbol is not None and order_row["symbol"] != symbol):
                 if trade is not None and fill is not None:
                     handle_unassigned_execution(trade, fill)
                 else:
                     logger.warning(
-                        "Unassigned execution received (order not found in local DB)",
+                        "Unassigned execution received (order not found or symbol mismatch in local DB)",
                         order_id=order_id,
                         exec_id=exec_id,
+                        event_symbol=symbol,
+                        db_symbol=order_row["symbol"] if order_row else None,
                     )
                 return
 

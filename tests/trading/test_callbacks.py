@@ -1052,6 +1052,8 @@ async def test_on_order_status_dispatches_task(mock_config: Config) -> None:
     mock_trade.orderStatus.status = "Filled"
     mock_trade.orderStatus.permId = 888
     mock_trade.orderStatus.avgFillPrice = 120.50
+    mock_trade.contract.symbol = "AAPL"
+    mock_trade.contract.secType = "STK"
 
     manager = TwsCallbacksManager(
         db_factory=AsyncMock(),
@@ -1067,7 +1069,14 @@ async def test_on_order_status_dispatches_task(mock_config: Config) -> None:
     with patch.object(manager, "_process_status_change", AsyncMock()) as mock_process:
         manager.on_order_status(mock_trade)
         await asyncio.sleep(0.02)
-        mock_process.assert_called_once_with(55, "Filled", 888, 120.50)
+        mock_process.assert_called_once_with(
+            55,
+            "Filled",
+            888,
+            avg_fill_price=120.50,
+            event_symbol="AAPL",
+            event_sec_type="STK",
+        )
 
 
 @pytest.mark.asyncio
@@ -1105,6 +1114,7 @@ async def test_on_exec_details_dispatches_task(mock_config: Config) -> None:
             Decimal("5.0"),
             "USD",
             "2026-07-24",
+            symbol="AAPL",
             trade=mock_trade,
             fill=mock_fill,
         )
@@ -1234,18 +1244,39 @@ async def test_callbacks_additional_coverage_branches(mock_config: Config) -> No
     with patch.object(manager, "_process_status_change", AsyncMock()) as mock_process:
         manager.on_order_status(trade_presubmitted)
         await asyncio.sleep(0.01)
-        mock_process.assert_called_with(100, "PreSubmitted", 999, 0.0)
+        mock_process.assert_called_with(
+            100,
+            "PreSubmitted",
+            999,
+            avg_fill_price=0.0,
+            event_symbol=trade_presubmitted.contract.symbol,
+            event_sec_type=trade_presubmitted.contract.secType,
+        )
 
         manager.on_order_status(trade_inactive)
         await asyncio.sleep(0.01)
-        mock_process.assert_called_with(101, "Cancelled", 111, 0.0)
+        mock_process.assert_called_with(
+            101,
+            "Cancelled",
+            111,
+            avg_fill_price=0.0,
+            event_symbol=trade_inactive.contract.symbol,
+            event_sec_type=trade_inactive.contract.secType,
+        )
 
         manager.on_order_status(trade_unknown)
         await asyncio.sleep(0.01)
-        mock_process.assert_called_with(102, "Error", 222, 0.0)
+        mock_process.assert_called_with(
+            102,
+            "Error",
+            222,
+            avg_fill_price=0.0,
+            event_symbol=trade_unknown.contract.symbol,
+            event_sec_type=trade_unknown.contract.secType,
+        )
 
     # 3. _process_status_change non-filled status return early
-    with patch.object(manager, "_update_order_status_db", AsyncMock()):
+    with patch.object(manager, "_update_order_status_db", AsyncMock(return_value=True)):
         await manager._process_status_change(100, "Submitted", 999)
 
     # 4. _process_status_change missing order_row and exception handler
@@ -1259,18 +1290,19 @@ async def test_callbacks_additional_coverage_branches(mock_config: Config) -> No
     async def db_factory_empty():
         return db_empty
 
-    manager.db_factory = db_factory_empty
-    await manager._process_status_change(100, "Filled", 999)
+    with patch.object(manager, "_update_order_status_db", AsyncMock(return_value=True)):
+        manager.db_factory = db_factory_empty
+        await manager._process_status_change(100, "Filled", 999)
 
-    db_err_process = AsyncMock()
-    db_err_process.execute.side_effect = RuntimeError("Process DB error")
-    db_err_process.close = AsyncMock()
+        db_err_process = AsyncMock()
+        db_err_process.execute.side_effect = RuntimeError("Process DB error")
+        db_err_process.close = AsyncMock()
 
-    async def db_factory_err_process():
-        return db_err_process
+        async def db_factory_err_process():
+            return db_err_process
 
-    manager.db_factory = db_factory_err_process
-    await manager._process_status_change(100, "Filled", 999)
+        manager.db_factory = db_factory_err_process
+        await manager._process_status_change(100, "Filled", 999)
 
     # 5. _save_execution without trade/fill and exception handler
     manager.db_factory = db_factory_empty
@@ -1533,7 +1565,9 @@ async def test_callbacks_final_missing_lines(db, mock_config: Config) -> None:
 
     try:
         # 1. _process_status_change when order_id 88888 does not exist in DB (line 287)
-        with patch.object(manager, "_update_order_status_db", AsyncMock()):
+        with patch.object(
+            manager, "_update_order_status_db", AsyncMock(return_value=True)
+        ):
             await manager._process_status_change(88888, "Filled", 7777)
 
         # 2. _save_execution when order_id 88888 does not exist in DB
@@ -1564,5 +1598,166 @@ async def test_callbacks_final_missing_lines(db, mock_config: Config) -> None:
             trade=None,
             fill=None,
         )
+    finally:
+        db.close = original_close
+
+
+@pytest.mark.asyncio
+async def test_update_order_status_db_ignores_symbol_mismatch(
+    db, mock_config: Config
+) -> None:
+    """Verifies _update_order_status_db aborts and logs warning if event symbol does not match DB."""
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=MagicMock(),
+        notifier=MagicMock(),
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    try:
+        # Arrange: create TSLA order in DB
+        await db.execute(
+            """
+            INSERT INTO orders (order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name, status)
+            VALUES (21, 1001, NULL, 'G1', 'U123', 'ENTRY', 'TSLA', 'STK', 'SMART', 'BUY', 4, 'MKT', NULL, 'DAY', 'Strat', 'PreSubmitted')
+            """
+        )
+        await db.commit()
+
+        # Act: incoming status for MES
+        result = await manager._update_order_status_db(
+            21, "Filled", 1001, event_symbol="MES", event_sec_type="FUT"
+        )
+
+        # Assert: rejected due to symbol mismatch
+        assert result is False
+
+        # Verify DB status is unchanged
+        async with db.execute(
+            "SELECT status FROM orders WHERE order_id = 21"
+        ) as cursor:
+            row = await cursor.fetchone()
+            assert row["status"] == "PreSubmitted"
+    finally:
+        db.close = original_close
+
+
+@pytest.mark.asyncio
+async def test_process_status_change_ignores_symbol_mismatch_and_sends_no_alert(
+    db, mock_config: Config
+) -> None:
+    """Verifies _process_status_change sends no Telegram alert and triggers no settlement on symbol mismatch."""
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_filled = AsyncMock()
+    mock_trigger_settlement = AsyncMock()
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=MagicMock(),
+        notifier=mock_notifier,
+        config=mock_config,
+        trigger_settlement_callback=mock_trigger_settlement,
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    try:
+        # Arrange: create TSLA exit order in DB
+        await db.execute(
+            """
+            INSERT INTO orders (order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name, status)
+            VALUES (21, 1001, NULL, 'G1', 'U123', 'EXIT', 'TSLA', 'STK', 'SMART', 'SELL', 4, 'MKT', NULL, 'DAY', 'Strat', 'PreSubmitted')
+            """
+        )
+        await db.commit()
+
+        # Act: process status change with symbol mismatch
+        await manager._process_status_change(
+            21,
+            "Filled",
+            1001,
+            avg_fill_price=7700.25,
+            event_symbol="MES",
+            event_sec_type="FUT",
+        )
+
+        # Assert: no notification and no settlement triggered
+        mock_notifier.send_order_filled.assert_not_called()
+        mock_trigger_settlement.assert_not_called()
+    finally:
+        db.close = original_close
+
+
+@pytest.mark.asyncio
+async def test_save_execution_ignores_symbol_mismatch(db, mock_config: Config) -> None:
+    """Verifies _save_execution does not save execution when symbol mismatches DB order."""
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=MagicMock(),
+        notifier=MagicMock(),
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    try:
+        # Arrange: create TSLA order in DB
+        await db.execute(
+            """
+            INSERT INTO orders (order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name, status)
+            VALUES (21, 1001, NULL, 'G1', 'U123', 'ENTRY', 'TSLA', 'STK', 'SMART', 'BUY', 4, 'MKT', NULL, 'DAY', 'Strat', 'PreSubmitted')
+            """
+        )
+        await db.commit()
+
+        mock_trade = MagicMock()
+        mock_fill = MagicMock()
+
+        # Act: save execution with mismatched symbol
+        with patch("app.trading.callbacks.handle_unassigned_execution") as mock_handle:
+            await manager._save_execution(
+                "EXEC_MES_1",
+                21,
+                Decimal("7700.25"),
+                Decimal("1.0"),
+                "USD",
+                "2026-08-31T21:59:00+00:00",
+                symbol="MES",
+                trade=mock_trade,
+                fill=mock_fill,
+            )
+            mock_handle.assert_called_once_with(mock_trade, mock_fill)
+
+        # Assert: no execution inserted in DB
+        async with db.execute(
+            "SELECT COUNT(*) as count FROM executions WHERE order_id = 21"
+        ) as cursor:
+            row = await cursor.fetchone()
+            assert row["count"] == 0
     finally:
         db.close = original_close
