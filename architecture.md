@@ -200,6 +200,7 @@ This section provides a detailed reference of all public classes and functions i
 
 ### 4.11 Module: `app.trading.order_builder`
 - `normalize_symbol` (Function): Normalizes asset symbols by stripping exchange suffixes (e.g., `.DE`).
+- `symbols_match` (Function): Robustly verifies whether two symbols match after normalization.
 - `make_stock_contract` (Function): Instantiates Stock contract structures for TWS.
 - `get_tick_size` (Function): Returns minimum tick movement of given stock asset.
 - `round_to_tick` (Function): Snaps limit prices to valid tick offsets.

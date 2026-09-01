@@ -33,6 +33,25 @@ def normalize_symbol(symbol: str) -> str:
     return cleaned_symbol.replace("-", " ").replace(".", " ")
 
 
+def symbols_match(symbol_a: str | None, symbol_b: str | None) -> bool:
+    """Prüft, ob zwei Aktiensymbole nach Normalisierung identisch sind.
+
+    Gibt True zurück, wenn beide Symbole nach Bereinigung von Börsensuffixen
+    und US-Share-Class-Trennzeichen übereinstimmen. Wenn mindestens ein Symbol
+    None oder leer ist, wird True zurückgegeben.
+
+    Args:
+        symbol_a: Erstes Symbol (z. B. aus TWS-Event).
+        symbol_b: Zweites Symbol (z. B. aus lokaler DB).
+
+    Returns:
+        True bei Übereinstimmung oder fehlendem Vergleichswert, sonst False.
+    """
+    if not symbol_a or not symbol_b:
+        return True
+    return normalize_symbol(symbol_a) == normalize_symbol(symbol_b)
+
+
 def make_stock_contract(symbol: str) -> Stock:
     """Erstellt ein TWS-konformes Aktien-Vertragsobjekt via SMART-Routing."""
     clean_symbol = normalize_symbol(symbol)

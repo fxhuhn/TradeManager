@@ -13,6 +13,7 @@ from app.trading.order_builder import (
     make_stock_contract,
     normalize_symbol,
     round_to_tick,
+    symbols_match,
 )
 from app.trading.recovery import _has_live_position
 from app.trading.worker import _get_live_position_quantity
@@ -38,6 +39,42 @@ def test_normalize_symbol_converts_us_share_class_separators() -> None:
     assert normalize_symbol("BRK-B") == "BRK B"
     assert normalize_symbol("BRK.B") == "BRK B"
     assert normalize_symbol("  bf-b  ") == "BF B"
+
+
+def test_symbols_match_identical_and_case_insensitive() -> None:
+    """Verifies that symbols_match handles identical and mixed-case symbols."""
+    assert symbols_match("AAPL", "AAPL") is True
+    assert symbols_match("aapl", "AAPL") is True
+    assert symbols_match("MSFT", "msft") is True
+
+
+def test_symbols_match_with_exchange_suffixes() -> None:
+    """Verifies that symbols_match correctly equates symbols with .DE suffix to clean symbols."""
+    assert symbols_match("SXRV", "SXRV.DE") is True
+    assert symbols_match("SXRV.DE", "SXRV") is True
+    assert symbols_match("sxrv", "SXRV.DE") is True
+
+
+def test_symbols_match_with_share_classes() -> None:
+    """Verifies that symbols_match matches US share classes with dots, hyphens, and spaces."""
+    assert symbols_match("BRK B", "BRK.B") is True
+    assert symbols_match("BRK-B", "BRK B") is True
+    assert symbols_match("BF-B", "BF.B") is True
+
+
+def test_symbols_match_with_different_symbols() -> None:
+    """Verifies that symbols_match returns False for distinct symbols."""
+    assert symbols_match("AAPL", "MSFT") is False
+    assert symbols_match("SXRV.DE", "EXS1.DE") is False
+    assert symbols_match("BRK.A", "BRK.B") is False
+
+
+def test_symbols_match_with_none_or_empty() -> None:
+    """Verifies that symbols_match returns True when either argument is None or empty."""
+    assert symbols_match(None, "AAPL") is True
+    assert symbols_match("AAPL", None) is True
+    assert symbols_match(None, None) is True
+    assert symbols_match("", "AAPL") is True
 
 
 def test_make_stock_contract_with_dot_de_suffix() -> None:

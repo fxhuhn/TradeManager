@@ -28,6 +28,7 @@ from app.core.db import transaction
 from app.core.models import parse_positive_decimal
 from app.services.notifier import TelegramNotifier
 from app.trading.error_codes import ErrorClass, classify_error_code
+from app.trading.order_builder import symbols_match
 
 logger = structlog.get_logger()
 
@@ -202,7 +203,9 @@ class TwsCallbacksManager:
                 db_sec_type = row["sec_type"]
 
                 # Plausibilitätsprüfung: Symbol-Mismatch verhindert ID-Kollisionen aus fremden TWS-Sessions/Clients
-                if event_symbol is not None and event_symbol != db_symbol:
+                if event_symbol is not None and not symbols_match(
+                    event_symbol, db_symbol
+                ):
                     logger.warning(
                         "Ignoring order status update due to symbol mismatch (ID collision)",
                         order_id=order_id,
@@ -439,7 +442,9 @@ class TwsCallbacksManager:
             ) as cursor:
                 order_row = await cursor.fetchone()
 
-            if not order_row or (symbol is not None and order_row["symbol"] != symbol):
+            if not order_row or (
+                symbol is not None and not symbols_match(symbol, order_row["symbol"])
+            ):
                 if trade is not None and fill is not None:
                     handle_unassigned_execution(trade, fill)
                 else:

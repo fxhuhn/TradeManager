@@ -1761,3 +1761,113 @@ async def test_save_execution_ignores_symbol_mismatch(db, mock_config: Config) -
             assert row["count"] == 0
     finally:
         db.close = original_close
+
+
+@pytest.mark.asyncio
+async def test_update_order_status_accepts_normalized_symbol_match_dot_de(
+    db, mock_config: Config
+) -> None:
+    """Verifies _update_order_status accepts status updates when DB symbol has .DE suffix and event has clean symbol."""
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=MagicMock(),
+        notifier=MagicMock(),
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    try:
+        # Arrange: create SXRV.DE exit order in DB
+        await db.execute(
+            """
+            INSERT INTO orders (order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name, status)
+            VALUES (1356, 2001, NULL, 'G_SXRV', 'U123', 'EXIT', 'SXRV.DE', 'STK', 'SMART', 'SELL', 5, 'LMT', 145.5, 'DAY', 'TwoPercent', 'Submitted')
+            """
+        )
+        await db.commit()
+
+        # Act: process status update with clean symbol 'SXRV' from TWS
+        result = await manager._update_order_status_db(
+            1356,
+            "Cancelled",
+            2001,
+            event_symbol="SXRV",
+            event_sec_type="STK",
+        )
+
+        # Assert: accepted because normalize_symbol('SXRV.DE') == normalize_symbol('SXRV')
+        assert result is True
+
+        # Verify DB status is updated to Cancelled
+        async with db.execute(
+            "SELECT status FROM orders WHERE order_id = 1356"
+        ) as cursor:
+            row = await cursor.fetchone()
+            assert row["status"] == "Cancelled"
+    finally:
+        db.close = original_close
+
+
+@pytest.mark.asyncio
+async def test_save_execution_accepts_normalized_symbol_match_dot_de(
+    db, mock_config: Config
+) -> None:
+    """Verifies _save_execution persists execution when DB symbol is SXRV.DE and event symbol is SXRV."""
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=MagicMock(),
+        notifier=MagicMock(),
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    try:
+        # Arrange: create SXRV.DE order in DB
+        await db.execute(
+            """
+            INSERT INTO orders (order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name, status)
+            VALUES (1356, 2001, NULL, 'G_SXRV', 'U123', 'ENTRY', 'SXRV.DE', 'STK', 'SMART', 'BUY', 5, 'LMT', 145.5, 'DAY', 'TwoPercent', 'Submitted')
+            """
+        )
+        await db.commit()
+
+        # Act: save execution with clean symbol 'SXRV' from TWS
+        await manager._save_execution(
+            "EXEC_SXRV_1",
+            1356,
+            Decimal("145.50"),
+            Decimal("5"),
+            "EUR",
+            "2026-09-01T17:46:00+00:00",
+            symbol="SXRV",
+        )
+
+        # Assert: execution inserted in DB
+        async with db.execute(
+            "SELECT COUNT(*) as count, price, qty, currency FROM executions WHERE order_id = 1356"
+        ) as cursor:
+            row = await cursor.fetchone()
+            assert row["count"] == 1
+            assert Decimal(str(row["price"])) == Decimal("145.50")
+            assert Decimal(str(row["qty"])) == Decimal("5")
+            assert row["currency"] == "EUR"
+    finally:
+        db.close = original_close
