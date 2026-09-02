@@ -197,6 +197,8 @@ This section provides a detailed reference of all public classes and functions i
 ### 4.10 Module: `app.trading.error_codes`
 - `ErrorClass` (Class): Enumeration classifying IBKR error severity.
 - `classify_error_code` (Function): Categorizes error codes into actionable retry/fail classes.
+- `is_reauthorization_error` (Function): Evaluates whether a TWS error code or message indicates a 2FA/token reauthorization requirement in the Client Portal.
+- `is_market_closed_for_symbol` (Function): Checks if regular trading hours have ended for a given symbol (e.g., 17:30 Berlin for Xetra or 16:00 New York for US equities).
 
 ### 4.11 Module: `app.trading.order_builder`
 - `normalize_symbol` (Function): Normalizes asset symbols by stripping exchange suffixes (e.g., `.DE`).
@@ -228,6 +230,7 @@ This section provides a detailed reference of all public classes and functions i
 
 ### 4.15 Module: `app.trading.worker`
 - `process_trade_group` (Function): Core worker loop evaluating a single trade group sequence.
+- `handle_reauthorization_wait` (Function): Pauses order execution upon a token/reauthorization requirement, performs periodic What-If probes, sends Telegram alerts, and cancels expired orders upon market close.
 
 ### 4.16 Module: `app.main`
 - `TradingSystemOrchestrator` (Class): Core system loop coordinator and scheduler.

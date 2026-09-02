@@ -22,6 +22,10 @@ from app.core.config import Config
 from app.core.db import transaction
 from app.core.models import OrderRow, order_row_from_db_row
 from app.services.notifier import TelegramNotifier
+from app.trading.error_codes import (
+    is_market_closed_for_symbol,
+    is_reauthorization_error,
+)
 from app.trading.order_builder import (
     build_order,
     extract_transmitted_price,
@@ -144,16 +148,23 @@ async def process_trade_group(
             placed_orders,
         )
 
-    if not entry_order or entry_order.status == "Error":
+    if not entry_order or entry_order.status in ("Error", "Cancelled"):
         logger.warning(
-            "ENTRY order failed. Skipping child orders.",
+            "ENTRY order failed or cancelled. Skipping child orders.",
             trade_group_id=trade_group_id,
         )
-        async with transaction(db):
-            await db.execute(
-                "UPDATE orders SET status = 'Error' WHERE trade_group_id = ? AND status = 'Created'",
-                (trade_group_id,),
-            )
+        if entry_order and entry_order.status == "Cancelled":
+            async with transaction(db):
+                await db.execute(
+                    "UPDATE orders SET status = 'Cancelled' WHERE trade_group_id = ? AND status = 'Created'",
+                    (trade_group_id,),
+                )
+        else:
+            async with transaction(db):
+                await db.execute(
+                    "UPDATE orders SET status = 'Error' WHERE trade_group_id = ? AND status = 'Created'",
+                    (trade_group_id,),
+                )
         return
 
     await _process_child_orders(
@@ -330,6 +341,157 @@ async def _evaluate_margin_warnings(
         )
 
 
+async def handle_reauthorization_wait(
+    db: aiosqlite.Connection,
+    interactive_brokers: IB,
+    contract: Contract,
+    simulated_order: Order,
+    entry_order: OrderRow,
+    config: Config,
+    notifier: TelegramNotifier,
+    slice_sleep_s: float = 10.0,
+) -> bool:
+    """
+    Pausiert die Order-Ausführung bei einer Reautorisierungs-/Token-Anforderung von IBKR.
+
+    Wartet im Intervall `config.app.reauth_check_interval_s` (Standard: 30 Minuten),
+    sendet bei jedem Versuch eine Telegram-Warnmeldung und prüft die Freigabe per What-If.
+    Storniert die Orders bei Erreichen des Börsenschlusses für das jeweilige Wertpapier.
+
+    Args:
+        db: Offene aiosqlite-Datenbankverbindung.
+        interactive_brokers: Aktive TWS/Gateway Client-Instanz.
+        contract: Das TWS Contract-Objekt.
+        simulated_order: Das simulierte Order-Objekt (mit whatIf=True).
+        entry_order: Das OrderRow-Datenmodell der betroffenen Order.
+        config: Systemkonfiguration.
+        notifier: TelegramNotifier für Benachrichtigungen.
+        slice_sleep_s: Prüfintervall für Slice-Checks auf Börsenschluss.
+
+    Returns:
+        True, wenn die Reautorisierung erfolgreich bestätigt wurde, sonst False (bei Börsenschluss).
+    """
+    logger.warning(
+        "Reauthorization required for order. Entering reauth wait loop.",
+        symbol=entry_order.symbol,
+        trade_group_id=entry_order.trade_group_id,
+        order_id=entry_order.order_id,
+    )
+
+    attempt = 1
+    reauth_interval_minutes = int(config.app.reauth_check_interval_s // 60)
+    await notifier.send_message(
+        f"🔑 <b>REAUTORISIERUNG ERFORDERLICH (Versuch #{attempt})</b> | <code>{entry_order.symbol}</code>\n"
+        f"├─ <b>Status:</b> Ausführung pausiert\n"
+        f"├─ <b>Grund:</b> <i>IBKR verlangt Token-Bestätigung im Client Portal!</i>\n"
+        f"└─ <b>Nächste Prüfung:</b> In {reauth_interval_minutes} Minuten (Verfall bei Börsenschluss)."
+    )
+
+    reauth_interval = float(config.app.reauth_check_interval_s)
+
+    while True:
+        if is_market_closed_for_symbol(entry_order.symbol):
+            logger.warning(
+                "Market closed for symbol while waiting for reauthorization. Cancelling orders.",
+                symbol=entry_order.symbol,
+                trade_group_id=entry_order.trade_group_id,
+            )
+            async with transaction(db):
+                await db.execute(
+                    "UPDATE orders SET status = 'Cancelled' WHERE trade_group_id = ?",
+                    (entry_order.trade_group_id,),
+                )
+            await notifier.send_message(
+                f"🚨 <b>SIGNALE VERFALLEN (Börsenschluss erreicht)</b> | <code>{entry_order.symbol}</code>\n"
+                f"├─ <b>Status:</b> Orders storniert (Cancelled)\n"
+                f"└─ <b>Grund:</b> Keine Reautorisierung bis zum Handelsschluss erfolgt."
+            )
+            return False
+
+        elapsed = 0.0
+        while elapsed < reauth_interval:
+            step_sleep = min(slice_sleep_s, reauth_interval - elapsed)
+            await asyncio.sleep(step_sleep)
+            elapsed += step_sleep
+
+            if is_market_closed_for_symbol(entry_order.symbol):
+                logger.warning(
+                    "Market closed during reauth interval slice. Cancelling orders.",
+                    symbol=entry_order.symbol,
+                    trade_group_id=entry_order.trade_group_id,
+                )
+                async with transaction(db):
+                    await db.execute(
+                        "UPDATE orders SET status = 'Cancelled' WHERE trade_group_id = ?",
+                        (entry_order.trade_group_id,),
+                    )
+                await notifier.send_message(
+                    f"🚨 <b>SIGNALE VERFALLEN (Börsenschluss erreicht)</b> | <code>{entry_order.symbol}</code>\n"
+                    f"├─ <b>Status:</b> Orders storniert (Cancelled)\n"
+                    f"└─ <b>Grund:</b> Keine Reautorisierung bis zum Handelsschluss erfolgt."
+                )
+                return False
+
+        while not interactive_brokers.isConnected():
+            logger.warning(
+                "TWS disconnected during reauth wait. Waiting for reconnection...",
+                symbol=entry_order.symbol,
+            )
+            await asyncio.sleep(5.0)
+
+        attempt += 1
+        logger.info(
+            "Retrying What-If check for reauthorization",
+            symbol=entry_order.symbol,
+            attempt=attempt,
+        )
+
+        try:
+            await asyncio.wait_for(
+                interactive_brokers.whatIfOrderAsync(contract, simulated_order),
+                timeout=5.0,
+            )
+            logger.info(
+                "Reauthorization successfully verified via What-If!",
+                symbol=entry_order.symbol,
+                attempt=attempt,
+            )
+            await notifier.send_message(
+                f"✅ <b>REAUTORISIERUNG ERFOLGREICH</b> | <code>{entry_order.symbol}</code>\n"
+                f"├─ <b>Status:</b> Sitzung autorisiert nach {attempt} Versuchen\n"
+                f"└─ <b>Aktion:</b> Setze Übertragung der Orders fort..."
+            )
+            return True
+
+        except Exception as retry_exception:
+            error_text = str(retry_exception)
+            if is_reauthorization_error(0, error_text):
+                logger.warning(
+                    "Reauthorization still required on retry",
+                    symbol=entry_order.symbol,
+                    attempt=attempt,
+                    error=error_text,
+                )
+                await notifier.send_message(
+                    f"🔑 <b>REAUTORISIERUNG ERFORDERLICH (Versuch #{attempt})</b> | <code>{entry_order.symbol}</code>\n"
+                    f"├─ <b>Status:</b> Ausführung weiterhin pausiert\n"
+                    f"├─ <b>Grund:</b> <i>IBKR verlangt weiterhin Token-Bestätigung im Client Portal.</i>\n"
+                    f"└─ <b>Nächste Prüfung:</b> In {reauth_interval_minutes} Minuten."
+                )
+            else:
+                logger.warning(
+                    "Unexpected error during reauthorization retry What-If",
+                    symbol=entry_order.symbol,
+                    attempt=attempt,
+                    error=error_text,
+                )
+                await notifier.send_message(
+                    f"🔑 <b>REAUTORISIERUNG ERFORDERLICH (Versuch #{attempt})</b> | <code>{entry_order.symbol}</code>\n"
+                    f"├─ <b>Status:</b> Prüfung fehlgeschlagen ({error_text})\n"
+                    f"└─ <b>Nächste Prüfung:</b> In {reauth_interval_minutes} Minuten."
+                )
+
+
 async def _verify_margin_and_cushion(
     db: aiosqlite.Connection,
     interactive_brokers: IB,
@@ -353,26 +515,59 @@ async def _verify_margin_and_cushion(
             timeout=5.0,
         )
     except Exception as exception:
-        logger.error(
-            "What-If simulation timed out or failed. Aborting order execution to fail closed.",
-            symbol=entry_order.symbol,
-            error=str(exception),
-        )
-        entry_order = dataclasses.replace(entry_order, status="Error")
-        async with transaction(db):
-            await db.execute(
-                "UPDATE orders SET status = 'Error' WHERE order_id = ?",
-                (entry_order.order_id,),
+        if is_reauthorization_error(0, str(exception)):
+            authorized = await handle_reauthorization_wait(
+                db=db,
+                interactive_brokers=interactive_brokers,
+                contract=contract,
+                simulated_order=simulated_order,
+                entry_order=entry_order,
+                config=config,
+                notifier=notifier,
             )
-        await notifier.send_order_failed(
-            order_id=entry_order.order_id,
-            tws_code=0,
-            reason="Risk validation simulation failed/timed out (Fail-Closed).",
-            symbol=entry_order.symbol,
-            bracket_role=entry_order.bracket_role,
-            is_fatal=True,
-        )
-        return False, entry_order
+            if authorized:
+                try:
+                    order_state = await asyncio.wait_for(
+                        interactive_brokers.whatIfOrderAsync(contract, simulated_order),
+                        timeout=5.0,
+                    )
+                except Exception as retry_exc:
+                    logger.error(
+                        "What-If simulation failed after reauthorization.",
+                        symbol=entry_order.symbol,
+                        error=str(retry_exc),
+                    )
+                    entry_order = dataclasses.replace(entry_order, status="Error")
+                    async with transaction(db):
+                        await db.execute(
+                            "UPDATE orders SET status = 'Error' WHERE order_id = ?",
+                            (entry_order.order_id,),
+                        )
+                    return False, entry_order
+            else:
+                entry_order = dataclasses.replace(entry_order, status="Cancelled")
+                return False, entry_order
+        else:
+            logger.error(
+                "What-If simulation timed out or failed. Aborting order execution to fail closed.",
+                symbol=entry_order.symbol,
+                error=str(exception),
+            )
+            entry_order = dataclasses.replace(entry_order, status="Error")
+            async with transaction(db):
+                await db.execute(
+                    "UPDATE orders SET status = 'Error' WHERE order_id = ?",
+                    (entry_order.order_id,),
+                )
+            await notifier.send_order_failed(
+                order_id=entry_order.order_id,
+                tws_code=0,
+                reason="Risk validation simulation failed/timed out (Fail-Closed).",
+                symbol=entry_order.symbol,
+                bracket_role=entry_order.bracket_role,
+                is_fatal=True,
+            )
+            return False, entry_order
 
     if order_state:
         init_margin_after = Decimal(str(order_state.initMarginAfter or "0.0"))
@@ -463,6 +658,7 @@ async def _transmit_entry_order(
         entry_order,
         tws_order_id,
         notifier,
+        config=config,
     )
     if not success:
         return dataclasses.replace(entry_order, status="Error")
@@ -616,7 +812,14 @@ async def _place_single_child_order(
         role=child.bracket_role,
     )
     success = await _place_and_verify_order(
-        db, interactive_brokers, contract, ib_child_order, child, tws_order_id, notifier
+        db,
+        interactive_brokers,
+        contract,
+        ib_child_order,
+        child,
+        tws_order_id,
+        notifier,
+        config=config,
     )
     if not success:
         child = dataclasses.replace(child, status="Error")
@@ -633,6 +836,7 @@ async def _place_and_verify_order(
     order_row: OrderRow,
     tws_order_id: int,
     notifier: TelegramNotifier,
+    config: Config | None = None,
 ) -> bool:
     """Sendet die Order und prüft auf Fehler (z. B. Read-Only Modus)."""
     trade = interactive_brokers.placeOrder(contract, ib_order)
@@ -646,7 +850,13 @@ async def _place_and_verify_order(
         "Error",
     ):
         is_success = await _handle_order_rejection(
-            db, trade, order_row, tws_order_id, notifier
+            db,
+            trade,
+            order_row,
+            tws_order_id,
+            notifier,
+            interactive_brokers=interactive_brokers,
+            config=config,
         )
         if not is_success:
             return False
@@ -668,6 +878,8 @@ async def _handle_order_rejection(
     order_row: OrderRow,
     tws_order_id: int,
     notifier: TelegramNotifier,
+    interactive_brokers: IB | None = None,
+    config: Config | None = None,
 ) -> bool:
     """Behandelt Fehlermeldungen bei der Order-Übertragung."""
     error_msg = "Unknown error"
@@ -709,15 +921,47 @@ async def _handle_order_rejection(
         error=error_msg,
     )
 
+    clean_error_msg = re.sub(
+        r"[ \t]+", " ", re.sub(r"(?i)<br\s*/?>", " ", error_msg)
+    ).strip()
+
+    if is_reauthorization_error(tws_code, clean_error_msg):
+        if interactive_brokers is not None and config is not None:
+            contract = make_stock_contract(order_row.symbol)
+            simulated_order = build_order(order_row)
+            simulated_order.whatIf = True
+            authorized = await handle_reauthorization_wait(
+                db=db,
+                interactive_brokers=interactive_brokers,
+                contract=contract,
+                simulated_order=simulated_order,
+                entry_order=order_row,
+                config=config,
+                notifier=notifier,
+            )
+            if authorized:
+                logger.info(
+                    "Re-transmitting order after successful reauthorization",
+                    order_id=tws_order_id,
+                    symbol=order_row.symbol,
+                )
+                retry_order = build_order(order_row)
+                retry_trade = interactive_brokers.placeOrder(contract, retry_order)
+                await _wait_for_order_submission(retry_trade)
+                return retry_trade.orderStatus.status not in (
+                    "Inactive",
+                    "Cancelled",
+                    "ValidationError",
+                    "Error",
+                )
+            return False
+
     async with transaction(db):
         await db.execute(
             "UPDATE orders SET status = 'Error' WHERE order_id = ?",
             (tws_order_id,),
         )
 
-    clean_error_msg = re.sub(
-        r"[ \t]+", " ", re.sub(r"(?i)<br\s*/?>", " ", error_msg)
-    ).strip()
     reason_upper = clean_error_msg.upper()
     if "Read-Only mode" in error_msg or "321" in error_msg or tws_code == 321:
         formatted_reason = f"API im READ-ONLY Modus. Details: {clean_error_msg}"

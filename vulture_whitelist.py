@@ -21,6 +21,7 @@ _.ocaGroup
 _.ocaType
 _.transmit
 _.parentId
+_.whatIf
 
 # Simulated / Mocked TWS client methods
 _.reqAccountSummary

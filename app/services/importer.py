@@ -8,6 +8,7 @@ speichert die Orders in der Datenbank und reiht sie in die Execution Queue ein.
 
 import asyncio
 import dataclasses
+import json
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -155,7 +156,7 @@ async def run_csv_import(
     queue: asyncio.Queue[str],
     notifier: TelegramNotifier,
     config: Config,
-) -> None:
+) -> list[str]:
     """
     Orchestriert den Import einer einzelnen CSV-Order-Datei.
 
@@ -166,13 +167,13 @@ async def run_csv_import(
 
     # 1. DoS Ressourcenschutz-Check
     if not await _check_csv_dos_limits(csv_path, config, notifier):
-        return
+        return []
 
     # 2. CSV laden und gruppieren
     grouped_legs = load_csv(csv_path)
     if not grouped_legs:
         logger.info("No trade groups found for import")
-        return
+        return []
 
     # 3. Gruppen einzeln validieren, sizing anpassen und in DB verbuchen
     filename_match = re.match(r"^orders_(\d{4})_(\d{2})_(\d{2})\.csv$", csv_path.name)
@@ -190,6 +191,7 @@ async def run_csv_import(
                 error=str(exception),
             )
 
+    imported_group_ids: list[str] = []
     for trade_group_id, raw_legs in grouped_legs.items():
         await _process_and_upsert_group(
             db=db,
@@ -201,6 +203,9 @@ async def run_csv_import(
             config=config,
             current_weekday=current_weekday,
         )
+        imported_group_ids.append(trade_group_id)
+
+    return imported_group_ids
 
 
 async def _process_daily_csv_file(
@@ -216,27 +221,59 @@ async def _process_daily_csv_file(
 
     database_connection = await db_factory()
     try:
-        await run_csv_import(
+        imported_group_ids = await run_csv_import(
             database_connection, interactive_brokers, csv_file, queue, notifier, config
         )
 
+        # Warten, bis alle Orders aus der Queue abgearbeitet sind
+        await queue.join()
+
         archive_dir = csv_file.parent / "archive"
         archive_dir.mkdir(parents=True, exist_ok=True)
-        backup_path = archive_dir / (csv_file.name + ".bak")
-        csv_file.rename(backup_path)
 
-        logger.info(
-            "Order file successfully processed and renamed",
-            file=csv_file.name,
-            backup=backup_path.name,
-        )
-        await notifier.send_importer_info(
-            file_name=csv_file.name,
-            status="Erfolgreich",
-            details="Eingelesen und nach .bak archiviert.",
-            emoji="📁",
-            title="DATEI IMPORTIERT",
-        )
+        has_failed_or_cancelled = False
+        if isinstance(imported_group_ids, list) and imported_group_ids:
+            query = (
+                "SELECT 1 FROM orders WHERE trade_group_id IN (SELECT value FROM json_each(?)) "
+                "AND status IN ('Cancelled', 'Error') LIMIT 1"
+            )
+            async with database_connection.execute(
+                query, (json.dumps(imported_group_ids),)
+            ) as cursor:
+                if await cursor.fetchone():
+                    has_failed_or_cancelled = True
+
+        if has_failed_or_cancelled:
+            error_path = archive_dir / (csv_file.name + ".err")
+            csv_file.rename(error_path)
+            logger.warning(
+                "Order file completed with cancellations/errors and renamed to .err",
+                file=csv_file.name,
+                error_file=error_path.name,
+            )
+            await notifier.send_importer_info(
+                file_name=csv_file.name,
+                status="Verfallen / Fehlerhaft",
+                details="Nicht alle Orders konnten übertragen werden. Nach .err archiviert.",
+                emoji="🚨",
+                title="DATEI VERFALLEN",
+            )
+        else:
+            backup_path = archive_dir / (csv_file.name + ".bak")
+            csv_file.rename(backup_path)
+
+            logger.info(
+                "Order file successfully processed and renamed",
+                file=csv_file.name,
+                backup=backup_path.name,
+            )
+            await notifier.send_importer_info(
+                file_name=csv_file.name,
+                status="Erfolgreich",
+                details="Eingelesen und nach .bak archiviert.",
+                emoji="📁",
+                title="DATEI IMPORTIERT",
+            )
 
     except Exception as exception:
         logger.error(

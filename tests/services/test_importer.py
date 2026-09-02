@@ -4,6 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiosqlite
 import pytest
 from ib_async import AccountValue
 
@@ -1275,3 +1276,109 @@ async def test_process_daily_csv_file_rename_failure(
                 notifier=mock_notifier,
                 config=mock_config,
             )
+
+
+@pytest.mark.asyncio
+async def test_process_daily_csv_file_with_cancelled_orders_renames_to_err(
+    tmp_path: Path, mock_config: Config, db: aiosqlite.Connection
+) -> None:
+    """Verifies that if orders from the CSV are Cancelled (e.g. reauth expiry), the file is renamed to .err."""
+    from app.services.importer import _process_daily_csv_file
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    test_csv = data_dir / "orders_2026_09_02.csv"
+    test_csv.write_text("dummy,content", encoding="utf-8")
+
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status)
+        VALUES (3001, 'TG_EXPIRED_GROUP', 'ACC1', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 10, 'LMT', 150.0, 'Cancelled')
+        """
+    )
+    await db.commit()
+
+    async def db_factory():
+        conn = await aiosqlite.connect("file::memory:?cache=shared", uri=True)
+        conn.row_factory = aiosqlite.Row
+        return conn
+
+    mock_ib = MagicMock()
+    mock_notifier = MagicMock()
+    mock_notifier.send_importer_info = AsyncMock(return_value=True)
+    mock_queue = asyncio.Queue()
+
+    with patch(
+        "app.services.importer.run_csv_import",
+        new_callable=AsyncMock,
+        return_value=["TG_EXPIRED_GROUP"],
+    ):
+        await _process_daily_csv_file(
+            db_factory=db_factory,
+            interactive_brokers=mock_ib,
+            csv_file=test_csv,
+            queue=mock_queue,
+            notifier=mock_notifier,
+            config=mock_config,
+        )
+
+    assert not test_csv.exists()
+    err_csv = data_dir / "archive" / "orders_2026_09_02.csv.err"
+    assert err_csv.exists()
+    mock_notifier.send_importer_info.assert_called_once()
+    call_kwargs = mock_notifier.send_importer_info.call_args[1]
+    assert call_kwargs["title"] == "DATEI VERFALLEN"
+    assert "Verfallen" in call_kwargs["status"]
+
+
+@pytest.mark.asyncio
+async def test_process_daily_csv_file_with_successful_orders_renames_to_bak(
+    tmp_path: Path, mock_config: Config, db: aiosqlite.Connection
+) -> None:
+    """Verifies that if all orders from the CSV are successfully placed, the file is renamed to .bak."""
+    from app.services.importer import _process_daily_csv_file
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    test_csv = data_dir / "orders_2026_09_02.csv"
+    test_csv.write_text("dummy,content", encoding="utf-8")
+
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status)
+        VALUES (3002, 'TG_SUCCESS_GROUP', 'ACC1', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 10, 'LMT', 150.0, 'Submitted')
+        """
+    )
+    await db.commit()
+
+    async def db_factory():
+        conn = await aiosqlite.connect("file::memory:?cache=shared", uri=True)
+        conn.row_factory = aiosqlite.Row
+        return conn
+
+    mock_ib = MagicMock()
+    mock_notifier = MagicMock()
+    mock_notifier.send_importer_info = AsyncMock(return_value=True)
+    mock_queue = asyncio.Queue()
+
+    with patch(
+        "app.services.importer.run_csv_import",
+        new_callable=AsyncMock,
+        return_value=["TG_SUCCESS_GROUP"],
+    ):
+        await _process_daily_csv_file(
+            db_factory=db_factory,
+            interactive_brokers=mock_ib,
+            csv_file=test_csv,
+            queue=mock_queue,
+            notifier=mock_notifier,
+            config=mock_config,
+        )
+
+    assert not test_csv.exists()
+    bak_csv = data_dir / "archive" / "orders_2026_09_02.csv.bak"
+    assert bak_csv.exists()
+    mock_notifier.send_importer_info.assert_called_once()
+    call_kwargs = mock_notifier.send_importer_info.call_args[1]
+    assert call_kwargs["title"] == "DATEI IMPORTIERT"
+    assert call_kwargs["status"] == "Erfolgreich"

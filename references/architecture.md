@@ -108,6 +108,13 @@ Datetime variables are formatted as **ISO-8601 strings with timezone offset**:
 * Syntax Pattern: `YYYY-MM-DDTHH:MM:SS±HH:MM`
 * Example: `2026-07-07T13:21:02+02:00`
 
+### 2.3 Daily File Processing & Archiving Lifecycle
+When a daily order CSV (`orders_YYYY_MM_DD.csv`) is detected:
+1. File is parsed, sized, and upserted into SQLite (`orders.status = 'Created'`), and group IDs are enqueued.
+2. Importer halts archiving until execution worker processes all groups (`await queue.join()`).
+3. If all orders in the batch are successfully processed without cancellation or error: file is moved to `archive/orders_YYYY_MM_DD.csv.bak`.
+4. If any order in the batch is marked `Cancelled` (e.g., reauthorization timed out at market close) or `Error`: file is moved to `archive/orders_YYYY_MM_DD.csv.err`.
+
 ---
 
 ## 3. Internal Python Data Structures
@@ -115,13 +122,10 @@ Datetime variables are formatted as **ISO-8601 strings with timezone offset**:
 Mapping model classes in [app/core/models.py](file:///Users/produktmanagement/Python/github/TradeManager/app/core/models.py) are immutable `@dataclass(frozen=True)` containers.
 
 ### 3.1 Dataclass Definitions
-
-| Class Name | Fields / Data Types | Purpose |
-| :--- | :--- | :--- |
-| `LegRow` | `trade_group_id: str`<br>`bracket_role: str`<br>`symbol: str`<br>`sec_type: str`<br>`exchange: str`<br>`account_id: str`<br>`action: str`<br>`quantity: int`<br>`order_type: str`<br>`target_price: Decimal \| None`<br>`tif: str`<br>`strategy_name: str` | Parsed representation of a raw CSV import row before any sizing or DB write. |
-| `OrderRow` | `order_id: int`<br>`perm_id: int \| None`<br>`parent_id: int \| None`<br>`trade_group_id: str`<br>`account_id: str`<br>`bracket_role: str`<br>`symbol: str`<br>`sec_type: str`<br>`exchange: str`<br>`action: str`<br>`quantity: int`<br>`order_type: str`<br>`target_price: Decimal \| None`<br>`tif: str`<br>`strategy_name: str \| None`<br>`status: str`<br>`retry_count: int = 0`<br>`transmitted_at: str \| None = None` | Persistent intent record representing the database representation. Copied using `dataclasses.replace` to modify state. |
-| `ExecutionRow` | `exec_id: str`<br>`order_id: int`<br>`price: Decimal`<br>`qty: Decimal`<br>`commission: Decimal \| None = None`<br>`currency: str \| None = None`<br>`executed_at: str \| None = None` | Atomic execution ticket representing partial/total fill reports. |
-| `SettlementRow` | `account_id: str`<br>`trade_group_id: str`<br>`avg_entry_price: Decimal`<br>`avg_exit_price: Decimal`<br>`price_diff_slippage: Decimal`<br>`total_commissions: Decimal`<br>`net_pnl: Decimal`<br>`settled_at: str \| None = None` | Settlement result structure generated when exit leg completes. |
+- `LegRow`: Direct representation of an imported CSV record row.
+- `OrderRow`: Database-backed model representing a discrete order leg.
+- `ExecutionRow`: Logged record of an executed trade fill received from TWS.
+- `SettlementRow`: Final PnL and accounting record computed upon position closure.
 
 ---
 
@@ -134,9 +138,11 @@ The lifecycle status changes of a trade group's order are stateful and governed 
                   │   Created    │ (Initially imported)
                   └──────┬───────┘
                          │
-                         ▼ (Placed to queue -> Transmit initiated)
-                  ┌──────────────┐
-                  │  Submitted   │ (Sent to Interactive Brokers socket)
+                         ├─────────────────────────────────────────┐
+                         │                                         ▼ (Reauth market close expire)
+                         ▼ (Placed to queue -> Transmit initiated) ┌──────────────┐
+                  ┌──────────────┐                         │  Cancelled   │
+                  │  Submitted   │                         └──────────────┘
                   └──────┬───────┘
                          │
         ┌────────────────┼────────────────┐
@@ -155,6 +161,7 @@ The lifecycle status changes of a trade group's order are stateful and governed 
 | :--- | :--- | :--- |
 | — | `Created` | Order record is parsed, downscaled successfully, and written to database. |
 | `Created` | `Submitted` | Queue worker transmits parent/child legs to IBKR socket (first parent exit, then parent entry). |
+| `Created` | `Cancelled` | Reauthorization/token wait loop reaches regular trading hours close without user approval in Client Portal. Remaining group orders expire. |
 | `Submitted` | `PreSubmitted` | Gateway returns receipt acknowledgment event. |
 | `Submitted` | `Error` | What-If simulation fails, connection is severed, or API submission returns immediate error. |
 | `PreSubmitted`| `Filled` | Order average fill price and size matches requested target amount. Triggers settlement computation. |
@@ -176,4 +183,5 @@ Governed by [app/trading/error_codes.py](file:///Users/produktmanagement/Python/
 | **`RECONNECT`**| `1101`, `1102` | Pause outgoing transmissions. Block queue consumption. Gateway disconnect check logic starts. Resume once connection events clear. |
 | **`RETRIABLE`**| `1100`, `1300`, `10148`, `502`, `504`, `162` | Queue worker backs off exponentially. Status reverts to `Created`. Order is queued again for retry (up to max configured retries limit). |
 | **`CANCEL`** | `202`, `10147`, `10149`, `10268` | Order marked as `Cancelled` in database. Stop execution of remaining bracket elements if necessary to prevent exposure. |
+| **`REAUTH`** | `201` (with token/client portal verification text) | Execution paused. Order kept in `Created`. Retry loop every 30m via What-If simulation. Telegram alert on each attempt. If market closes without reauth, transition to `Cancelled` and archive CSV as `.err`. |
 | **`FATAL`** | *All other codes* (default) | Halt order transmission. Mark status as `Error`. Alert administrator immediately via Telegram message (Critical notification). |

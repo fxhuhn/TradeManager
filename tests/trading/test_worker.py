@@ -1238,3 +1238,321 @@ async def test_handle_order_rejection_token_verification_with_br_tags(
     assert "ANMELDUNG/VERIFIZIERUNG ERFORDERLICH" in call_kwargs["reason"]
     assert "<br>" not in call_kwargs["reason"]
     assert "TOKEN WE EMAILED TO YOU" in call_kwargs["reason"]
+
+
+async def test_handle_reauthorization_wait_success_on_retry(db) -> None:
+    """Verifies handle_reauthorization_wait retries and succeeds when user authorizes."""
+    from app.trading.worker import handle_reauthorization_wait
+
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status)
+        VALUES (2001, 'TG_REAUTH_OK', 'ACC1', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 10, 'LMT', 150.0, 'Created')
+        """
+    )
+    await db.commit()
+
+    order_row = OrderRow(
+        order_id=2001,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG_REAUTH_OK",
+        account_id="ACC1",
+        bracket_role="ENTRY",
+        symbol="AAPL",
+        sec_type="STK",
+        exchange="SMART",
+        action="BUY",
+        quantity=10,
+        order_type="LMT",
+        target_price=Decimal("150.0"),
+        tif="GTC",
+        strategy_name="DipBuyer",
+        status="Created",
+    )
+
+    mock_ib = MagicMock()
+    mock_ib.isConnected.return_value = True
+
+    # Attempt 1 retry fails with token prompt, Attempt 2 succeeds
+    mock_order_state = MagicMock()
+    mock_ib.whatIfOrderAsync = AsyncMock(
+        side_effect=[
+            RuntimeError("LOGIN TO CLIENT PORTAL AND VERIFY USING THE TOKEN"),
+            mock_order_state,
+        ]
+    )
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_message = AsyncMock(return_value=True)
+
+    mock_config = MagicMock()
+    mock_config.app.reauth_check_interval_s = 0.05  # fast for test
+
+    with patch("app.trading.worker.is_market_closed_for_symbol", return_value=False):
+        result = await handle_reauthorization_wait(
+            db=db,
+            interactive_brokers=mock_ib,
+            contract=MagicMock(),
+            simulated_order=MagicMock(),
+            entry_order=order_row,
+            config=mock_config,
+            notifier=mock_notifier,
+            slice_sleep_s=0.01,
+        )
+
+    assert result is True
+    # Verify telegram messages sent (initial warning, attempt 2 warning, attempt 3 success)
+    assert mock_notifier.send_message.call_count >= 2
+    # Verify order in DB is not corrupted
+    async with db.execute("SELECT status FROM orders WHERE order_id = 2001") as cursor:
+        row = await cursor.fetchone()
+        assert row["status"] == "Created"
+
+
+async def test_handle_reauthorization_wait_market_closed_cancellation(db) -> None:
+    """Verifies that orders are cancelled when market close is reached without reauthorization."""
+    from app.trading.worker import handle_reauthorization_wait
+
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status)
+        VALUES (2002, 'TG_REAUTH_EXPIRE', 'ACC1', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 10, 'LMT', 150.0, 'Created')
+        """
+    )
+    await db.commit()
+
+    order_row = OrderRow(
+        order_id=2002,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG_REAUTH_EXPIRE",
+        account_id="ACC1",
+        bracket_role="ENTRY",
+        symbol="AAPL",
+        sec_type="STK",
+        exchange="SMART",
+        action="BUY",
+        quantity=10,
+        order_type="LMT",
+        target_price=Decimal("150.0"),
+        tif="GTC",
+        strategy_name="DipBuyer",
+        status="Created",
+    )
+
+    mock_ib = MagicMock()
+    mock_notifier = MagicMock()
+    mock_notifier.send_message = AsyncMock(return_value=True)
+    mock_config = MagicMock()
+    mock_config.app.reauth_check_interval_s = 0.05
+
+    # Simulate market close reached immediately
+    with patch("app.trading.worker.is_market_closed_for_symbol", return_value=True):
+        result = await handle_reauthorization_wait(
+            db=db,
+            interactive_brokers=mock_ib,
+            contract=MagicMock(),
+            simulated_order=MagicMock(),
+            entry_order=order_row,
+            config=mock_config,
+            notifier=mock_notifier,
+            slice_sleep_s=0.01,
+        )
+
+    assert result is False
+    # Check that status was updated to Cancelled in DB
+    async with db.execute("SELECT status FROM orders WHERE order_id = 2002") as cursor:
+        row = await cursor.fetchone()
+        assert row["status"] == "Cancelled"
+
+    # Verify expired alert sent
+    last_msg = mock_notifier.send_message.call_args[0][0]
+    assert "SIGNALE VERFALLEN (Börsenschluss erreicht)" in last_msg
+
+
+async def test_handle_reauthorization_wait_market_closed_during_slice(db) -> None:
+    """Verifies that orders are cancelled when market close occurs during slice sleep."""
+    from app.trading.worker import handle_reauthorization_wait
+
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status)
+        VALUES (2003, 'TG_SLICE_EXPIRE', 'ACC1', 'ENTRY', 'SXRV.DE', 'STK', 'SMART', 'BUY', 5, 'LMT', 100.0, 'Created')
+        """
+    )
+    await db.commit()
+
+    order_row = OrderRow(
+        order_id=2003,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG_SLICE_EXPIRE",
+        account_id="ACC1",
+        bracket_role="ENTRY",
+        symbol="SXRV.DE",
+        sec_type="STK",
+        exchange="SMART",
+        action="BUY",
+        quantity=5,
+        order_type="LMT",
+        target_price=Decimal("100.0"),
+        tif="GTC",
+        strategy_name="TwoPercent",
+        status="Created",
+    )
+
+    mock_ib = MagicMock()
+    mock_notifier = MagicMock()
+    mock_notifier.send_message = AsyncMock(return_value=True)
+    mock_config = MagicMock()
+    mock_config.app.reauth_check_interval_s = 0.5
+
+    # First check: open, Second check (during slice): closed
+    with patch(
+        "app.trading.worker.is_market_closed_for_symbol", side_effect=[False, True]
+    ):
+        result = await handle_reauthorization_wait(
+            db=db,
+            interactive_brokers=mock_ib,
+            contract=MagicMock(),
+            simulated_order=MagicMock(),
+            entry_order=order_row,
+            config=mock_config,
+            notifier=mock_notifier,
+            slice_sleep_s=0.01,
+        )
+
+    assert result is False
+    async with db.execute("SELECT status FROM orders WHERE order_id = 2003") as cursor:
+        row = await cursor.fetchone()
+        assert row["status"] == "Cancelled"
+
+
+async def test_verify_margin_and_cushion_reauth_handling(db) -> None:
+    """Verifies _verify_margin_and_cushion recovers when What-If fails due to reauthorization."""
+    from app.trading.worker import _verify_margin_and_cushion
+
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status)
+        VALUES (2004, 'TG_WHATIF_REAUTH', 'ACC1', 'ENTRY', 'MSFT', 'STK', 'SMART', 'BUY', 10, 'LMT', 300.0, 'Created')
+        """
+    )
+    await db.commit()
+
+    order_row = OrderRow(
+        order_id=2004,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG_WHATIF_REAUTH",
+        account_id="ACC1",
+        bracket_role="ENTRY",
+        symbol="MSFT",
+        sec_type="STK",
+        exchange="SMART",
+        action="BUY",
+        quantity=10,
+        order_type="LMT",
+        target_price=Decimal("300.0"),
+        tif="GTC",
+        strategy_name="DipBuyer",
+        status="Created",
+    )
+
+    mock_order_state = MagicMock()
+    mock_order_state.initMarginAfter = "1000.0"
+    mock_order_state.equityWithLoanAfter = "50000.0"
+
+    mock_ib = MagicMock()
+    mock_ib.whatIfOrderAsync = AsyncMock(
+        side_effect=[
+            RuntimeError("PLEASE LOGIN TO CLIENT PORTAL AND VERIFY USING THE TOKEN"),
+            mock_order_state,
+        ]
+    )
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_message = AsyncMock(return_value=True)
+    mock_notifier.send_margin_utilization_warning = AsyncMock(return_value=True)
+    mock_notifier.send_high_margin_usage_warning = AsyncMock(return_value=True)
+
+    mock_config = MagicMock()
+    mock_config.account.max_margin_usage_pct = 0.8
+    mock_config.account.min_cushion_pct = 0.1
+    mock_config.app.reauth_check_interval_s = 0.05
+
+    with (
+        patch(
+            "app.trading.worker._check_cushion_limit", new_callable=AsyncMock
+        ) as mock_cushion,
+        patch(
+            "app.trading.worker.handle_reauthorization_wait", new_callable=AsyncMock
+        ) as mock_reauth_wait,
+    ):
+        mock_cushion.return_value = (True, order_row, Decimal("0.5"))
+        mock_reauth_wait.return_value = True
+
+        passed, updated_order = await _verify_margin_and_cushion(
+            db, mock_ib, order_row, mock_config, mock_notifier
+        )
+
+        assert passed is True
+        mock_reauth_wait.assert_called_once()
+        assert updated_order.status == "Created"
+
+
+async def test_process_trade_group_reauth_cancelled_at_market_close(db) -> None:
+    """Verifies process_trade_group marks remaining orders Cancelled when reauth expires at market close."""
+    from app.trading.worker import process_trade_group
+
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status)
+        VALUES
+            (2010, 'TG_EXPIRE_BATCH', 'ACC1', 'ENTRY', 'XYZ', 'STK', 'SMART', 'BUY', 10, 'LMT', 50.0, 'Created'),
+            (2011, 'TG_EXPIRE_BATCH', 'ACC1', 'TP', 'XYZ', 'STK', 'SMART', 'SELL', 10, 'LMT', 60.0, 'Created')
+        """
+    )
+    await db.commit()
+
+    mock_ib = MagicMock()
+    mock_notifier = MagicMock()
+    mock_notifier.send_message = AsyncMock(return_value=True)
+
+    mock_config = MagicMock()
+    mock_config.app.reauth_check_interval_s = 0.05
+    mock_config.account.max_margin_usage_pct = 0.8
+    mock_config.account.min_cushion_pct = 0.1
+
+    with (
+        patch(
+            "app.trading.worker._check_cushion_limit", new_callable=AsyncMock
+        ) as mock_cushion,
+        patch(
+            "app.trading.worker.handle_reauthorization_wait", new_callable=AsyncMock
+        ) as mock_reauth,
+    ):
+        mock_cushion.side_effect = lambda d, ib, o, c, n: (True, o, Decimal("0.5"))
+        # Reauth fails/cancels due to market close
+        mock_reauth.return_value = False
+
+        # Entry simulation raises reauth error
+        mock_ib.whatIfOrderAsync = AsyncMock(
+            side_effect=RuntimeError(
+                "LOGIN TO CLIENT PORTAL AND VERIFY USING THE TOKEN"
+            )
+        )
+
+        await process_trade_group(
+            db, mock_ib, "TG_EXPIRE_BATCH", mock_notifier, mock_config
+        )
+
+    # Both ENTRY and child orders must be Cancelled in DB
+    async with db.execute(
+        "SELECT order_id, status FROM orders WHERE trade_group_id = 'TG_EXPIRE_BATCH'"
+    ) as cursor:
+        rows = await cursor.fetchall()
+        assert len(rows) == 2
+        for r in rows:
+            assert r["status"] == "Cancelled"

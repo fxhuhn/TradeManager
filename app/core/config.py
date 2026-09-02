@@ -48,6 +48,7 @@ class AppConfig:
     log_file_path: str
     log_rotation_backup_count: int
     db_backup_interval_s: int = 86400
+    reauth_check_interval_s: int = 1800
 
 
 @dataclass(frozen=True)
@@ -183,6 +184,7 @@ def _parse_app_config(app_data: dict[str, object]) -> AppConfig:
         log_file_path=str(app_data.get("log_file_path", "data/app.log")),
         log_rotation_backup_count=_to_int(app_data.get("log_rotation_backup_count"), 5),
         db_backup_interval_s=_to_int(app_data.get("db_backup_interval_s"), 86400),
+        reauth_check_interval_s=_to_int(app_data.get("reauth_check_interval_s"), 1800),
     )
 
 
