@@ -15,9 +15,9 @@ in this workspace, you **MUST** execute these steps IN ORDER:
 You **MUST** read **BOTH** architecture documents using the `view_file` tool
 before any other file access or code reasoning:
 
-1. **High-Level System Architecture**: [architecture.md](file:///Users/produktmanagement/Python/github/TradeManager/architecture.md)
+1. **High-Level System Architecture**: `architecture.md`
    — Component interactions, sequence diagrams, system boundaries
-2. **Low-Level Reference Specification**: [references/architecture.md](file:///Users/produktmanagement/Python/github/TradeManager/references/architecture.md)
+2. **Low-Level Reference Specification**: `references/architecture.md`
    — DB schemas, state machines, CSV interfaces, error matrices
 
 **No shortcuts.** Even if you "already know" the architecture from earlier in the
@@ -38,6 +38,7 @@ whenever a task involves one of the domains below:
 | Security & Compliance               | `python-security`                                                  |
 | Testing & SDET                      | `python-tester`                                                    |
 | Database & Persistence Management   | `sqlite-persistence`                                               |
+| Code Refactoring & Transformation   | `python-craftsman` / `python-tester` / `python-auditor` (workflow: `/refactor`) |
 | Comprehensive Code Review           | `full-review` (orchestrates `python-auditor`, `python-tester`, `python-security`) |
 
 ### Step 3 — Analysis & Implementation

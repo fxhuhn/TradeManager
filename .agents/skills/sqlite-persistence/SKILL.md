@@ -8,7 +8,7 @@ description: "Expert SQLite Persistence & Database Invariants skill for TradeMan
 
 # SQLite Persistence & Database Invariants Skill
 
-This skill enforces database architecture invariants for TradeManager's local relational store (`data/trading.db`), as specified in [architecture.md](file:///Users/produktmanagement/Python/github/TradeManager/architecture.md) and [references/architecture.md](file:///Users/produktmanagement/Python/github/TradeManager/references/architecture.md).
+This skill enforces database architecture invariants for TradeManager's local relational store (`data/trading.db`), as specified in [architecture.md](architecture.md) and [references/architecture.md](references/architecture.md).
 
 ## Core Database Invariants
 

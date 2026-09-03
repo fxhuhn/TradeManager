@@ -4,8 +4,8 @@
 > It is referenced by `python-auditor`, `python-craftsman`, `python-creator`, and `python-tester` skills.
 >
 > **Cross-References:**
-> - [architecture.md](file:///Users/produktmanagement/Python/github/TradeManager/architecture.md) — High-level system design & public API reference
-> - [references/architecture.md](file:///Users/produktmanagement/Python/github/TradeManager/references/architecture.md) — DB schemas, state machines, CSV contracts, error matrices
+> - [architecture.md](architecture.md) — High-level system design & public API reference
+> - [references/architecture.md](references/architecture.md) — DB schemas, state machines, CSV contracts, error matrices
 
 ---
 
@@ -37,7 +37,7 @@ Every code decision must be evaluated against these four quality dimensions, in 
 - **Modern Python:** Use Python 3.12+ syntax exclusively.
 - **Asynchronous Design:** The system runs fully in a single-threaded `asyncio` event loop. All blocking operations (database, network, file reads) must be non-blocking.
 - **Standard Library First:** Minimize 3rd party dependencies. Maximize use of `itertools`, `functools`, `collections`, `decimal`, and `typing`. Do **NOT** use `pydantic`.
-- **Decimal Financial Precision:** Every price, quantity, commission, slippage, and profit/loss calculation **MUST** use `decimal.Decimal`. Using `float` for monetary values is a **CRITICAL** violation (precision loss enables value skimming). See [architecture.md §2.2](file:///Users/produktmanagement/Python/github/TradeManager/architecture.md).
+- **Decimal Financial Precision:** Every price, quantity, commission, slippage, and profit/loss calculation **MUST** use `decimal.Decimal`. Using `float` for monetary values is a **CRITICAL** violation (precision loss enables value skimming). See [architecture.md §2.2](architecture.md).
 - **Functional Core, Imperative Shell:** See Section 8 for detailed rules.
 - **The Step-down Rule:** Organize code like a newspaper article. High-level orchestrator functions must appear first, followed by lower-level implementation details and helper functions.
 - **Boy Scout Rule:** If you touch a file, improve it (fix types, formatting).
@@ -191,7 +191,7 @@ def calculate_moving_average(
     - No bare `except:` clauses.
     - No silent swallowing of errors (`except SomeError: pass`).
     - No `print()` statements. Use `logger`.
-- **Fail-Closed Principle:** If the database fails or network drops, trades must **NOT** proceed. The system must halt and alert (see [error_codes.py](file:///Users/produktmanagement/Python/github/TradeManager/app/trading/error_codes.py) for classification).
+- **Fail-Closed Principle:** If the database fails or network drops, trades must **NOT** proceed. The system must halt and alert (see [error_codes.py](app/trading/error_codes.py) for classification).
 - **Errors should never pass silently** (Zen of Python). Every exception must be either raised, logged, or explicitly re-raised with context.
 - **Information Security:** Never log `strategy_name`, `account_id`, or position sizes at `INFO` level in production. Log *errors*, not *alpha*.
 

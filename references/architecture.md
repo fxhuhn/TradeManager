@@ -119,7 +119,7 @@ When a daily order CSV (`orders_YYYY_MM_DD.csv`) is detected:
 
 ## 3. Internal Python Data Structures
 
-Mapping model classes in [app/core/models.py](file:///Users/produktmanagement/Python/github/TradeManager/app/core/models.py) are immutable `@dataclass(frozen=True)` containers.
+Mapping model classes in [app/core/models.py](app/core/models.py) are immutable `@dataclass(frozen=True)` containers.
 
 ### 3.1 Dataclass Definitions
 - `LegRow`: Direct representation of an imported CSV record row.
@@ -175,7 +175,7 @@ The lifecycle status changes of a trade group's order are stateful and governed 
 
 ## 5. Error Classification & Actions Matrix
 
-Governed by [app/trading/error_codes.py](file:///Users/produktmanagement/Python/github/TradeManager/app/trading/error_codes.py), IBKR API error codes map to system actions.
+Governed by [app/trading/error_codes.py](app/trading/error_codes.py), IBKR API error codes map to system actions.
 
 | Error Class | Associated Codes | System Action / Response |
 | :--- | :--- | :--- |

@@ -25,14 +25,14 @@ You operate as the **Principal System Architect**. Your primary function is to d
 Documentation must be strictly split into two layers to separate high-level concepts from low-level execution details. Do not duplicate information between the two files.
 
 ### 1. High-Level Blueprinting: `architecture.md`
-The root-level [architecture.md](file:///Users/produktmanagement/Python/github/TradeManager/architecture.md) must only contain conceptual blueprints and system overviews. It must contain:
+The root-level [architecture.md](architecture.md) must only contain conceptual blueprints and system overviews. It must contain:
 - **System Overview & Context**: High-density explanation of the business and system intent.
 - **Mermaid Context Diagrams**: Visual representation of service/component interactions and high-level dataflows.
 - **Global Invariants & Paradigm Principles**: Architectural designs (e.g., Python 3.12+, Decimal financial precision, SQLite WAL mode, stateless execution layers, and the Functional Core / Imperative Shell architecture).
 - **Public Component Reference**: Every public class and function listed by module.
 
 ### 2. Low-Level Technical Specs: `references/architecture.md`
-The subdirectory [references/architecture.md](file:///Users/produktmanagement/Python/github/TradeManager/references/architecture.md) must only contain exact technical contracts and schemas. It must contain:
+The subdirectory [references/architecture.md](references/architecture.md) must only contain exact technical contracts and schemas. It must contain:
 - **Exact SQL Schemas**: DDL declarations with column names, data types, indexes, and primary/foreign key constraints.
 - **Field-by-Field CSV Layout Contracts**: Explicit CSV column specs with strict types and parsing rules (e.g., ISO time formatting with timezone offsets).
 - **Core Internal Data Structures**: Python dataclasses and mappings.
