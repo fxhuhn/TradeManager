@@ -2,18 +2,16 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from ib_async import OrderStatus, Trade
 
-from app.core.config import load_config
 from app.trading.worker import process_trade_group
 
 
 @pytest.mark.asyncio
-async def test_worker_process_bounce_bandit_futures_bracket(db) -> None:
+async def test_worker_process_bounce_bandit_futures_bracket(db, test_config) -> None:
     """Verifiziert, dass der Worker BounceBandit Future-Orders als atomaren Bracket übermittelt."""
     # 1. Orders in DB anlegen
     await db.execute(
@@ -26,7 +24,7 @@ async def test_worker_process_bounce_bandit_futures_bracket(db) -> None:
     )
     await db.commit()
 
-    config = load_config(Path("."))
+    config = test_config
     mock_notifier = MagicMock()
     mock_notifier.send_bracket_order_submitted = AsyncMock()
     mock_notifier.send_order_failed = AsyncMock()
@@ -109,7 +107,7 @@ async def test_worker_process_bounce_bandit_futures_bracket(db) -> None:
 
 
 @pytest.mark.asyncio
-async def test_worker_futures_fail_closed_on_cushion_violation(db) -> None:
+async def test_worker_futures_fail_closed_on_cushion_violation(db, test_config) -> None:
     """Verifiziert, dass bei zu geringem Cushion (<5%) die Order sofort abbricht (Fail-Closed)."""
     await db.execute(
         """
@@ -121,7 +119,7 @@ async def test_worker_futures_fail_closed_on_cushion_violation(db) -> None:
     )
     await db.commit()
 
-    config = load_config(Path("."))
+    config = test_config
     mock_notifier = MagicMock()
     mock_notifier.send_order_failed = AsyncMock()
 

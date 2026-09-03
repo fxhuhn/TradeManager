@@ -4,19 +4,17 @@ from __future__ import annotations
 
 import asyncio
 from decimal import Decimal
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from ib_async import Future
 
-from app.core.config import load_config
 from app.core.models import LegRow
 from app.services.importer import _process_and_upsert_group
 
 
 @pytest.mark.asyncio
-async def test_bounce_bandit_qqq_transformation(db, monkeypatch) -> None:
+async def test_bounce_bandit_qqq_transformation(db, test_config, monkeypatch) -> None:
     """Prüft, dass eine BounceBandit QQQ-Order in 1 MNQ-Kontrakt transformiert und in der DB gesichert wird."""
     mock_ib = MagicMock()
     mock_ib.isConnected.return_value = True
@@ -73,7 +71,7 @@ async def test_bounce_bandit_qqq_transformation(db, monkeypatch) -> None:
     ]
 
     queue: asyncio.Queue[str] = asyncio.Queue()
-    config = load_config(Path("."))
+    config = test_config
 
     await _process_and_upsert_group(
         db=db,
