@@ -6,7 +6,7 @@ Executes all 5 review gates sequentially:
 1. Linting & Formatting Check (ruff)
 2. Test Suite & Coverage Verification (pytest)
 3. Dead Code & Architecture Audit (vulture)
-4. Security Audit (bandit)
+4. Security & Dependency Audit (bandit, pip-audit)
 5. Architecture Synchronization Check (check_sync.py)
 """
 
@@ -129,11 +129,23 @@ def main() -> int:
         ):
             return 1
 
-    # Gate 4: Security Audit (Bandit)
+    # Gate 4: Security & Dependency Audit (Bandit & pip-audit)
     if resolve_tool("bandit"):
         bandit_command = ["bandit", "-ll", "-x", "tests", "-r", "app"]
         if not run_gate(
             "Gate 4: Security Audit (Bandit)", bandit_command, allow_missing_tool=True
+        ):
+            return 1
+
+    if resolve_tool("pip-audit"):
+        pip_audit_cmd = ["pip-audit"]
+        req_file = ROOT_DIR / "requirements.txt"
+        if req_file.is_file():
+            pip_audit_cmd.extend(["-r", str(req_file)])
+        if not run_gate(
+            "Gate 4: Dependency Vulnerability Audit (pip-audit)",
+            pip_audit_cmd,
+            allow_missing_tool=True,
         ):
             return 1
 

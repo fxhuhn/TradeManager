@@ -43,8 +43,8 @@ pytest tests/ -v --tb=short --cov=app --cov-report=term-missing --cov-fail-under
 ### 🔍 Gate 3: Architecture Audit
 Trigger the `python-auditor` skill (workflow `/auditor`) to run a complete Quality Pyramid audit (Correctness → Readability → Maintainability → Changeability) on your changes.
 
-### 🛡️ Gate 4: Security Audit
-Trigger the `python-security` skill (workflow `/security`) to run a zero-trust audit for precision loss (using Decimal instead of float), injection risks, and serialization vulnerabilities.
+### 🛡️ Gate 4: Security & Dependency Audit
+Execute static security analysis (`bandit`) and dependency vulnerability auditing (`pip-audit -r requirements.txt`). Trigger the `python-security` skill (workflow `/security`) to run a zero-trust audit for precision loss (using Decimal instead of float), injection risks, and serialization vulnerabilities.
 
 ### 📐 Gate 5: Architecture Sync
 Verify all public classes and functions are documented:

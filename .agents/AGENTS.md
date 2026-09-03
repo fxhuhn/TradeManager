@@ -30,16 +30,16 @@ whenever a task involves one of the domains below:
 
 | Domain                              | Skill(s)                                                           |
 |-------------------------------------|--------------------------------------------------------------------|
-| Architecture Design & Documentation | `architect-design`                                                 |
+| Architecture Design & Documentation | `architect-design` (workflow: `/architect`)                        |
 | Architecture Sync Validation        | `architecture-sync`                                                |
-| Multi-File Orchestration & Rollouts | `architect-design` (includes orchestration guidelines)             |
+| Multi-File Orchestration & Rollouts | `architect-design` (workflow: `/architect`)                        |
 | IBKR API & Trading Operations       | `ibkr-agent`                                                       |
 | Python Architecture & Code Quality  | `python-craftsman` / `python-auditor` / `python-creator`           |
 | Security & Compliance               | `python-security`                                                  |
 | Testing & SDET                      | `python-tester`                                                    |
 | Database & Persistence Management   | `sqlite-persistence`                                               |
 | Code Refactoring & Transformation   | `python-craftsman` / `python-tester` / `python-auditor` (workflow: `/refactor`) |
-| Comprehensive Code Review           | `full-review` (orchestrates `python-auditor`, `python-tester`, `python-security`) |
+| Comprehensive Code Review & Gates   | `python-craftsman` (workflow: `/craft`)                            |
 
 ### Step 3 — Analysis & Implementation
 
