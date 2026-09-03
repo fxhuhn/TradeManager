@@ -82,6 +82,10 @@ brain/
 .agents/skills/**/*.pyc
 .agents/skills/**/__pycache__/
 
+.agents/plugins/
+.agents/rules/production.md
+
+
 # Custom App Data
 /data
 /doc/*.pdf
