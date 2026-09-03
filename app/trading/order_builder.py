@@ -5,14 +5,21 @@ Erstellt SMART-Routing US-Aktienkontrakte und konfiguriert
 die entsprechenden Stop-, Limit- oder Market-Orders inkl. OCA-Gruppen.
 """
 
+from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
+from typing import Final
+from zoneinfo import ZoneInfo
 
 import structlog
-from ib_async import Order, Stock
+from ib_async import Contract, Future, Order, PriceCondition, Stock, TimeCondition
 
 from app.core.models import OrderRow
 
 logger = structlog.get_logger()
+
+# Permanente IBKR Contract ID für QQQ STK SMART USD
+QQQ_CON_ID: Final[int] = 320227571
+CME_TIMEZONE: Final[ZoneInfo] = ZoneInfo("America/Chicago")
 
 
 def normalize_symbol(symbol: str) -> str:
@@ -60,6 +67,43 @@ def make_stock_contract(symbol: str) -> Stock:
         return Stock(clean_symbol, "SMART", "EUR", primaryExchange="IBIS2")
 
     return Stock(clean_symbol, "SMART", "USD")
+
+
+def make_future_contract(
+    symbol: str,
+    contract_month: str = "",
+    exchange: str = "CME",
+    currency: str = "USD",
+) -> Future:
+    """Erstellt ein TWS-konformes Future-Vertragsobjekt (z. B. für MNQ oder MES).
+
+    Unterstützt sowohl konkrete LocalSymbols (z. B. 'MNQU6') als auch
+    Basis-Symbole mit Verfallsmonat (z. B. symbol='MNQ', contract_month='20260918').
+    """
+    clean_symbol = normalize_symbol(symbol)
+    if len(clean_symbol) > 3 and any(char.isdigit() for char in clean_symbol):
+        return Future(
+            localSymbol=clean_symbol,
+            exchange=exchange,
+            currency=currency,
+        )
+    return Future(
+        symbol=clean_symbol,
+        lastTradeDateOrContractMonth=contract_month,
+        exchange=exchange,
+        currency=currency,
+    )
+
+
+def make_contract_for_order(order_row: OrderRow) -> Contract:
+    """Erstellt ein passendes Contract-Objekt (Stock oder Future) für die gegebene OrderRow."""
+    if order_row.sec_type == "FUT":
+        return make_future_contract(
+            symbol=order_row.symbol,
+            exchange=order_row.exchange or "CME",
+            currency="USD",
+        )
+    return make_stock_contract(order_row.symbol)
 
 
 # Xetra tick-size table: (lower_bound, tick_size)
@@ -146,6 +190,41 @@ def build_order(order_row: OrderRow) -> Order:
             "Unbekannter Order-Typ. Keinen Preis zugewiesen.",
             order_type=order.orderType,
         )
+
+    # Spezifische Behandlung für BounceBandit Future-Orders (MNQ @ CME)
+    is_bounce_bandit_future = (
+        order_row.strategy_name is not None
+        and order_row.strategy_name.lower() == "bouncebandit"
+        and order_row.sec_type == "FUT"
+    )
+
+    if is_bounce_bandit_future:
+        order.orderType = "MKT"
+        order.outsideRth = True
+        today_string = datetime.now(CME_TIMEZONE).strftime("%Y%m%d")
+
+        if order_row.bracket_role == "ENTRY":
+            order.goodAfterTime = f"{today_string} 08:30:00 US/Central"
+        elif order_row.bracket_role in ("TP", "EXIT"):
+            order.goodAfterTime = f"{today_string} 14:59:00 US/Central"
+            order.conditionsIgnoreRth = False
+            order.conditionsCancelOrder = False
+
+            if order_row.target_price is not None:
+                price_condition = PriceCondition()
+                price_condition.conId = QQQ_CON_ID
+                price_condition.exch = "SMART"
+                price_condition.isMore = True  # QQQ Kurs >= target_price
+                price_condition.price = float(order_row.target_price)
+                price_condition.triggerMethod = 2  # Last Price
+                price_condition.conjunction = "a"
+
+                time_condition = TimeCondition()
+                time_condition.isMore = False  # Zeit <= 15:00:00 US/Central
+                time_condition.time = f"{today_string} 15:00:00 US/Central"
+                time_condition.conjunction = "a"
+
+                order.conditions = [price_condition, time_condition]
 
     # OCA (One-Cancels-All) Gruppe konfigurieren für SL, TP und EXIT
     if order_row.bracket_role in ("SL", "TP", "EXIT"):

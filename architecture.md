@@ -204,22 +204,27 @@ This section provides a detailed reference of all public classes and functions i
 - `normalize_symbol` (Function): Normalizes asset symbols by stripping exchange suffixes (e.g., `.DE`).
 - `symbols_match` (Function): Robustly verifies whether two symbols match after normalization.
 - `make_stock_contract` (Function): Instantiates Stock contract structures for TWS.
+- `make_future_contract` (Function): Instantiates Future contract structures for CME (e.g., MNQ, MES).
+- `make_contract_for_order` (Function): Dynamically creates either a Stock or Future contract based on OrderRow.
 - `get_tick_size` (Function): Returns minimum tick movement of given stock asset.
 - `round_to_tick` (Function): Snaps limit prices to valid tick offsets.
-- `build_order` (Function): Constructs raw `Order` models with stop/limit brackets.
+- `build_order` (Function): Constructs raw `Order` models with stop/limit brackets or conditional parameters.
 - `extract_transmitted_price` (Function): Extracts actual tick-rounded price from a constructed `Order`.
 
-### 4.12 Module: `app.trading.recovery`
+### 4.12 Module: `app.trading.future_resolver`
+- `resolve_active_future_contract` (Function): Dynamically resolves the active CME future contract with highest volume.
+
+### 4.13 Module: `app.trading.recovery`
 - `run_recovery` (Function): Restores system database matching gateway states.
 - `fetch_active_orders` (Function): Requests outstanding execution brackets.
 - `fetch_completed_orders` (Function): Fetches finalized bracket details.
 - `reconcile_broker_positions` (Function): Reconciles live IBKR positions with local database, auto-recovering unassigned positions into orders and executions tables.
 
 
-### 4.13 Module: `app.trading.retry`
+### 4.14 Module: `app.trading.retry`
 - `handle_retriable_error` (Function): Processes transitory order errors for rescheduling.
 
-### 4.14 Module: `app.trading.settlement`
+### 4.15 Module: `app.trading.settlement`
 - `trigger_settlement` (Function): Evaluates completed execution lists to write final logs.
 - `get_settlement_lock` (Function): Obtains execution lock for a trade group.
 - `cleanup_settlement_lock` (Function): Releases execution lock for a trade group.
@@ -228,11 +233,11 @@ This section provides a detailed reference of all public classes and functions i
 - `SettlementOutput` (Class): Summary variables calculated for DB storage.
 - `calculate_settlement` (Function): Resolves net price, profit, and commissions.
 
-### 4.15 Module: `app.trading.worker`
+### 4.16 Module: `app.trading.worker`
 - `process_trade_group` (Function): Core worker loop evaluating a single trade group sequence.
 - `handle_reauthorization_wait` (Function): Pauses order execution upon a token/reauthorization requirement, performs periodic What-If probes, sends Telegram alerts, and cancels expired orders upon market close.
 
-### 4.16 Module: `app.main`
+### 4.17 Module: `app.main`
 - `TradingSystemOrchestrator` (Class): Core system loop coordinator and scheduler.
   - `create_database_connection` (Method)
   - `trigger_settlement_callback` (Method)

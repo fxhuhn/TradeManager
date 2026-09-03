@@ -29,7 +29,7 @@ from app.trading.error_codes import (
 from app.trading.order_builder import (
     build_order,
     extract_transmitted_price,
-    make_stock_contract,
+    make_contract_for_order,
     normalize_symbol,
 )
 
@@ -506,7 +506,7 @@ async def _verify_margin_and_cushion(
     if not passed_cushion:
         return False, entry_order
 
-    contract = make_stock_contract(entry_order.symbol)
+    contract = make_contract_for_order(entry_order)
     simulated_order = build_order(entry_order)
 
     try:
@@ -629,7 +629,7 @@ async def _transmit_entry_order(
         status="Submitted",
     )
 
-    contract = make_stock_contract(entry_order.symbol)
+    contract = make_contract_for_order(entry_order)
     ib_entry_order = build_order(entry_order)
 
     # Den tatsächlich an TWS übermittelten (tick-gerundeten) Preis in OrderRow und DB synchronisieren
@@ -779,7 +779,7 @@ async def _place_single_child_order(
         status="Submitted",
     )
 
-    contract = make_stock_contract(child.symbol)
+    contract = make_contract_for_order(child)
     ib_child_order = build_order(child)
 
     # Den tatsächlich an TWS übermittelten (tick-gerundeten) Preis in OrderRow und DB synchronisieren
@@ -849,17 +849,30 @@ async def _place_and_verify_order(
         "ValidationError",
         "Error",
     ):
-        is_success = await _handle_order_rejection(
-            db,
-            trade,
-            order_row,
-            tws_order_id,
-            notifier,
-            interactive_brokers=interactive_brokers,
-            config=config,
+        parent_id_val = getattr(ib_order, "parentId", 0)
+        has_parent = isinstance(parent_id_val, int) and parent_id_val > 0
+        has_actual_error = any(
+            (getattr(entry, "errorCode", 0) not in (0, 399, 2109))
+            or getattr(entry, "status", "") in ("ValidationError", "Error")
+            for entry in getattr(trade, "log", [])
         )
-        if not is_success:
-            return False
+        is_waiting_child = (
+            trade.orderStatus.status == "Inactive"
+            and has_parent
+            and not has_actual_error
+        )
+        if not is_waiting_child:
+            is_success = await _handle_order_rejection(
+                db,
+                trade,
+                order_row,
+                tws_order_id,
+                notifier,
+                interactive_brokers=interactive_brokers,
+                config=config,
+            )
+            if not is_success:
+                return False
 
     return True
 
@@ -892,19 +905,19 @@ async def _handle_order_rejection(
             for entry in trade.log
             if entry.errorCode != 0 or entry.status in ("ValidationError", "Error")
         ]
-        is_only_warning_399: bool = len(log_errors) > 0 and all(
-            entry.errorCode == 399 for entry in log_errors
+        is_only_benign_warnings: bool = len(log_errors) > 0 and all(
+            entry.errorCode in (399, 2109) for entry in log_errors
         )
-        if is_only_warning_399:
+        if is_only_benign_warnings:
             logger.info(
-                "Ignoring Warning 399 (ValidationError/out-of-hours) during order placement",
+                "Ignoring benign warning (399/2109) during order placement",
                 order_id=tws_order_id,
                 symbol=order_row.symbol,
             )
             return True
 
         for entry in log_errors:
-            if entry.errorCode != 399:
+            if entry.errorCode not in (399, 2109):
                 error_msg = entry.message
                 tws_code = entry.errorCode
                 break
@@ -927,7 +940,7 @@ async def _handle_order_rejection(
 
     if is_reauthorization_error(tws_code, clean_error_msg):
         if interactive_brokers is not None and config is not None:
-            contract = make_stock_contract(order_row.symbol)
+            contract = make_contract_for_order(order_row)
             simulated_order = build_order(order_row)
             simulated_order.whatIf = True
             authorized = await handle_reauthorization_wait(

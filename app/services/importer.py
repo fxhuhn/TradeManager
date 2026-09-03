@@ -25,6 +25,7 @@ from app.core.db import transaction
 from app.core.models import LegRow
 from app.services.csv_reader import load_csv, validate_group
 from app.services.notifier import TelegramNotifier
+from app.trading.future_resolver import resolve_active_future_contract
 
 logger = structlog.get_logger()
 
@@ -420,11 +421,62 @@ async def _process_and_upsert_group(
                 return
     # ----------------------------------------
 
+    # --- TRANSFORMATION FÜR BOUNCEBANDIT QQQ -> MNQ FUTURE ---
+    is_bounce_bandit_qqq = (
+        strategy is not None
+        and strategy.lower() == "bouncebandit"
+        and first_leg.symbol.upper() == "QQQ"
+    )
+
+    if is_bounce_bandit_qqq:
+        try:
+            active_contract = await resolve_active_future_contract(
+                interactive_brokers, symbol="MNQ", exchange="CME"
+            )
+            future_symbol = active_contract.localSymbol or "MNQ"
+        except Exception as resolve_error:
+            logger.error(
+                "Failed to resolve active MNQ future contract for BounceBandit",
+                error=str(resolve_error),
+                trade_group_id=trade_group_id,
+            )
+            future_symbol = "MNQ"
+
+        logger.info(
+            "Transforming BounceBandit QQQ order to MNQ future contract",
+            trade_group_id=trade_group_id,
+            resolved_contract=future_symbol,
+        )
+
+        raw_legs = [
+            dataclasses.replace(
+                leg,
+                symbol=future_symbol,
+                sec_type="FUT",
+                exchange="CME",
+                quantity=1,
+            )
+            for leg in raw_legs
+        ]
+        entry_leg = next((leg for leg in raw_legs if leg.bracket_role == "ENTRY"), None)
+        first_leg = raw_legs[0]
+
+        await notifier.send_importer_info(
+            file_name=trade_group_id,
+            status="Future Transformation",
+            details=(
+                f"BounceBandit QQQ wurde in 1 Kontrakt MNQ ({future_symbol}) Future @ CME transformiert. "
+                "Order-Sizing wurde auf 1 Kontrakt fixiert."
+            ),
+            emoji="🔄",
+            title="STRATEGIE-TRANSFORMATION",
+        )
+
     account_id = entry_leg.account_id if entry_leg else first_leg.account_id
     account_id = resolve_account_id(interactive_brokers, account_id)
 
-    target_quantity = first_leg.quantity
-    if entry_leg:
+    target_quantity = 1 if is_bounce_bandit_qqq else first_leg.quantity
+    if entry_leg and not is_bounce_bandit_qqq:
         balance_metrics = await fetch_account_balance_metrics(
             interactive_brokers, account_id
         )

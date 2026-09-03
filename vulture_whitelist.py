@@ -22,6 +22,15 @@ _.ocaType
 _.transmit
 _.parentId
 _.whatIf
+_.outsideRth
+_.goodAfterTime
+_.conditionsIgnoreRth
+_.conditionsCancelOrder
+_.exch
+_.isMore
+_.triggerMethod
+_.conjunction
+_.conditions
 
 # Simulated / Mocked TWS client methods
 _.reqAccountSummary
