@@ -25,7 +25,7 @@ from ib_async import IB
 
 from app.core.config import Config, load_config
 from app.core.db import get_db, run_db_backup, run_migrations, verify_db_integrity
-from app.core.logging_setup import configure_logging
+from app.core.logging_setup import TAG_RECONNECT, configure_logging
 from app.services.alert_watcher import alert_watcher, order_status_sync_loop
 from app.services.importer import csv_directory_watcher
 from app.services.notifier import TelegramNotifier
@@ -182,6 +182,7 @@ class TradingSystemOrchestrator:
                 interval_seconds=self.config.app.alert_watcher_interval_s,
                 dead_order_threshold_minutes=self.config.app.dead_order_threshold_minutes,
                 max_slippage_percentage=self.config.account.default_limit_pct,
+                archive_dir=self.root_directory_path / "data" / "orders" / "archive",
             )
         )
 
@@ -246,7 +247,7 @@ class TradingSystemOrchestrator:
 
     async def _execute_reconnect_loop(self) -> None:
         """Führt die Wiederverbindungsschleife mit steigenden Intervallen aus."""
-        logger.info("Starting automatic reconnection...")
+        logger.info(f"{TAG_RECONNECT} Starting automatic reconnection...")
         attempt = 1
         max_attempts = self.config.tws.reconnect_max_attempts
 

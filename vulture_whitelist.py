@@ -45,3 +45,5 @@ run_recovery
 handle_retriable_error
 trigger_settlement
 execution_worker
+_.send_daily_summary
+_.send_archived_error_alert

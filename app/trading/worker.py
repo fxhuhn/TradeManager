@@ -20,6 +20,11 @@ from ib_async import IB, Contract, Order, Trade
 
 from app.core.config import Config
 from app.core.db import transaction
+from app.core.logging_setup import (
+    TAG_CUSHION_ALERT,
+    TAG_ORDER_REJECT,
+    TAG_REAUTH_WAIT,
+)
 from app.core.models import OrderRow, order_row_from_db_row
 from app.services.notifier import TelegramNotifier
 from app.trading.error_codes import (
@@ -266,7 +271,7 @@ async def _check_cushion_limit(
     min_cushion = Decimal(str(config.account.min_cushion_pct))
     if cushion_value is not None and cushion_value < min_cushion:
         logger.error(
-            "Cushion check failed. Order blocked.",
+            f"{TAG_CUSHION_ALERT} Cushion check failed. Order blocked.",
             symbol=entry_order.symbol,
             account=entry_order.account_id,
             cushion=f"{cushion_percentage:.1f}%",
@@ -372,7 +377,7 @@ async def handle_reauthorization_wait(
         True, wenn die Reautorisierung erfolgreich bestätigt wurde, sonst False (bei Börsenschluss).
     """
     logger.warning(
-        "Reauthorization required for order. Entering reauth wait loop.",
+        f"{TAG_REAUTH_WAIT} Reauthorization required for order. Entering reauth wait loop.",
         symbol=entry_order.symbol,
         trade_group_id=entry_order.trade_group_id,
         order_id=entry_order.order_id,
@@ -927,7 +932,7 @@ async def _handle_order_rejection(
         await asyncio.sleep(0.1)
 
     logger.error(
-        "Order transmission failed",
+        f"{TAG_ORDER_REJECT} Order transmission failed",
         order_id=tws_order_id,
         status=trade.orderStatus.status,
         symbol=order_row.symbol,

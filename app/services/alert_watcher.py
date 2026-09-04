@@ -9,6 +9,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Coroutine
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -30,14 +31,19 @@ async def alert_watcher(
     interval_seconds: int = 60,
     dead_order_threshold_minutes: int = 15,
     max_slippage_percentage: float = 0.01,
+    archive_dir: Path | None = None,
 ) -> None:
     """
     Asynchroner Alert-Watcher-Hauptloop (Hintergrunddienst).
 
-    Führt periodisch die Dead-Order-Überprüfung und die Slippage-Kontrolle aus.
+    Führt periodisch die Dead-Order-Überprüfung, Slippage-Kontrolle,
+    Hanging-Order-Erkennung und Dateisystem-Scans nach .err-Archivdateien aus.
     """
     logger.info("Starting Alert Watcher background service", interval=interval_seconds)
     state = AlertState()
+    resolved_archive_dir = (
+        archive_dir if archive_dir is not None else Path("data/orders/archive")
+    )
 
     while True:
         try:
@@ -49,6 +55,10 @@ async def alert_watcher(
                 )
                 # 2. Hohe Slippage Check
                 await check_high_slippage(db, notifier, state, max_slippage_percentage)
+                # 3. Hängende Created-Orders Check
+                await check_hanging_orders(db, notifier, state, threshold_minutes=10)
+                # 4. Archivierte Fehlerdateien (.err) Check
+                await check_archived_error_files(resolved_archive_dir, notifier, state)
             finally:
                 await db.close()
         except Exception as exception:
@@ -223,6 +233,8 @@ class AlertState:
     def __init__(self) -> None:
         self.reported_order_ids: set[int] = set()
         self.reported_trade_groups: set[str] = set()
+        self.reported_error_files: set[str] = set()
+        self.reported_hanging_order_ids: set[int] = set()
 
     def is_order_reported(self, order_id: int) -> bool:
         """Gibt an, ob die Order bereits gemeldet wurde."""
@@ -239,6 +251,105 @@ class AlertState:
     def mark_group_reported(self, trade_group_id: str) -> None:
         """Markiert die Trade-Gruppe als gemeldet."""
         self.reported_trade_groups.add(trade_group_id)
+
+    def is_file_reported(self, file_name: str) -> bool:
+        """Gibt an, ob die Fehlerdatei bereits gemeldet wurde."""
+        return file_name in self.reported_error_files
+
+    def mark_file_reported(self, file_name: str) -> None:
+        """Markiert die Fehlerdatei als gemeldet."""
+        self.reported_error_files.add(file_name)
+
+    def is_hanging_order_reported(self, order_id: int) -> bool:
+        """Gibt an, ob die hängende Order bereits gemeldet wurde."""
+        return order_id in self.reported_hanging_order_ids
+
+    def mark_hanging_order_reported(self, order_id: int) -> None:
+        """Markiert die hängende Order als gemeldet."""
+        self.reported_hanging_order_ids.add(order_id)
+
+
+async def check_archived_error_files(
+    archive_dir: Path,
+    notifier: TelegramNotifier,
+    state: AlertState,
+) -> None:
+    """Scannt das Archiv-Verzeichnis nach neuen .err-Dateien und alarmiert sofort.
+
+    Args:
+        archive_dir: Pfad zum Archiv-Verzeichnis.
+        notifier: Der Telegram-Notifier-Dienst.
+        state: Der AlertState-Zustand zur Vermeidung doppelter Meldungen.
+    """
+    if not archive_dir.exists() or not archive_dir.is_dir():
+        return
+
+    try:
+        err_files = sorted(archive_dir.glob("*.err"))
+        for err_file in err_files:
+            file_name = err_file.name
+            if not state.is_file_reported(file_name):
+                logger.warning(
+                    "Archived error file discovered by watcher",
+                    file_name=file_name,
+                )
+                if await notifier.send_archived_error_alert(file_name):
+                    state.mark_file_reported(file_name)
+    except Exception as exception:
+        logger.error(
+            "Error scanning archived error files",
+            archive_dir=str(archive_dir),
+            error=str(exception),
+        )
+
+
+async def check_hanging_orders(
+    db: aiosqlite.Connection,
+    notifier: TelegramNotifier,
+    state: AlertState,
+    threshold_minutes: int = 10,
+    current_time: datetime | None = None,
+) -> None:
+    """Scannt nach Orders im Status 'Created', die ungewöhnlich lange nicht verarbeitet wurden.
+
+    Args:
+        db: Die offene SQLite-Datenbankverbindung.
+        notifier: Der Telegram-Notifier-Dienst.
+        state: Der AlertState-Zustand.
+        threshold_minutes: Schwellenwert in Minuten, ab wann eine Order als hängend gilt.
+        current_time: Optionaler Referenzzeitpunkt für Tests.
+    """
+    query = """
+        SELECT order_id, trade_group_id, symbol
+        FROM orders
+        WHERE status = 'Created'
+    """
+    try:
+        async with db.execute(query) as cursor:
+            async for row in cursor:
+                order_id = int(row["order_id"])
+                symbol = str(row["symbol"])
+                trade_group_id = str(row["trade_group_id"])
+
+                if state.is_hanging_order_reported(order_id):
+                    continue
+
+                logger.warning(
+                    "Hanging created order detected",
+                    order_id=order_id,
+                    trade_group_id=trade_group_id,
+                    symbol=symbol,
+                )
+                message = (
+                    f"⚠️ <b>HÄNGENDE ORDER (Status: Created)</b> | <code>{symbol}</code>\n"
+                    f"├─ <b>Order-ID:</b> <code>{order_id}</code>\n"
+                    f"├─ <b>Trade-Gruppe:</b> <code>{trade_group_id}</code>\n"
+                    f"└─ <b>Hinweis:</b> Order verweilt länger als {threshold_minutes} Minuten in 'Created'."
+                )
+                if await notifier.send_message(message):
+                    state.mark_hanging_order_reported(order_id)
+    except Exception as exception:
+        logger.error("Error during hanging orders check", error=str(exception))
 
 
 async def _fetch_submitted_orders(

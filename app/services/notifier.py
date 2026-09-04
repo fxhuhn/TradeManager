@@ -432,3 +432,36 @@ class TelegramNotifier:
             f"└─ <b>Info:</b> Position ohne Strategie in der DB synchronisiert."
         )
         return await self.send_message(message)
+
+    async def send_archived_error_alert(
+        self, file_name: str, details: str = ""
+    ) -> bool:
+        """Sendet einen Administrator-Alarm, wenn eine .err-Archivdatei erkannt wurde."""
+        clean_details = _clean_html_text(details)
+        message = (
+            f"🚨 <b>ARCHIVIERTE FEHLERDATEI ENTDECKT</b>\n"
+            f"├─ <b>Datei:</b> <code>{file_name}</code>\n"
+            f"└─ <b>Details:</b> <i>{clean_details or 'Datei wurde mit .err archiviert. Manuelle Prüfung erforderlich.'}</i>"
+        )
+        return await self.send_message(message)
+
+    async def send_daily_summary(
+        self,
+        date_str: str,
+        total_orders: int,
+        filled_orders: int,
+        cancelled_orders: int,
+        net_pnl: Decimal,
+        commissions: Decimal,
+        file_status: str,
+    ) -> bool:
+        """Sendet einen strukturierten Tagesabschlussbericht (EOD-Summary)."""
+        pnl_emoji = "🟢" if net_pnl >= 0 else "🔴"
+        message = (
+            f"📊 <b>TAGESABSCHLUSS-BERICHT</b> | <code>{date_str}</code>\n"
+            f"├─ <b>CSV-Status:</b> <code>{file_status}</code>\n"
+            f"├─ <b>Orders:</b> Gesamt: {total_orders} • Gefüllt: {filled_orders} • Storniert: {cancelled_orders}\n"
+            f"├─ <b>Kommissionen:</b> <code>$ {commissions:.2f}</code>\n"
+            f"└─ <b>Realisierter Net PnL:</b> {pnl_emoji} <code>$ {net_pnl:,.2f}</code>"
+        )
+        return await self.send_message(message)

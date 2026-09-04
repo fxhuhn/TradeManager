@@ -147,11 +147,17 @@ This section provides a detailed reference of all public classes and functions i
 - `order_status_sync_loop` (Function): Continuous task to synchronize order statuses.
 - `check_dead_orders` (Function): Periodically checks for unresponsive orders.
 - `check_high_slippage` (Function): Compares actual fills against targets for slippage warnings.
+- `check_archived_error_files` (Function): Periodically scans archive directory for error files.
+- `check_hanging_orders` (Function): Periodically checks for orders lingering in Created status.
 - `AlertState` (Class): Manages reported order and group identifiers to prevent duplicate alerts.
   - `is_order_reported` (Method)
   - `mark_order_reported` (Method)
   - `is_group_reported` (Method)
   - `mark_group_reported` (Method)
+  - `is_file_reported` (Method)
+  - `mark_file_reported` (Method)
+  - `is_hanging_order_reported` (Method)
+  - `mark_hanging_order_reported` (Method)
 
 ### 4.6 Module: `app.services.csv_reader`
 - `validate_group` (Function): Asserts bracket consistency and validity of leg rows.
@@ -181,6 +187,8 @@ This section provides a detailed reference of all public classes and functions i
   - `send_high_margin_usage_warning` (Method)
   - `send_unassigned_position_recovered` (Method)
   - `send_broker_connection_status` (Method)
+  - `send_archived_error_alert` (Method)
+  - `send_daily_summary` (Method)
 
 
 ### 4.9 Module: `app.trading.callbacks`
@@ -250,3 +258,9 @@ This section provides a detailed reference of all public classes and functions i
   - `database_backup_loop` (Method)
 - `signal_handler` (Function): Receives OS signals for cleanup.
 - `connect_to_tws` (Function): Establishes gateway network socket connection.
+
+### 4.18 Module: `app.cli.status`
+- `SystemStatusReport` (Class): Aggregates runtime system, file, and database statistics.
+- `generate_system_status_report` (Function): Collects and aggregates database and filesystem states.
+- `format_status_report` (Function): Formats the status report into human-readable console text.
+- `main` (Function): CLI entrypoint executing status checks.

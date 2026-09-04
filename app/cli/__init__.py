@@ -1,0 +1,1 @@
+"""CLI-Diagnosetools für TradeManager."""

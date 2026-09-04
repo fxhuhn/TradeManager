@@ -9,6 +9,12 @@ from typing import Any
 import structlog
 from structlog.types import Processor
 
+TAG_FILE_ERROR: str = "[TM_FILE_ERROR]"
+TAG_ORDER_REJECT: str = "[TM_ORDER_REJECT]"
+TAG_REAUTH_WAIT: str = "[TM_REAUTH_WAIT]"
+TAG_CUSHION_ALERT: str = "[TM_CUSHION_ALERT]"
+TAG_RECONNECT: str = "[TM_RECONNECT]"
+
 
 def _simplify_ibkr_warning(warning_message: str) -> str:
     """Extracts key details from a long raw Trade representation in IBKR warning."""

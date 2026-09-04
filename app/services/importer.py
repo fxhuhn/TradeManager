@@ -22,6 +22,7 @@ from ib_async import IB
 
 from app.core.config import Config
 from app.core.db import transaction
+from app.core.logging_setup import TAG_FILE_ERROR
 from app.core.models import LegRow
 from app.services.csv_reader import load_csv, validate_group
 from app.services.notifier import TelegramNotifier
@@ -289,7 +290,7 @@ async def _process_daily_csv_file(
                 for item in failed_orders_summary
             )
             logger.warning(
-                "Order file completed with cancellations/errors and renamed to .err",
+                f"{TAG_FILE_ERROR} Order file completed with cancellations/errors and renamed to .err",
                 file=csv_file.name,
                 error_file=error_path.name,
                 failed_orders=failed_orders_summary,
