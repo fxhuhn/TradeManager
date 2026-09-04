@@ -1382,3 +1382,159 @@ async def test_process_daily_csv_file_with_successful_orders_renames_to_bak(
     call_kwargs = mock_notifier.send_importer_info.call_args[1]
     assert call_kwargs["title"] == "DATEI IMPORTIERT"
     assert call_kwargs["status"] == "Erfolgreich"
+
+
+@pytest.mark.asyncio
+async def test_process_daily_csv_file_ignores_cancelled_orders_from_previous_days(
+    tmp_path: Path, mock_config: Config, db: aiosqlite.Connection
+) -> None:
+    """Verifies that historical cancelled orders from prior days do NOT cause .err archive."""
+    from app.services.importer import _process_daily_csv_file
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    test_csv = data_dir / "orders_2026_09_04.csv"
+    test_csv.write_text("dummy,content", encoding="utf-8")
+
+    # Order from previous day that was cancelled (e.g. DAY order expired yesterday)
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status, transmitted_at)
+        VALUES (3003, 'TG_SWING_POS', 'ACC1', 'EXIT', 'AAPL', 'STK', 'SMART', 'SELL', 10, 'LMT', 160.0, 'Cancelled', '2026-09-03 05:00:00')
+        """
+    )
+    # Order from today that was successfully presubmitted
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status, transmitted_at)
+        VALUES (3004, 'TG_SWING_POS', 'ACC1', 'EXIT', 'AAPL', 'STK', 'SMART', 'SELL', 10, 'MOC', 0.0, 'PreSubmitted', '2026-09-04 05:00:30')
+        """
+    )
+    await db.commit()
+
+    async def db_factory():
+        conn = await aiosqlite.connect("file::memory:?cache=shared", uri=True)
+        conn.row_factory = aiosqlite.Row
+        return conn
+
+    mock_ib = MagicMock()
+    mock_notifier = MagicMock()
+    mock_notifier.send_importer_info = AsyncMock(return_value=True)
+    mock_queue = asyncio.Queue()
+
+    with patch(
+        "app.services.importer.run_csv_import",
+        new_callable=AsyncMock,
+        return_value=["TG_SWING_POS"],
+    ):
+        await _process_daily_csv_file(
+            db_factory=db_factory,
+            interactive_brokers=mock_ib,
+            csv_file=test_csv,
+            queue=mock_queue,
+            notifier=mock_notifier,
+            config=mock_config,
+        )
+
+    assert not test_csv.exists()
+    bak_csv = data_dir / "archive" / "orders_2026_09_04.csv.bak"
+    assert bak_csv.exists()
+    err_csv = data_dir / "archive" / "orders_2026_09_04.csv.err"
+    assert not err_csv.exists()
+    mock_notifier.send_importer_info.assert_called_once()
+    call_kwargs = mock_notifier.send_importer_info.call_args[1]
+    assert call_kwargs["title"] == "DATEI IMPORTIERT"
+    assert call_kwargs["status"] == "Erfolgreich"
+
+
+@pytest.mark.asyncio
+async def test_run_csv_import_only_returns_queued_trade_groups(
+    tmp_path: Path, mock_config: Config, db: aiosqlite.Connection
+) -> None:
+    """Verifies that run_csv_import returns only trade groups that were actually queued."""
+    from app.services.importer import run_csv_import
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    # Friday 2026-09-04
+    test_csv = data_dir / "orders_2026_09_04.csv"
+    test_csv.write_text(
+        "trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name,currency\n"
+        "1438_DipBuyer_PTC,ENTRY,PTC,STK,SMART,U19605236,BUY,41,LMT,145.00,DAY,DipBuyer,\n"
+        "1438_DipBuyer_PTC,TP,PTC,STK,SMART,U19605236,SELL,41,LOC,154.28,DAY,DipBuyer,\n",
+        encoding="utf-8",
+    )
+
+    mock_ib = MagicMock()
+    mock_notifier = MagicMock()
+    mock_notifier.send_importer_info = AsyncMock(return_value=True)
+    mock_queue = asyncio.Queue()
+
+    # DipBuyer on Friday without existing DB entry is skipped and not queued
+    imported_ids = await run_csv_import(
+        db=db,
+        interactive_brokers=mock_ib,
+        csv_path=test_csv,
+        queue=mock_queue,
+        notifier=mock_notifier,
+        config=mock_config,
+    )
+
+    assert imported_ids == []
+    assert mock_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_process_daily_csv_file_treats_expired_transmitted_day_orders_as_success(
+    tmp_path: Path, mock_config: Config, db: aiosqlite.Connection
+) -> None:
+    """Verifies that an order transmitted today and cancelled at EOD (normal market expiry) is NOT an error."""
+    from app.services.importer import _process_daily_csv_file
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    test_csv = data_dir / "orders_2026_09_04.csv"
+    test_csv.write_text("dummy,content", encoding="utf-8")
+
+    # Order that was transmitted today, but expired at EOD because market conditions were not met
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status, transmitted_at)
+        VALUES (3005, 'TG_COND_EXPIRED', 'ACC1', 'EXIT', 'MSFT', 'STK', 'SMART', 'SELL', 5, 'LMT', 500.0, 'Cancelled', '2026-09-04 07:00:30')
+        """
+    )
+    await db.commit()
+
+    async def db_factory():
+        conn = await aiosqlite.connect("file::memory:?cache=shared", uri=True)
+        conn.row_factory = aiosqlite.Row
+        return conn
+
+    mock_ib = MagicMock()
+    mock_notifier = MagicMock()
+    mock_notifier.send_importer_info = AsyncMock(return_value=True)
+    mock_queue = asyncio.Queue()
+
+    with patch(
+        "app.services.importer.run_csv_import",
+        new_callable=AsyncMock,
+        return_value=["TG_COND_EXPIRED"],
+    ):
+        await _process_daily_csv_file(
+            db_factory=db_factory,
+            interactive_brokers=mock_ib,
+            csv_file=test_csv,
+            queue=mock_queue,
+            notifier=mock_notifier,
+            config=mock_config,
+        )
+
+    assert not test_csv.exists()
+    bak_csv = data_dir / "archive" / "orders_2026_09_04.csv.bak"
+    assert bak_csv.exists()
+    err_csv = data_dir / "archive" / "orders_2026_09_04.csv.err"
+    assert not err_csv.exists()
+    mock_notifier.send_importer_info.assert_called_once()
+    call_kwargs = mock_notifier.send_importer_info.call_args[1]
+    assert call_kwargs["title"] == "DATEI IMPORTIERT"
+    assert call_kwargs["status"] == "Erfolgreich"

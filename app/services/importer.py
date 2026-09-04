@@ -194,7 +194,7 @@ async def run_csv_import(
 
     imported_group_ids: list[str] = []
     for trade_group_id, raw_legs in grouped_legs.items():
-        await _process_and_upsert_group(
+        is_queued = await _process_and_upsert_group(
             db=db,
             interactive_brokers=interactive_brokers,
             trade_group_id=trade_group_id,
@@ -204,7 +204,8 @@ async def run_csv_import(
             config=config,
             current_weekday=current_weekday,
         )
-        imported_group_ids.append(trade_group_id)
+        if is_queued:
+            imported_group_ids.append(trade_group_id)
 
     return imported_group_ids
 
@@ -233,29 +234,76 @@ async def _process_daily_csv_file(
         archive_dir.mkdir(parents=True, exist_ok=True)
 
         has_failed_or_cancelled = False
+        failed_orders_summary: list[dict[str, object]] = []
         if isinstance(imported_group_ids, list) and imported_group_ids:
-            query = (
-                "SELECT 1 FROM orders WHERE trade_group_id IN (SELECT value FROM json_each(?)) "
-                "AND status IN ('Cancelled', 'Error') LIMIT 1"
+            file_date: str | None = None
+            filename_match = re.match(
+                r"^orders_(\d{4})_(\d{2})_(\d{2})\.csv", csv_file.name
             )
-            async with database_connection.execute(
-                query, (json.dumps(imported_group_ids),)
-            ) as cursor:
-                if await cursor.fetchone():
-                    has_failed_or_cancelled = True
+            if filename_match:
+                file_date = f"{filename_match.group(1)}-{filename_match.group(2)}-{filename_match.group(3)}"
+
+            if file_date:
+                query = (
+                    "SELECT order_id, trade_group_id, symbol, status FROM orders "
+                    "WHERE trade_group_id IN (SELECT value FROM json_each(?)) "
+                    "AND ("
+                    "  (status = 'Error' AND (transmitted_at IS NULL OR date(transmitted_at) >= ?)) "
+                    "  OR (status = 'Cancelled' AND transmitted_at IS NULL)"
+                    ")"
+                )
+                params: tuple[object, ...] = (
+                    json.dumps(imported_group_ids),
+                    file_date,
+                )
+            else:
+                query = (
+                    "SELECT order_id, trade_group_id, symbol, status FROM orders "
+                    "WHERE trade_group_id IN (SELECT value FROM json_each(?)) "
+                    "AND ("
+                    "  (status = 'Error' AND (transmitted_at IS NULL OR date(transmitted_at) >= date('now', 'localtime'))) "
+                    "  OR (status = 'Cancelled' AND transmitted_at IS NULL)"
+                    ")"
+                )
+                params = (json.dumps(imported_group_ids),)
+
+            async with database_connection.execute(query, params) as cursor:
+                async for row in cursor:
+                    failed_orders_summary.append(
+                        {
+                            "order_id": row["order_id"],
+                            "trade_group_id": row["trade_group_id"],
+                            "symbol": row["symbol"],
+                            "status": row["status"],
+                        }
+                    )
+
+            if failed_orders_summary:
+                has_failed_or_cancelled = True
 
         if has_failed_or_cancelled:
             error_path = archive_dir / (csv_file.name + ".err")
             csv_file.rename(error_path)
+            failed_details_str = ", ".join(
+                f"{item['symbol']} (ID: {item['order_id']}, Status: {item['status']})"
+                for item in failed_orders_summary
+            )
             logger.warning(
                 "Order file completed with cancellations/errors and renamed to .err",
                 file=csv_file.name,
                 error_file=error_path.name,
+                failed_orders=failed_orders_summary,
+            )
+            details_text = (
+                f"Nicht alle Orders konnten übertragen werden. "
+                f"Betroffen: {failed_details_str}. Nach .err archiviert."
+                if failed_details_str
+                else "Nicht alle Orders konnten übertragen werden. Nach .err archiviert."
             )
             await notifier.send_importer_info(
                 file_name=csv_file.name,
                 status="Verfallen / Fehlerhaft",
-                details="Nicht alle Orders konnten übertragen werden. Nach .err archiviert.",
+                details=details_text,
                 emoji="🚨",
                 title="DATEI VERFALLEN",
             )
@@ -366,7 +414,7 @@ async def _process_and_upsert_group(
     notifier: TelegramNotifier,
     config: Config,
     current_weekday: int | None = None,
-) -> None:
+) -> bool:
     """Validiert eine einzelne Gruppe, berechnet das Sizing und speichert sie in der DB."""
     is_valid, error_message = validate_group(trade_group_id, raw_legs)
     if not is_valid:
@@ -382,7 +430,7 @@ async def _process_and_upsert_group(
             emoji="❌",
             title="VALIDIERUNGSFEHLER",
         )
-        return
+        return False
 
     entry_leg = next((leg for leg in raw_legs if leg.bracket_role == "ENTRY"), None)
     first_leg = raw_legs[0]
@@ -402,7 +450,7 @@ async def _process_and_upsert_group(
                 "Skipping DipBuyer group entirely (no valid legs left after filtering Entry).",
                 trade_group_id=trade_group_id,
             )
-            return
+            return False
 
         # Sicherstellen, dass die verbleibenden Exits keine Short-Positionen erzeugen
         # Wir prüfen, ob der Entry bereits in der Datenbank existiert (z.B. von Montag/Dienstag).
@@ -418,7 +466,7 @@ async def _process_and_upsert_group(
                     "Skipping DipBuyer exits because no ENTRY exists in DB and today is not Mon/Tue.",
                     trade_group_id=trade_group_id,
                 )
-                return
+                return False
     # ----------------------------------------
 
     # --- TRANSFORMATION FÜR BOUNCEBANDIT QQQ -> MNQ FUTURE ---
@@ -521,7 +569,7 @@ async def _process_and_upsert_group(
                 emoji="⚠️",
                 title="KAPITAL-FEHLER",
             )
-            return
+            return False
 
         target_quantity = calculate_downscaled_quantity(
             target_quantity=entry_leg.quantity,
@@ -565,7 +613,7 @@ async def _process_and_upsert_group(
                 emoji="⚠️",
                 title="SIZING-FEHLER",
             )
-            return
+            return False
     else:
         # Standalone exit: Align exit quantity with the actual quantity of the existing ENTRY order in the DB
         async with db.execute(
@@ -601,6 +649,7 @@ async def _process_and_upsert_group(
             db, trade_group_id, account_id, entry_leg, legs, target_quantity, notifier
         )
         await queue.put(trade_group_id)
+        return True
     except ValueError as exception:
         if "Standalone exit order imported" in str(exception):
             logger.error(
@@ -608,6 +657,7 @@ async def _process_and_upsert_group(
                 trade_group_id=trade_group_id,
                 error=str(exception),
             )
+            return False
         else:
             raise
 
