@@ -454,14 +454,23 @@ class TelegramNotifier:
         net_pnl: Decimal,
         commissions: Decimal,
         file_status: str,
+        equity: Decimal | None = None,
+        cushion_pct: Decimal | None = None,
     ) -> bool:
         """Sendet einen strukturierten Tagesabschlussbericht (EOD-Summary)."""
         pnl_emoji = "🟢" if net_pnl >= 0 else "🔴"
-        message = (
-            f"📊 <b>TAGESABSCHLUSS-BERICHT</b> | <code>{date_str}</code>\n"
-            f"├─ <b>CSV-Status:</b> <code>{file_status}</code>\n"
-            f"├─ <b>Orders:</b> Gesamt: {total_orders} • Gefüllt: {filled_orders} • Storniert: {cancelled_orders}\n"
-            f"├─ <b>Kommissionen:</b> <code>$ {commissions:.2f}</code>\n"
+        lines = [
+            f"📊 <b>TAGESABSCHLUSS-BERICHT</b> | <code>{date_str}</code>",
+            f"├─ <b>CSV-Status:</b> <code>{file_status}</code>",
+            f"├─ <b>Orders:</b> Gesamt: {total_orders} • Gefüllt: {filled_orders} • Storniert: {cancelled_orders}",
+        ]
+        if equity is not None:
+            cushion_str = (
+                f" • Cushion: {cushion_pct:.1f}%" if cushion_pct is not None else ""
+            )
+            lines.append(f"├─ <b>Equity:</b> <code>$ {equity:,.2f}</code>{cushion_str}")
+        lines.append(f"├─ <b>Kommissionen:</b> <code>$ {commissions:.2f}</code>")
+        lines.append(
             f"└─ <b>Realisierter Net PnL:</b> {pnl_emoji} <code>$ {net_pnl:,.2f}</code>"
         )
-        return await self.send_message(message)
+        return await self.send_message("\n".join(lines))

@@ -47,3 +47,10 @@ trigger_settlement
 execution_worker
 _.send_daily_summary
 _.send_archived_error_alert
+
+# Public entrypoints in app/services/account_metrics
+get_latest_account_metrics
+save_account_metrics
+sync_and_save_account_metrics
+AccountMetricsSnapshot
+AccountMetricsReport

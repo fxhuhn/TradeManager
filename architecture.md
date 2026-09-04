@@ -245,10 +245,17 @@ This section provides a detailed reference of all public classes and functions i
 - `process_trade_group` (Function): Core worker loop evaluating a single trade group sequence.
 - `handle_reauthorization_wait` (Function): Pauses order execution upon a token/reauthorization requirement, performs periodic What-If probes, sends Telegram alerts, and cancels expired orders upon market close.
 
-### 4.17 Module: `app.main`
+### 4.17 Module: `app.services.account_metrics`
+- `AccountMetricsSnapshot` (Class): Encapsulates equity, margin requirements, cushion, and cash.
+- `save_account_metrics` (Function): Persists an account metrics snapshot atomically into SQLite.
+- `get_latest_account_metrics` (Function): Queries the latest account metrics snapshot from SQLite.
+- `sync_and_save_account_metrics` (Function): Fetches account balance metrics from IBKR and saves them to SQLite.
+
+### 4.18 Module: `app.main`
 - `TradingSystemOrchestrator` (Class): Core system loop coordinator and scheduler.
   - `create_database_connection` (Method)
   - `trigger_settlement_callback` (Method)
+  - `update_account_metrics_callback` (Method)
   - `handle_retriable_error_callback` (Method)
   - `run_recovery_callback` (Method)
   - `run_reconnect_callback` (Method)
@@ -259,8 +266,10 @@ This section provides a detailed reference of all public classes and functions i
 - `signal_handler` (Function): Receives OS signals for cleanup.
 - `connect_to_tws` (Function): Establishes gateway network socket connection.
 
-### 4.18 Module: `app.cli.status`
+### 4.19 Module: `app.cli.status`
+- `AccountMetricsReport` (Class): Encapsulates account and margin figures for CLI display.
 - `SystemStatusReport` (Class): Aggregates runtime system, file, and database statistics.
 - `generate_system_status_report` (Function): Collects and aggregates database and filesystem states.
 - `format_status_report` (Function): Formats the status report into human-readable console text.
 - `main` (Function): CLI entrypoint executing status checks.
+

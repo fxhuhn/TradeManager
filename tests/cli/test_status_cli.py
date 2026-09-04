@@ -131,6 +131,35 @@ def test_format_status_report_renders_expected_output() -> None:
     assert "250.00" in formatted_output
 
 
+def test_format_status_report_renders_account_metrics() -> None:
+    """Verifiziert, dass Kontostand und Margin sauber formatiert werden."""
+    from app.cli.status import AccountMetricsReport
+
+    metrics = AccountMetricsReport(
+        account_id="U12345",
+        net_liquidation=Decimal("125450.20"),
+        total_cash_value=Decimal("50000.00"),
+        available_funds=Decimal("87330.20"),
+        maint_margin_req=Decimal("38120.00"),
+        cushion_pct=Decimal("69.6"),
+        buying_power=Decimal("349320.80"),
+        updated_at="2026-09-04 12:54:10",
+    )
+    report = SystemStatusReport(
+        db_accessible=True,
+        account_metrics=metrics,
+    )
+
+    formatted_output = format_status_report(report)
+
+    assert "💼 Kontostand & Margin" in formatted_output
+    assert "$ 125,450.20" in formatted_output
+    assert "$ 38,120.00" in formatted_output
+    assert "$ 87,330.20" in formatted_output
+    assert "🟢 69.6%" in formatted_output
+    assert "$ 349,320.80" in formatted_output
+
+
 def test_main_cli_returns_nonzero_on_errors(tmp_path: Path) -> None:
     """Verifiziert, dass der CLI-Einstiegspunkt bei Fehlern Exit-Code 1 liefert."""
     # Arrange

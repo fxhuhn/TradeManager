@@ -1871,3 +1871,53 @@ async def test_save_execution_accepts_normalized_symbol_match_dot_de(
             assert row["currency"] == "EUR"
     finally:
         db.close = original_close
+
+
+@pytest.mark.asyncio
+async def test_callbacks_filled_triggers_account_metrics_update(
+    db, mock_config: Config
+) -> None:
+    """Verifiziert, dass beim Status Filled der update_account_metrics_callback aufgerufen wird."""
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name, status
+        ) VALUES (777, 1001, NULL, 'G777', 'U777', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 10, 'LMT', 150.0, 'DAY', 'S1', 'Submitted')
+        """
+    )
+    await db.commit()
+
+    async def db_factory():
+        return db
+
+    mock_metrics_callback = AsyncMock()
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_filled = AsyncMock()
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=MagicMock(),
+        notifier=mock_notifier,
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+        update_account_metrics_callback=mock_metrics_callback,
+    )
+
+    original_close = db.close
+    db.close = AsyncMock()
+
+    try:
+        await manager._process_status_change(
+            order_id=777,
+            mapped_status="Filled",
+            permanent_id=1001,
+            avg_fill_price=150.0,
+        )
+        await asyncio.sleep(0.01)
+        mock_metrics_callback.assert_called_once_with("U777")
+    finally:
+        db.close = original_close

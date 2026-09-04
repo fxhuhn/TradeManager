@@ -103,6 +103,34 @@ class TradingSystemOrchestrator:
         await trigger_settlement(
             self.create_database_connection, trade_group_id, account_id, self.notifier
         )
+        await self.update_account_metrics_callback(account_id)
+
+    async def update_account_metrics_callback(self, account_id: str = "") -> None:
+        """Aktualisiert die Kontokennzahlen von IBKR und persistiert sie in der Datenbank.
+
+        Args:
+            account_id: Optionale spezifische Kontonummer.
+        """
+        from app.services.account_metrics import sync_and_save_account_metrics
+        from app.services.importer import resolve_account_id
+
+        target_account = account_id
+        resolved_account = resolve_account_id(self.interactive_brokers, target_account)
+        if not resolved_account:
+            return
+
+        database_connection = await self.create_database_connection()
+        try:
+            await sync_and_save_account_metrics(
+                self.interactive_brokers, resolved_account, database_connection
+            )
+        except Exception as exception:
+            logger.warning(
+                "Error updating account metrics in callback",
+                error=str(exception),
+            )
+        finally:
+            await database_connection.close()
 
     async def handle_retriable_error_callback(self, order_id: int) -> None:
         """Callback für die Handhabung transienter/wiederholbarer Orderfehler.
@@ -279,6 +307,7 @@ class TradingSystemOrchestrator:
                 self.interactive_brokers.reqAutoOpenOrders(True)
                 logger.info("Triggering recovery run after reconnection...")
                 await self.run_recovery_callback()
+                await self.update_account_metrics_callback()
                 return
 
             if attempt == max_attempts:
@@ -508,6 +537,7 @@ async def _initialize_and_start_orchestrator(
     )
     _register_callbacks(orchestrator, interactive_brokers, notifier, config)
     await orchestrator.run_recovery_callback()
+    await orchestrator.update_account_metrics_callback()
     orchestrator.start_background_tasks()
     return orchestrator
 
@@ -547,6 +577,7 @@ def _register_callbacks(
         handle_retriable_error_callback=orchestrator.handle_retriable_error_callback,
         run_recovery_callback=orchestrator.run_recovery_callback,
         run_reconnect_callback=orchestrator.run_reconnect_callback,
+        update_account_metrics_callback=orchestrator.update_account_metrics_callback,
     )
     orchestrator.callbacks_manager.register_all()
 

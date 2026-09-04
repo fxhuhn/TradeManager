@@ -18,6 +18,20 @@ import aiosqlite
 
 
 @dataclass(frozen=True)
+class AccountMetricsReport:
+    """Kontokennzahlen für den Statusbericht."""
+
+    account_id: str
+    net_liquidation: Decimal
+    total_cash_value: Decimal
+    available_funds: Decimal
+    maint_margin_req: Decimal
+    cushion_pct: Decimal
+    buying_power: Decimal
+    updated_at: str
+
+
+@dataclass(frozen=True)
 class SystemStatusReport:
     """Zusammenfassung des operativen System- und Archivzustands."""
 
@@ -29,6 +43,7 @@ class SystemStatusReport:
     today_settled_count: int = 0
     today_net_pnl: Decimal = Decimal("0.00")
     today_total_commissions: Decimal = Decimal("0.00")
+    account_metrics: AccountMetricsReport | None = None
 
 
 async def generate_system_status_report(
@@ -116,6 +131,40 @@ async def generate_system_status_report(
                     today_net_pnl = Decimal(str(settlement_row["total_pnl"]))
                     today_total_commissions = Decimal(str(settlement_row["total_fees"]))
 
+            # 4. Aktuelle Kontowerte und Margin abrufen
+            account_metrics_report: AccountMetricsReport | None = None
+            metrics_query = """
+                SELECT account_id, net_liquidation, total_cash_value, available_funds,
+                       maint_margin_req, cushion_pct, buying_power, updated_at
+                FROM account_metrics
+                ORDER BY updated_at DESC
+                LIMIT 1
+            """
+            try:
+                async with db.execute(metrics_query) as cursor:
+                    metrics_row = await cursor.fetchone()
+                    if metrics_row:
+                        account_metrics_report = AccountMetricsReport(
+                            account_id=str(metrics_row["account_id"]),
+                            net_liquidation=Decimal(
+                                str(metrics_row["net_liquidation"])
+                            ),
+                            total_cash_value=Decimal(
+                                str(metrics_row["total_cash_value"])
+                            ),
+                            available_funds=Decimal(
+                                str(metrics_row["available_funds"])
+                            ),
+                            maint_margin_req=Decimal(
+                                str(metrics_row["maint_margin_req"])
+                            ),
+                            cushion_pct=Decimal(str(metrics_row["cushion_pct"])),
+                            buying_power=Decimal(str(metrics_row["buying_power"])),
+                            updated_at=str(metrics_row["updated_at"]),
+                        )
+            except Exception:
+                account_metrics_report = None
+
         return SystemStatusReport(
             db_accessible=True,
             recent_archive_files=recent_files,
@@ -125,6 +174,7 @@ async def generate_system_status_report(
             today_settled_count=today_settled_count,
             today_net_pnl=today_net_pnl,
             today_total_commissions=today_total_commissions,
+            account_metrics=account_metrics_report,
         )
     except Exception:
         return SystemStatusReport(
@@ -154,6 +204,23 @@ def format_status_report(report: SystemStatusReport) -> str:
         "🟢 Erreichbar" if report.db_accessible else "🔴 Nicht erreichbar / Fehler"
     )
     lines.append(f"Datenbank: {db_indicator}")
+
+    # Kontostand & Margin
+    if report.account_metrics:
+        m = report.account_metrics
+        cushion_icon = (
+            "🟢"
+            if m.cushion_pct >= Decimal("20.0")
+            else ("🟡" if m.cushion_pct >= Decimal("10.0") else "🔴")
+        )
+        lines.append(f"\n💼 Kontostand & Margin (Stand: {m.updated_at}):")
+        lines.append(f"  - Net Liquidation (Equity) : $ {m.net_liquidation:,.2f}")
+        lines.append(f"  - Genutzte Margin (Maint)  : $ {m.maint_margin_req:,.2f}")
+        lines.append(f"  - Freie Mittel (Available) : $ {m.available_funds:,.2f}")
+        lines.append(
+            f"  - Konto-Cushion            : {cushion_icon} {m.cushion_pct:.1f}%"
+        )
+        lines.append(f"  - Buying Power             : $ {m.buying_power:,.2f}")
 
     # Archiv-Dateien
     lines.append("\n📁 Letzte Archiv-Dateien:")

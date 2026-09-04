@@ -80,6 +80,20 @@ Aggregates and persists final trade results.
 * **Constraints**:
   * `PRIMARY KEY (account_id, trade_group_id)`
 
+### 1.5 Account Metrics Table (`account_metrics`)
+Stores the latest snapshot of account balance metrics, margin usage, and cushion.
+
+| Variable Name | Data Type | Validation Rules | Description |
+| :--- | :--- | :--- | :--- |
+| `account_id` | `TEXT` | `PRIMARY KEY` | Brokerage account ID. |
+| `net_liquidation` | `REAL` | `NOT NULL` | Total account equity (Net Liquidation Value). |
+| `total_cash_value` | `REAL` | `NOT NULL` | Total cash balance across currencies. |
+| `available_funds` | `REAL` | `NOT NULL` | Available margin funds for trading. |
+| `maint_margin_req` | `REAL` | `NOT NULL` | Current maintenance margin requirement. |
+| `cushion_pct` | `REAL` | `NOT NULL` | Account margin cushion percentage (0-100%). |
+| `buying_power` | `REAL` | `NOT NULL` | Purchasing power under account leverage rules. |
+| `updated_at` | `TIMESTAMP` | `DEFAULT CURRENT_TIMESTAMP` | Timestamp of last metric synchronization. |
+
 ---
 
 ## 2. CSV Interface Specification

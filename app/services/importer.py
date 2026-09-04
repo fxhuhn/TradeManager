@@ -33,11 +33,14 @@ logger = structlog.get_logger()
 
 @dataclass(frozen=True)
 class AccountBalanceMetrics:
-    """Kontowerte fuer die Sizing-Berechnung."""
+    """Kontowerte fuer die Sizing-Berechnung und Überwachung."""
 
     net_liquidation_value: Decimal
     available_funds_value: Decimal
     total_cash_value: Decimal
+    maint_margin_req: Decimal = Decimal("0.0")
+    cushion_pct: Decimal = Decimal("100.0")
+    buying_power: Decimal = Decimal("0.0")
 
 
 async def csv_directory_watcher(
@@ -230,6 +233,21 @@ async def _process_daily_csv_file(
 
         # Warten, bis alle Orders aus der Queue abgearbeitet sind
         await queue.join()
+
+        # Kontokennzahlen nach Import und Orderübertragung synchronisieren
+        try:
+            from app.services.account_metrics import sync_and_save_account_metrics
+
+            primary_account_id = resolve_account_id(interactive_brokers, "")
+            if primary_account_id:
+                await sync_and_save_account_metrics(
+                    interactive_brokers, primary_account_id, database_connection
+                )
+        except Exception as metrics_error:
+            logger.warning(
+                "Failed to sync account metrics after CSV import",
+                error=str(metrics_error),
+            )
 
         archive_dir = csv_file.parent / "archive"
         archive_dir.mkdir(parents=True, exist_ok=True)
@@ -873,20 +891,26 @@ async def fetch_account_balance_metrics(
     interactive_brokers: IB, account_id: str
 ) -> AccountBalanceMetrics:
     """
-    Fragt die wichtigsten Kontowerte (NetLiquidation, AvailableFunds, TotalCashValue)
-    von Interactive Brokers ab. Versucht es zuerst aus dem Cache (accountValues()) und fällt bei Bedarf
-    auf einen accountSummaryAsync()-Aufruf zurück.
+    Fragt die wichtigsten Kontowerte (NetLiquidation, AvailableFunds, TotalCashValue,
+    MaintMarginReq, Cushion, BuyingPower) von Interactive Brokers ab. Versucht es zuerst
+    aus dem Cache (accountValues()) und fällt bei Bedarf auf einen accountSummaryAsync()-Aufruf zurück.
     """
     net_liquidation_value = Decimal("0.0")
     available_funds_value = Decimal("0.0")
     total_cash_value = Decimal("0.0")
+    maint_margin_req = Decimal("0.0")
+    cushion_pct = Decimal("100.0")
+    buying_power = Decimal("0.0")
 
     cache_values: dict[str, Decimal] = {}
-    relevant_tags = {"NetLiquidation", "AvailableFunds", "TotalCashValue"}
+    core_tags = {"NetLiquidation", "AvailableFunds", "TotalCashValue"}
+    extended_tags = {"MaintMarginReq", "Cushion", "BuyingPower"}
+    all_relevant_tags = core_tags | extended_tags
+
     for account_value in interactive_brokers.accountValues():
         if account_id and account_value.account != account_id:
             continue
-        if account_value.tag not in relevant_tags:
+        if account_value.tag not in all_relevant_tags:
             continue
         try:
             cache_values[account_value.tag] = Decimal(str(account_value.value))
@@ -898,18 +922,33 @@ async def fetch_account_balance_metrics(
                 error=str(exception),
             )
 
-    if len(cache_values) == 3:
+    if core_tags.issubset(cache_values.keys()):
+        raw_cushion = cache_values.get("Cushion")
+        calc_cushion = Decimal("100.0")
+        if raw_cushion is not None:
+            calc_cushion = (
+                raw_cushion * Decimal("100.0")
+                if raw_cushion <= Decimal("1.0")
+                else raw_cushion
+            )
+
         logger.info(
             "Account values successfully loaded from cache",
             account=account_id,
             net_liquidation=float(cache_values["NetLiquidation"]),
             available_funds=float(cache_values["AvailableFunds"]),
             total_cash_value=float(cache_values["TotalCashValue"]),
+            maint_margin_req=float(cache_values.get("MaintMarginReq", Decimal("0.0"))),
+            cushion_pct=float(calc_cushion),
+            buying_power=float(cache_values.get("BuyingPower", Decimal("0.0"))),
         )
         return AccountBalanceMetrics(
             net_liquidation_value=cache_values["NetLiquidation"],
             available_funds_value=cache_values["AvailableFunds"],
             total_cash_value=cache_values["TotalCashValue"],
+            maint_margin_req=cache_values.get("MaintMarginReq", Decimal("0.0")),
+            cushion_pct=calc_cushion,
+            buying_power=cache_values.get("BuyingPower", Decimal("0.0")),
         )
 
     logger.info(
@@ -920,9 +959,8 @@ async def fetch_account_balance_metrics(
 
     try:
         summary_values = await interactive_brokers.accountSummaryAsync(account_id)
-        relevant_tags = {"NetLiquidation", "AvailableFunds", "TotalCashValue"}
         for account_value in summary_values:
-            if account_value.tag not in relevant_tags:
+            if account_value.tag not in all_relevant_tags:
                 continue
             try:
                 retrieved_values[account_value.tag] = Decimal(str(account_value.value))
@@ -933,6 +971,15 @@ async def fetch_account_balance_metrics(
                     raw_value=account_value.value,
                     error=str(exception),
                 )
+
+        raw_cushion = retrieved_values.get("Cushion")
+        calc_cushion = Decimal("100.0")
+        if raw_cushion is not None:
+            calc_cushion = (
+                raw_cushion * Decimal("100.0")
+                if raw_cushion <= Decimal("1.0")
+                else raw_cushion
+            )
 
         logger.info(
             "Account values loaded via accountSummaryAsync",
@@ -946,11 +993,25 @@ async def fetch_account_balance_metrics(
             total_cash_value=float(
                 retrieved_values.get("TotalCashValue", Decimal("0.0"))
             ),
+            maint_margin_req=float(
+                retrieved_values.get("MaintMarginReq", Decimal("0.0"))
+            ),
+            cushion_pct=float(calc_cushion),
+            buying_power=float(retrieved_values.get("BuyingPower", Decimal("0.0"))),
         )
     except Exception as exception:
         logger.warning(
             "Error loading account summary asynchronously",
             error=str(exception),
+        )
+
+    raw_cushion = retrieved_values.get("Cushion")
+    calc_cushion = cushion_pct
+    if raw_cushion is not None:
+        calc_cushion = (
+            raw_cushion * Decimal("100.0")
+            if raw_cushion <= Decimal("1.0")
+            else raw_cushion
         )
 
     return AccountBalanceMetrics(
@@ -961,6 +1022,9 @@ async def fetch_account_balance_metrics(
             "AvailableFunds", available_funds_value
         ),
         total_cash_value=retrieved_values.get("TotalCashValue", total_cash_value),
+        maint_margin_req=retrieved_values.get("MaintMarginReq", maint_margin_req),
+        cushion_pct=calc_cushion,
+        buying_power=retrieved_values.get("BuyingPower", buying_power),
     )
 
 

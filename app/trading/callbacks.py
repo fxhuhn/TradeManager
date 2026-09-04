@@ -138,6 +138,9 @@ class TwsCallbacksManager:
         handle_retriable_error_callback: Callable[[int], Coroutine[Any, Any, None]],
         run_recovery_callback: Callable[[], Coroutine[Any, Any, None]],
         run_reconnect_callback: Callable[[], Coroutine[Any, Any, None]],
+        update_account_metrics_callback: (
+            Callable[[str], Coroutine[Any, Any, None]] | None
+        ) = None,
     ) -> None:
         self.db_factory = db_factory
         self.interactive_brokers = interactive_brokers
@@ -147,6 +150,7 @@ class TwsCallbacksManager:
         self.handle_retriable_error_callback = handle_retriable_error_callback
         self.run_recovery_callback = run_recovery_callback
         self.run_reconnect_callback = run_reconnect_callback
+        self.update_account_metrics_callback = update_account_metrics_callback
         self._order_locks: dict[int, asyncio.Lock] = {}
         self._broker_connected: bool = True
 
@@ -364,6 +368,9 @@ class TwsCallbacksManager:
             bracket_role = order_row["bracket_role"]
             trade_group_id = order_row["trade_group_id"]
             account_id = order_row["account_id"]
+
+            if self.update_account_metrics_callback and account_id:
+                asyncio.create_task(self.update_account_metrics_callback(account_id))
 
             if bracket_role in ("SL", "TP", "EXIT"):
                 logger.info(
