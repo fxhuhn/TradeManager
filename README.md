@@ -15,8 +15,9 @@ Das System basiert vollständig auf asynchronem Python (`asyncio` und `ib_async`
 TradeManager/
 ├── .github/workflows/    # CI/CD Pipelines (Build, Tests, Ruff)
 ├── app/                  # Quellcode der Hauptanwendung
+│   ├── cli/              # CLI-Diagnosetools (Systemstatus & Überwachung)
 │   ├── core/             # Konfiguration, Logging, Datenbankverbindung, Datenmodelle
-│   ├── services/         # CSV Watcher, Alert Watcher, Telegram-Benachrichtigungen
+│   ├── services/         # CSV Watcher, Alert Watcher, Telegram-Benachrichtigungen, Kontometriken
 │   ├── trading/          # Order-Generierung, Worker-Schleifen, TWS-Callbacks, Settlement
 │   └── main.py           # Haupteinstiegspunkt
 ├── data/                 # SQLite-Datenbank, Logdateien (lokal ignoriert)
@@ -87,6 +88,53 @@ Das System kann vollständig containerisiert betrieben werden:
 ```bash
 docker-compose up -d --build
 ```
+
+---
+
+## System-Status & Diagnose (CLI)
+
+Der aktuelle Betriebszustand (Datenbank, Kontostand & Margin, verarbeitete CSV-Archivdateien, Order-Status, fehlerhafte/stornierte Orders und heutiges Settlement) kann jederzeit über das CLI-Diagnosetool abgefragt werden:
+
+### Im laufenden Docker-Container:
+```bash
+docker exec trading-app python -m app.cli.status
+```
+
+### Lokal in der virtuellen Umgebung:
+```bash
+python -m app.cli.status
+```
+
+**Beispielausgabe:**
+```text
+============================================================
+📊 TRADEMANAGER SYSTEM-STATUSBERICHT
+============================================================
+Datenbank: 🟢 Erreichbar
+
+💼 Kontostand & Margin (Stand: 2026-09-04 12:54:10):
+  - Net Liquidation (Equity) : $ 125,450.20
+  - Genutzte Margin (Maint)  : $  38,120.00
+  - Freie Mittel (Available) : $  87,330.20
+  - Konto-Cushion            : 🟢 69.6%
+  - Buying Power             : $ 349,320.80
+
+📁 Letzte Archiv-Dateien:
+  ✅ orders_2026_09_04.csv.bak
+  ✅ orders_2026_09_03.csv.bak
+
+📋 Orders nach Status:
+  - Cancelled      : 377
+  - Filled         : 122
+  - Submitted      : 4
+
+💰 Heutige Abrechnung (Settlement):
+  - Abgeschlossene Gruppen : 0
+  - Realisierter Net PnL   : 🟢 $ 0.00
+  - Kommissionen gesamt    : $ 0.00
+============================================================
+```
+
 
 ---
 

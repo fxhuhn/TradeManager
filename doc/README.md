@@ -2,7 +2,7 @@
 
 Willkommen beim offiziellen **Nutzer- und Wartungshandbuch** für das Interactive Brokers Equities Trading System (TradeManager). Dieses Dokument richtet sich sowohl an **Endanwender** (tägliche Benutzung) als auch an **Administratoren und Entwickler** (Wartung, Fehlerbehebung, Erweiterungen).
 
-> **Version:** 1.0 — Stand: Juni 2026  
+> **Version:** 1.1 — Stand: September 2026  
 > **Repository:** `https://github.com/fxhuhn/TradeManager`
 
 ---
@@ -44,29 +44,36 @@ Das System wurde als robuster, hochverfügbarer **End-of-Day (EOD) Trading-Robot
 TradeManager/
 ├── .github/workflows/    # CI/CD Pipelines (Build, Tests, Ruff)
 ├── app/                  # Quellcode der Hauptanwendung
+│   ├── cli/              # CLI-Diagnosetools (Systemstatus & Schnelldiagnose)
+│   │   └── status.py     #   Standalone Status- und Metriken-Bericht
 │   ├── core/             # Konfiguration, Logging, Datenbankverbindung, Datenmodelle
 │   │   ├── config.py     #   Laden von config.toml und .env
 │   │   ├── db.py         #   SQLite-Verbindung, Migrationen, Integrity-Check
-│   │   ├── logging_setup.py # structlog + TimedRotatingFileHandler
+│   │   ├── logging_setup.py # structlog + Dozzle-Standard-Tags + TimedRotatingFileHandler
 │   │   └── models.py     #   Immutable Datenklassen (LegRow, OrderRow, ExecutionRow, SettlementRow)
-│   ├── services/         # CSV-Watcher, Alert-Watcher, Telegram-Benachrichtigungen
-│   │   ├── alert_watcher.py #   Dead-Order- und Slippage-Monitoring
+│   ├── services/         # CSV-Watcher, Alert-Watcher, Telegram-Benachrichtigungen, Kontometriken
+│   │   ├── account_metrics.py # Snapshot-Persistierung von Equity, Margin, Cushion & Buying Power
+│   │   ├── alert_watcher.py #   Dead-Order-, Hanging-Order-, .err-Archiv- und Slippage-Monitoring
 │   │   ├── csv_reader.py #   CSV-Parsing und Gruppenvalidierung
 │   │   ├── importer.py   #   CSV-Import, Sizing, DB-Schreibvorgänge
-│   │   └── notifier.py   #   Asynchroner Telegram-Client mit Rate-Limiting
+│   │   └── notifier.py   #   Asynchroner Telegram-Client mit Rate-Limiting & EOD-Reports
 │   ├── trading/          # Order-Generierung, Worker-Schleifen, TWS-Callbacks, Settlement
 │   │   ├── callbacks.py  #   Alle TWS Event-Handler (Status, Fill, Commission, Error)
-│   │   ├── error_codes.py #  TWS-Fehlercode-Klassifikation
-│   │   ├── order_builder.py # Konstruktion von ib_async Order-Objekten
+│   │   ├── error_codes.py #  TWS-Fehlercode-Klassifikation & Reauth-Erkennung
+│   │   ├── future_resolver.py # Automatische Future-Kontraktauflösung (z. B. MNQ für BounceBandit)
+│   │   ├── order_builder.py # Konstruktion von ib_async Order-Objekten (STK und FUT)
 │   │   ├── recovery.py   #   Start-Recovery & Zustandsabgleich
 │   │   ├── retry.py      #   Exponentieller Backoff bei transienten API-Fehlern
 │   │   ├── settlement.py #   PnL-Berechnung, VWAP, Slippage
-│   │   └── worker.py     #   Execution Worker (Queue-Consumer)
+│   │   └── worker.py     #   Execution Worker (Queue-Consumer & Pre-Trade Simulation)
 │   └── main.py           # Haupteinstiegspunkt & Orchestrierung
 ├── data/                 # SQLite-Datenbank, Logdateien, CSV-Dateien (lokal ignoriert via .gitignore)
 ├── doc/                  # PDF-Konzept und dieses Nutzerhandbuch
 ├── migrations/           # SQL-Datenbankmigrationen
-│   └── 001_initial.sql   #   Erstschema (orders, executions, trades_settlement)
+│   ├── 001_initial.sql   #   Erstschema (orders, executions, trades_settlement)
+│   ├── 002_allow_multiple_exits.sql # Mehrfache Exits pro Trade-Gruppe
+│   ├── 003_support_futures.sql      # Unterstützung von CME Futures (sec_type='FUT')
+│   └── 004_account_metrics.sql      # Kontostand- & Margin-Snapshots (account_metrics)
 ├── scripts/              # Hilfs- und Diagnose-Skripte
 │   ├── check_tws.py      #   TWS-Verbindungs- und Kapitaltest
 │   ├── dry_run_today.py  #   Gefahrenfreier Importsimulator (Live-TWS, kein DB-Schreiben)
@@ -341,14 +348,63 @@ Das System überwacht das Verzeichnis `data/` kontinuierlich auf neue CSV-Dateie
 
 3. Der **CSV-Directory-Watcher** erkennt die Datei automatisch innerhalb von 60 Sekunden (konfigurierbar via `csv_watcher_interval_s`).
 
-4. Nach erfolgreicher Verarbeitung wird die Datei umbenannt in:
-   - `orders_2026_06_04.csv.bak` (bei Erfolg)
-   - `orders_2026_06_04.csv.err` (bei Fehler)
+4. Nach erfolgreicher Verarbeitung wird die Datei in das Archivverzeichnis `data/orders/archive/` verschoben und umbenannt in:
+   - `orders_YYYY_MM_DD.csv.bak` (bei Erfolg)
+   - `orders_YYYY_MM_DD.csv.err` (bei Fehler oder abgewiesenen Orders)
 
 **Telegram-Bestätigung bei Erfolg:**
-> ✅ DATEI IMPORTIERT: Die Datei `orders_2026_06_04.csv` wurde erfolgreich eingelesen und nach `.bak` archiviert.
+> ✅ DATEI IMPORTIERT: Die Datei `orders_2026_09_04.csv` wurde erfolgreich eingelesen und nach `.bak` archiviert.
 
-### 4.3 System beenden (Graceful Shutdown)
+**Telegram-Alarm bei Fehler:**
+> 🚨 ARCHIVIERTE FEHLERDATEI ENTDECKT: Die Datei `orders_2026_09_04.csv.err` wurde archiviert. Der Alert-Watcher alarmiert sofort über Telegram mit Angabe der genauen Ursache.
+
+### 4.3 Schnelldiagnose & Statusprüfung (CLI)
+
+Um jederzeit ohne Verzögerung den operativen Zustand des Gesamtsystems zu überprüfen, steht das Standalone-Diagnosetool zur Verfügung. Es liest den Zustand direkt aus SQLite und dem Archiv aus — ohne TWS-Netzwerkanfragen oder Kollisionsrisiko:
+
+```bash
+# Im laufenden Docker-Container:
+docker exec trading-app python -m app.cli.status
+
+# Lokal in der aktiven Python-Umgebung:
+python -m app.cli.status
+```
+
+**Beispielausgabe:**
+```text
+============================================================
+📊 TRADEMANAGER SYSTEM-STATUSBERICHT
+============================================================
+Datenbank: 🟢 Erreichbar
+
+💼 Kontostand & Margin (Stand: 2026-09-04 12:54:10):
+  - Net Liquidation (Equity) : $ 125,450.20
+  - Genutzte Margin (Maint)  : $  38,120.00
+  - Freie Mittel (Available) : $  87,330.20
+  - Konto-Cushion            : 🟢 69.6% (Min-Limit: 10.0%)
+  - Buying Power             : $ 349,320.80
+
+📁 Letzte Archiv-Dateien:
+  ✅ orders_2026_09_04.csv.bak
+  ✅ orders_2026_09_03.csv.bak
+
+📋 Orders nach Status:
+  - Cancelled      : 377
+  - Filled         : 122
+  - Submitted      : 4
+
+⚠️ Letzte stornierte / fehlerhafte Orders:
+  - [Cancelled] ID: 1372 | SXRV.DE (EXIT) | Gruppe: 1412_TwoPercent_SXRV.DE
+  - [Cancelled] ID: 1364 | SW (EXIT) | Gruppe: 1416_DipBuyer_SW
+
+💰 Heutige Abrechnung (Settlement):
+  - Abgeschlossene Gruppen : 0
+  - Realisierter Net PnL   : 🟢 $ 0.00
+  - Kommissionen gesamt    : $ 0.00
+============================================================
+```
+
+### 4.4 System beenden (Graceful Shutdown)
 
 Beenden Sie das System geordnet mit:
 
@@ -366,18 +422,18 @@ Das System fährt kontrolliert herunter:
 3. Die TWS-Verbindung wird sauber getrennt
 4. Sie erhalten die Telegram-Nachricht **„🛑 Trading System geordnet heruntergefahren."**
 
-### 4.4 Tagesablauf-Checkliste
+### 4.5 Tagesablauf-Checkliste
 
-| Schritt | Zeitpunkt                | Aktion                                                         |
-|:--------|:-------------------------|:---------------------------------------------------------------|
-| 1       | Vor Börseneröffnung      | TWS starten und API-Verbindung prüfen                         |
-| 2       | Vor Börseneröffnung      | `python scripts/check_tws.py` — Verbindung & Kapital prüfen   |
-| 3       | Vor Börseneröffnung      | TradeManager starten: `python app/main.py`                     |
-| 4       | Vor Börseneröffnung      | CSV-Datei `orders_YYYY_MM_DD.csv` in `data/` ablegen           |
-| 5       | Optional                 | Dry Run ausführen: `python scripts/dry_run_today.py`           |
-| 6       | Während Börsenzeiten     | Telegram-Benachrichtigungen überwachen                         |
-| 7       | Nach Börsenschluss       | System herunterfahren (Ctrl+C)                                 |
-| 8       | Nach Börsenschluss       | Logdatei `data/app.log` prüfen (bei Bedarf)                   |
+| Schritt | Zeitpunkt                | Aktion                                                                           |
+|:--------|:-------------------------|:---------------------------------------------------------------------------------|
+| 1       | Vor Börseneröffnung      | TWS / IB Gateway starten und API-Verbindung sicherstellen                        |
+| 2       | Vor Börseneröffnung      | TradeManager starten: `docker-compose up -d` oder `python app/main.py`           |
+| 3       | Vor Börseneröffnung      | CSV-Datei `orders_YYYY_MM_DD.csv` in `data/orders/` ablegen                      |
+| 4       | Nach Dateiablage         | Telegram prüfen: „✅ DATEI IMPORTIERT"                                            |
+| 5       | Statusprüfung            | `docker exec trading-app python -m app.cli.status` zur Kontrolle der Submitted-Orders |
+| 6       | Während Börsenzeiten     | Telegram-Benachrichtigungen überwachen (Fills, Slippage, Margin-Warnungen)       |
+| 7       | Nach Börsenschluss       | Automatischen EOD-Tagesabschlussbericht in Telegram prüfen                       |
+
 
 ---
 
@@ -466,8 +522,16 @@ erDiagram
         TEXT account_id "Handelskonto"
         TEXT bracket_role "ENTRY, SL, TP, EXIT"
         TEXT symbol "Aktiensymbol (z. B. MU)"
-        TEXT sec_type "Sicherheits-Typ (nur STK)"
-        TEXT exchange "Börse (nur SMART)"
+    orders {
+        INTEGER order_id PK "Lokale / TWS-Order ID"
+        INTEGER perm_id "Eindeutige TWS Permanent ID"
+        INTEGER parent_id FK "Verweis auf Entry Order"
+        TEXT trade_group_id "Zugehörige Trade-Gruppe"
+        TEXT account_id "Handelskonto"
+        TEXT bracket_role "ENTRY, SL, TP, EXIT"
+        TEXT symbol "Symbol (z. B. MU, MNQ)"
+        TEXT sec_type "Sicherheits-Typ (STK, FUT)"
+        TEXT exchange "Börse (SMART, CME)"
         TEXT action "BUY, SELL"
         INTEGER quantity "Order-Menge"
         TEXT order_type "LMT, STP, MKT, MOC"
@@ -500,6 +564,17 @@ erDiagram
         TIMESTAMP settled_at "Settlement-Zeitpunkt"
     }
 
+    account_metrics {
+        TEXT account_id PK "Handelskonto"
+        REAL net_liquidation "Gesamtwert (Equity)"
+        REAL total_cash_value "Barbestand"
+        REAL available_funds "Verfügbare freie Margin"
+        REAL maint_margin_req "Genutzte Margin (Maint)"
+        REAL cushion_pct "Konto-Cushion in %"
+        REAL buying_power "Kaufkraft mit Hebel"
+        TIMESTAMP updated_at "Letzter Snapshot"
+    }
+
     orders ||--o{ orders : "parent_id (Verlinkung)"
     orders ||--o{ executions : "order_id"
 ```
@@ -507,9 +582,12 @@ erDiagram
 ### 6.2 Wichtige Schema-Eigenschaften
 
 1. **Fremdschlüssel-Kaskadierung:** `parent_id` referenziert `orders(order_id) ON UPDATE CASCADE`. Wenn während der Orderübermittlung die temporäre negative ID durch eine echte TWS-API-Order-ID ersetzt wird, aktualisiert die DB automatisch alle verknüpften Child-Orders.
-2. **Eindeutigkeit:** Ein Unique Constraint liegt auf `(account_id, trade_group_id, bracket_role)`, was das System unempfindlich gegenüber doppelten Imports macht.
+2. **Eindeutigkeit:** Ein Unique Constraint liegt auf `(account_id, trade_group_id, bracket_role, order_type)`, was das System unempfindlich gegenüber doppelten Imports macht.
 3. **Teilweiser Index:** Ein Unique Index liegt auf `perm_id` (`WHERE perm_id IS NOT NULL AND perm_id != 0`), um Kollisionen zu verhindern und gleichzeitig beliebig viele Orders im Zustand `Created` (mit `perm_id = NULL`) zu erlauben.
-4. **Datenintegrität über Immutability:** Die Klasse `OrderRow` ist im Code als unveränderliche `@dataclass(frozen=True)` definiert. Modifikationen während des Order-Lebenszyklus erzeugen neue Instanzen mittels `dataclasses.replace` und werden unmittelbar in der SQLite-Datenbank persistiert.
+4. **Futures- und Multi-Exit-Unterstützung:** Ab Migration 002/003 unterstützt das Schema mehrere Exits pro Gruppe sowie Futures-Kontrakte an der CME (`sec_type='FUT'`).
+5. **Kontostand- und Margin-Persistenz:** Ab Migration 004 speichert die Tabelle `account_metrics` automatisch nach jedem Import und Trade den vollständigen Margin- und Liquiditätsstatus des Kontos.
+6. **Datenintegrität über Immutability:** Die Klasse `OrderRow` ist im Code als unveränderliche `@dataclass(frozen=True)` definiert. Modifikationen während des Order-Lebenszyklus erzeugen neue Instanzen mittels `dataclasses.replace` und werden unmittelbar in der SQLite-Datenbank persistiert.
+
 
 ### 6.3 Order-Status-Lebenszyklus
 
@@ -1033,7 +1111,7 @@ Vor der tatsächlichen Übermittlung einer ENTRY-Order an den Markt führt das S
 
 ## 9. Integrierte Hilfsprogramme (Tools)
 
-Zur Absicherung des Live-Betriebs stehen vier Kommandozeilenwerkzeuge bereit:
+Zur Absicherung und Überwachung des Live-Betriebs stehen fünf integrierte Werkzeuge bereit:
 
 ### 9.1 `check_tws.py` (Konnektivitäts- & Kapitalschnelltest)
 
@@ -1136,6 +1214,29 @@ Ohne Argument wird `data/orders.csv` verwendet.
 
 ---
 
+### 9.5 `app.cli.status` (CLI-Statusbericht & Schnelldiagnose)
+
+Liest lokal in wenigen Millisekunden den aktuellen Zustand der SQLite-Datenbank und des CSV-Archivs aus, ohne Netzwerk-Verbindung zu TWS oder Client-ID-Kollisionen:
+
+**Aufruf:**
+```bash
+# Im laufenden Docker-Container:
+docker exec trading-app python -m app.cli.status
+
+# Lokal in der virtuellen Umgebung:
+python -m app.cli.status
+```
+
+**Ausgabeinhalte:**
+- **Datenbank-Status:** Erreichbarkeit und SQLite-Integrität.
+- **Kontostand & Margin:** Net Liquidation (Equity), Maintenance Margin, freie Mittel, Cushion (mit Ampel 🟢/🟡/🔴) und Buying Power.
+- **Letzte Archiv-Dateien:** Übersicht der zuletzt verarbeiteten Dateien mit Statusicon (✅ `.bak` bzw. 🚨 `.err`).
+- **Orders nach Status:** Aggregation aller Orders in der Datenbank (Submitted, Filled, Cancelled etc.).
+- **Fehlerhafte / Stornierte Orders:** Detailansicht der letzten 5 auffälligen Orders.
+- **Heutige Abrechnung:** Anzahl geschlossener Trade-Gruppen, realisierter Net-PnL und Gebühren.
+
+---
+
 ## 10. Docker-Deployment
 
 ### 10.1 Architektur
@@ -1178,7 +1279,23 @@ Da die TWS auf dem Host läuft, verbindet sich der Container über `host.docker.
 host = "host.docker.internal"  # anstatt "127.0.0.1"
 ```
 
-### 10.5 Stoppen und Aufräumen
+### 10.5 Container-Diagnose & Log-Filterung
+
+Für eine sofortige Überprüfung des Containers und gezieltes Troubleshooting in Dozzle:
+
+1. **Status-Check per Einzeiler:**
+   ```bash
+   docker exec trading-app python -m app.cli.status
+   ```
+2. **Standardisierte Log-Tags in Dozzle / Docker-Logs:**
+   Im Dozzle Webinterface (`http://localhost:8080`) kann im Suchfeld direkt nach standardisierten Präfixen gefiltert werden:
+   - `[TM_FILE_ERROR]`: Archivierte Fehlerdateien (`.err`) und CSV-Importprobleme
+   - `[TM_ORDER_REJECT]`: Broker-Orderablehnungen
+   - `[TM_REAUTH_WAIT]`: 2FA / Session-Ablauf (TWS Error 201)
+   - `[TM_CUSHION_ALERT]`: Unterschreitung des Mindest-Cushions
+   - `[TM_RECONNECT]`: Automatische Wiederverbindungsversuche
+
+### 10.6 Stoppen und Aufräumen
 
 ```bash
 # Container stoppen
@@ -1212,6 +1329,9 @@ Das System sendet folgende kategorisierte Telegram-Nachrichten:
 | 🚨    | Margin überschritten   | `MARGIN-LIMIT ÜBERSCHRITTEN | MU`                                 |
 | ℹ️    | Margin-Nutzung         | `MARGIN-NUTZUNG ERFORDERLICH | MU`                                 |
 | ⚠️    | Hohe Margin-Auslastung | `HOHE MARGIN-AUSLASTUNG (>50%) | MU`                                |
+| 🚨    | Archivierte Fehlerdatei| `ARCHIVIERTE FEHLERDATEI ENTDECKT: orders_2026_09_04.csv.err`       |
+| ⚠️    | Hängende Order         | `HÄNGENDE ORDER: Order seit > 10m im Status Created`                |
+| 📊    | EOD-Tagesabschluss     | `TAGESABSCHLUSS-BERICHT: Gesamt: 4 • Gefüllt: 4 • PnL: +$250`       |
 | ⚠️    | Shutdown               | `Trading System wird heruntergefahren...`                          |
 | 🛑    | Shutdown abgeschlossen | `Trading System geordnet heruntergefahren.`                        |
 
@@ -1354,10 +1474,34 @@ Wird gesendet, sobald ein Trade komplett geschlossen wurde (Schließen der Exit-
   ```html
   📉 <b>HIGH SLIPPAGE</b> | <code>NVDA</code>
   ```
+* **Hängende Order (Status: Created verweilt > 10 Min):**
+  ```html
+  ⚠️ <b>HÄNGENDE ORDER (Status: Created)</b> | <code>NVDA</code>
+  ├─ <b>Order-ID:</b> <code>-1001</code>
+  ├─ <b>Trade-Gruppe:</b> <code>20260904_Momentum_NVDA</code>
+  └─ <b>Hinweis:</b> Order verweilt länger als 10 Minuten in 'Created'.
+  ```
+* **Archivierte Fehlerdatei (.err erkannt):**
+  ```html
+  🚨 <b>ARCHIVIERTE FEHLERDATEI ENTDECKT</b>
+  ├─ <b>Datei:</b> <code>orders_2026_09_04.csv.err</code>
+  └─ <b>Details:</b> <i>Fehler beim Importieren: Ungültige Spaltenanzahl in Zeile 3.</i>
+  ```
 * **Heartbeat Keep-Alive Timeout (API-Blockade):**
   ```html
   ⚠️ <b>HEARTBEAT TIMEOUT</b> | API reagiert nicht. Reconnect wird erzwungen.
   ```
+
+#### 9. EOD-Tagesabschlussbericht (Daily Summary)
+Wird zum Handelsschluss bzw. Tagesabschluss gesendet und aggregiert den Tageserfolg sowie Account-Kennzahlen:
+```html
+📊 <b>TAGESABSCHLUSS-BERICHT</b> | <code>04.09.2026</code>
+├─ <b>CSV-Status:</b> <code>archiviert (.bak)</code>
+├─ <b>Orders:</b> Gesamt: 14 • Gefüllt: 10 • Storniert: 4
+├─ <b>Equity:</b> <code>$ 125,400.50</code> • Cushion: 42.5%
+├─ <b>Kommissionen:</b> <code>$ 14.20</code>
+└─ <b>Realisierter Net PnL:</b> 🟢 <code>$ 1,240.50</code>
+```
 
 ---
 
@@ -1370,10 +1514,13 @@ Wird gesendet, sobald ein Trade komplett geschlossen wurde (Schließen der Exit-
 | `Verbindung zu TWS nach 10 Versuchen unmoeglich` | TWS läuft nicht oder API ist nicht aktiviert | TWS starten, unter *Configuration → API → Settings* prüfen, ob „Enable ActiveX and Socket Clients" aktiv ist |
 | `DB-Integritaetspruefung fehlgeschlagen` | Datenbank ist beschädigt (z. B. nach Stromausfall) | Backup der `trading.db` wiederherstellen oder DB löschen und neu starten |
 | `CSV-Datei überschreitet Sicherheitslimit` | CSV-Datei > 5 MB | CSV auf Fehler prüfen (z. B. doppelte Einträge); `max_csv_size_bytes` anpassen |
+| `Archivierte Datei endet auf .err` | Validierungs- oder Formatfehler beim Einlesen der CSV (z. B. fehlerhafte Spalten, Syntaxfehler) | Fehlermeldung im Log oder Telegram-Alert prüfen (`[TM_FILE_ERROR]`), CSV korrigieren und erneut in `data/` ablegen |
 | `Validierungsfehler: Keine ENTRY-Order` | CSV enthält nur Exit-Orders, aber kein ENTRY in der DB | Sicherstellen, dass der zugehörige ENTRY-Trade bereits in der DB existiert |
-| `Kein verfügbares Cash-Kapital` | TWS-Konto hat kein Guthaben oder Abfrage schlägt fehl | `python scripts/check_tws.py` ausführen, um Kapital zu prüfen |
+| `Kein verfügbares Cash-Kapital` | TWS-Konto hat kein Guthaben oder Abfrage schlägt fehl | `python scripts/check_tws.py` oder CLI-Status ausführen, um Kapital zu prüfen |
 | `Telegram-Alert (MOCK)` statt echte Nachricht | TELEGRAM_BOT_TOKEN oder CHAT_ID fehlt/ungültig | `.env`-Datei prüfen und korrekten Token eintragen |
 | `Ghost Order erkannt` | Order war in DB als Submitted markiert, existiert aber nicht in TWS | System hat automatisch auf `Cancelled` gesetzt; ggf. manuell in TWS prüfen |
+| `Hängende Order im Status Created` | Worker oder TWS-Verbindung blockiert während lokaler Order-Vorbereitung | Status mit `docker exec trading-app python -m app.cli.status` prüfen, Log filtern, ggf. Container neu starten |
+| `Fehlercode 201 / Reauthorisierung erforderlich` | IBKR Session-Token abgelaufen (z. B. sonntäglicher Reset oder 2FA-Timeout) | 2FA-Bestätigung am IBKR-Gerät durchführen (`[TM_REAUTH_WAIT]`) oder TWS/Gateway neu starten |
 | `Retry-Limit erreicht` | Order schlug nach 3 Versuchen fehl | Logdatei prüfen (`data/app.log`); TWS-Fehlercodes analysieren |
 
 ### 12.2 Logdatei analysieren
@@ -1388,6 +1535,13 @@ grep -i "error" data/app.log
 
 # Alle Warnungen anzeigen
 grep -i "warning" data/app.log
+
+# Dozzle / Structlog Schnellfilter-Tags
+grep "\[TM_FILE_ERROR\]" data/app.log
+grep "\[TM_ORDER_REJECT\]" data/app.log
+grep "\[TM_REAUTH_WAIT\]" data/app.log
+grep "\[TM_CUSHION_ALERT\]" data/app.log
+grep "\[TM_RECONNECT\]" data/app.log
 
 # Alle Settlement-Ergebnisse anzeigen
 grep "Settlement" data/app.log
@@ -1500,9 +1654,12 @@ So fügen Sie eine neue Migration hinzu:
 ```text
 ☐  Telegram-Startmeldung erhalten (🚀)?
 ☐  CSV-Datei importiert (✅ DATEI IMPORTIERT)?
-☐  Keine DEAD ORDER Warnungen (⚠️)?
+☐  Schnelldiagnose prüfen: docker exec trading-app python -m app.cli.status
+☐  Dozzle Log-Stream auf Fehlertags prüfen ([TM_FILE_ERROR], [TM_ORDER_REJECT])
+☐  Keine DEAD ORDER oder Hängende-Order-Warnungen (⚠️)?
 ☐  Keine FATAL-Fehlermeldungen (🚨)?
 ☐  Settlement-Reports für geschlossene Trades erhalten (✅ TRADE SETTLEMENT)?
+☐  Tagesabschluss-Bericht erhalten (📊 TAGESABSCHLUSS-BERICHT)?
 ☐  Shutdown-Meldung erhalten (🛑)?
 ```
 
@@ -1523,16 +1680,21 @@ graph TD
     main --> callbacks["app/trading/callbacks.py\n(TWS Event-Handler)"]
     main --> recovery["app/trading/recovery.py\n(Zustandsabgleich)"]
     main --> alert["app/services/alert_watcher.py\n(Monitoring)"]
+    main --> metrics["app/services/account_metrics.py\n(Account-Metriken Sync)"]
+    
+    cli["app/cli/status.py\n(CLI-Diagnose)"] --> db
     
     importer --> csv_reader["app/services/csv_reader.py\n(CSV-Parsing & Validierung)"]
     importer --> models["app/core/models.py\n(Datenklassen)"]
     
     worker --> order_builder["app/trading/order_builder.py\n(Order-Konstruktion)"]
+    worker --> resolver["app/trading/future_resolver.py\n(Futures-Verfall)"]
     worker --> models
     
     callbacks --> error_codes["app/trading/error_codes.py\n(Fehlerklassifikation)"]
     callbacks --> settlement["app/trading/settlement.py\n(PnL-Berechnung)"]
     callbacks --> retry["app/trading/retry.py\n(Retry-Logik)"]
+    callbacks --> metrics
     
     alert --> recovery
 ```
@@ -1542,6 +1704,8 @@ graph TD
 | Datei                      | Typische Wartungsarbeiten                                          |
 |:---------------------------|:-------------------------------------------------------------------|
 | `config.toml`              | Parameter-Tuning (Timeouts, Limits, Intervalle)                    |
+| `app/cli/status.py`        | Erweiterung der Diagnose- und Berichtsmetriken                     |
+| `app/services/account_metrics.py` | Aktualisierung von Balance-, Equity- und Margin-Synchronisation |
 | `app/services/csv_reader.py` | Neue CSV-Spalten oder Validierungsregeln hinzufügen              |
 | `app/trading/error_codes.py` | Neue TWS-Fehlercodes klassifizieren                              |
 | `migrations/`              | Datenbankschema-Erweiterungen                                      |
