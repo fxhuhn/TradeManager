@@ -1,47 +1,178 @@
-# config.toml
-# Strukturelle Parameter für das IBKR Equities Trading System
+# config.toml.example
+# =============================================================================
+# TradeManager: Konfigurations-Referenzdatei
+# =============================================================================
+# Diese Datei dient als Vorlage für config.toml. Kopiere diese Datei nach
+# config.toml und passe die Werte an deine Handelsumgebung an.
+#
+# WICHTIG ZU GEHEIMNISSEN / PASSWÖRTERN:
+# Sensible Zugangsdaten wie TWS_HOST, TWS_PORT, TELEGRAM_BOT_TOKEN und
+# TELEGRAM_CHAT_ID gehören in die Datei .env (siehe .env.example) und werden
+# nicht in der Versionsverwaltung committet.
+# =============================================================================
 
+# -----------------------------------------------------------------------------
+# 1. TWS / IBKR GATEWAY VERBINDUNG ([tws])
+# -----------------------------------------------------------------------------
 [tws]
+# Hostname oder IP-Adresse des Rechners, auf dem TWS oder IB Gateway läuft.
+# Lokal: "127.0.0.1". Im Docker-Container: z. B. "host.docker.internal" oder Host-IP.
+# Kann über Umgebungsvariable TWS_HOST in .env überschrieben werden.
 host = "127.0.0.1"
-port = 7497                       # 7497 für Paper-Trading, 7496 für Live-Trading
-client_id = 0                     # 0 ermöglicht automatisches Binding manueller Orders
-connection_timeout_s = 10.0       # Timeout beim Verbindungsaufbau zu TWS
-reconnect_initial_delay_s = 5.0   # Initiale Wartezeit bei Verbindungsabbruch
-reconnect_max_attempts = 10       # Maximale Versuche für Reconnects
-reconnect_max_delay_s = 120.0     # Obergrenze für exponentiellen Backoff bei Reconnects
-request_timeout_s = 10.0          # Timeout für reguläre TWS API-Requests (z. B. reqOpenOrdersAsync)
-completed_orders_timeout_s = 15.0 # Timeout beim Abrufen abgeschlossener Orders (reqCompletedOrdersAsync)
-heartbeat_interval_s = 60.0       # Intervall in Sekunden für den Heartbeat-Ping
-heartbeat_timeout_s = 15.0        # Timeout in Sekunden für die Antwort auf den Heartbeat-Ping
 
+# API-Port für die Socket-Verbindung:
+#   - 7497: TWS Paper-Trading (Standard)
+#   - 7496: TWS Live-Trading
+#   - 4002: IB Gateway Paper-Trading
+#   - 4001: IB Gateway Live-Trading
+# Kann über Umgebungsvariable TWS_PORT in .env überschrieben werden.
+port = 7497
+
+# Eindeutige Client-ID für die Socket-Verbindung.
+# WICHTIG: Client-ID 0 ermöglicht das automatische Binden und Empfangen von
+# Callbacks für manuell in der TWS erstellte oder geänderte Orders.
+# Kann über Umgebungsvariable TWS_CLIENT_ID in .env überschrieben werden.
+client_id = 0
+
+# Maximales Timeout in Sekunden für den initialen TCP-Verbindungsaufbau zu TWS.
+connection_timeout_s = 10.0
+
+# Initiale Wartezeit in Sekunden vor dem ersten Reconnect-Versuch bei Verbindungsverlust.
+reconnect_initial_delay_s = 5.0
+
+# Maximale Anzahl aufeinanderfolgender Reconnect-Versuche vor einem System-Fehlerabbruch.
+reconnect_max_attempts = 10
+
+# Obergrenze in Sekunden für den exponentiellen Backoff bei Wiederverbindungsversuchen.
+reconnect_max_delay_s = 120.0
+
+# Timeout in Sekunden für reguläre TWS-API-Anfragen (z. B. reqContractDetailsAsync, reqOpenOrdersAsync).
+request_timeout_s = 10.0
+
+# Timeout in Sekunden beim Abruf historisch abgeschlossener Orders (reqCompletedOrdersAsync)
+# während des Systemstarts / Recovery-Abgleichs.
+completed_orders_timeout_s = 15.0
+
+# Intervall in Sekunden für den periodischen Heartbeat-Ping zur TWS (erkennt stille Socket-Abbrüche).
+heartbeat_interval_s = 60.0
+
+# Timeout in Sekunden auf eine Antwort des Heartbeat-Pings, bevor Reconnect eingeleitet wird.
+heartbeat_timeout_s = 15.0
+
+
+# -----------------------------------------------------------------------------
+# 2. ANWENDUNG & ORCHESTRIERUNG ([app])
+# -----------------------------------------------------------------------------
 [app]
-max_retries = 3                   # Maximale Retry-Versuche bei transienten API-Fehlern
-order_rate_limit_s = 0.02         # 0.02 Sekunden Pause zwischen Orders (50 req/s)
-dead_order_threshold_minutes = 15     # Zeitspanne in Minuten, nach der hängende Orders gemeldet werden
-alert_watcher_interval_s = 60     # Intervall in Sekunden für den Alert Watcher Loop
-csv_watcher_interval_s = 60       # Intervall in Sekunden für den CSV Directory Watcher Loop
-order_sync_interval_s = 300       # Intervall in Sekunden für den periodischen Order-Zustandsabgleich
-retry_backoff_base_s = 5.0        # Basiswert in Sekunden für exponentiellen Retry-Backoff (5s, 10s, 20s...)
-shutdown_join_timeout_s = 15.0    # Maximale Zeit in Sekunden, um beim Shutdown auf das Leeren der Queue zu warten
-database_timeout_s = 30.0         # Verhindert Lockouts bei hoher paralleler DB-Last (SQLite timeout)
-max_csv_size_bytes = 5242880      # 5 MB Sicherheitslimit für CSV-Import zur DoS-Abwehr
-log_file_path = "data/logs/app.log"              # Pfad zur zentralen Logdatei
-log_rotation_backup_count = 5               # Anzahl der rotierenden Backup-Dateien
-db_backup_interval_s = 86400                # Intervall für tägliches DB-Backup (1 Tag = 86400 Sekunden)
+# Maximale Anzahl an Wiederholungsversuchen bei transienten IBKR-API-Fehlern (z. B. Rate Limits).
+max_retries = 3
 
+# Zwangspause in Sekunden zwischen aufeinanderfolgenden Order-Transfers (0.02s = max. 50 req/s,
+# verhindert IBKR-Pacing-Violations gemäß API-Richtlinien).
+order_rate_limit_s = 0.02
+
+# Zeitspanne in Minuten, nach der eine unverändert im Status "Created" oder "Submitted"
+# verharrende Order vom Alert-Watchdog als "hängend" gemeldet wird.
+dead_order_threshold_minutes = 15
+
+# Intervall in Sekunden für den periodischen Alert-Watcher-Hintergrundloop (Dead Orders, Slippage).
+alert_watcher_interval_s = 60
+
+# Intervall in Sekunden für den CSV-Verzeichnis-Watcher (prüft data/orders/ auf neue Dateien).
+csv_watcher_interval_s = 60
+
+# Intervall in Sekunden für den periodischen Soll-Ist-Abgleich zwischen lokaler DB und TWS.
+order_sync_interval_s = 300
+
+# Basiswert in Sekunden für den exponentiellen Backoff bei fehlgeschlagenen Orders (5s, 10s, 20s...).
+retry_backoff_base_s = 5.0
+
+# Maximale Wartezeit in Sekunden beim Herunterfahren, um offene Worker-Tasks sauber zu leeren.
+shutdown_join_timeout_s = 15.0
+
+# SQLite-Lock-Timeout in Sekunden zur Vermeidung von Busy-Lockouts bei parallelen Zugriffen.
+database_timeout_s = 30.0
+
+# Maximal erlaubte Dateigröße einer täglichen Order-CSV in Bytes (5242880 = 5 MB DoS-Schutz).
+max_csv_size_bytes = 5242880
+
+# Dateipfad zur zentralen Anwendungs-Logdatei.
+log_file_path = "data/logs/app.log"
+
+# Anzahl der rotierenden Log-Dateien, die archiviert werden.
+log_rotation_backup_count = 5
+
+# Intervall in Sekunden für automatische, konsistente SQLite-Backups via VACUUM INTO (86400 = 24 Std).
+db_backup_interval_s = 86400
+
+# Intervall in Sekunden für die Reautorisierungs-Prüfung der IBKR-Sitzung (1800 = 30 Minuten).
+reauth_check_interval_s = 1800
+
+
+# -----------------------------------------------------------------------------
+# 3. KONTO- & RISIKOMANAGEMENT ([account])
+# -----------------------------------------------------------------------------
 [account]
-default_limit_pct = 0.05          # Standard-Kapitalallokation (5% des verfügbaren Kapitals)
-margin_multiplier_factor = 2.0     # Hebel-Faktor für Margin-Konten
-sizing_mode = "margin_adjusted_capital" # "margin_adjusted_capital" oder "total_cash"
-max_margin_usage_pct = 0.80       # Maximal erlaubte Margin-Auslastung (80% des Kapitals)
-min_cushion_pct = 0.10            # Minimales Kontopolster (10% Excess Liquidity / Net Liq)
+# Standard-Kapitalallokation pro Trade-Gruppe als Dezimalanteil (0.05 = 5 % des verfügbaren Kapitals).
+default_limit_pct = 0.05
+
+# Hebel-Multiplikator für die Berechnung des verfügbaren Handelskapitals bei Margin-Konten.
+margin_multiplier_factor = 2.0
+
+# Berechnungsmodus für das automatische Positions-Sizing beim CSV-Import:
+#   - "margin_adjusted_capital": Nutzt margin-bereinigte Mittel (Available Funds * Hebel).
+#   - "total_cash": Konservativer Modus, nutzt ausschließlich ungebundenes Barvermögen (Cash).
+sizing_mode = "margin_adjusted_capital"
+
+# Maximal erlaubte Margin-Auslastung des Gesamtkontos (0.0 bis 1.0; 0.80 = 80 % Obergrenze).
+# Ergibt die Pre-Trade-Simulation (whatIf) eine höhere Auslastung, wird die Order abgelehnt.
+max_margin_usage_pct = 0.80
+
+# Minimal erforderliches Kontopolster (Excess Liquidity / Net Liquidation, 0.0 bis 1.0; 0.10 = 10 %).
+# Fällt das Polster unter diese Schwelle, sperrt das System präventiv neue Order-Übermittlungen.
+min_cushion_pct = 0.10
 
 
+# -----------------------------------------------------------------------------
+# 4. STRATEGIE-SPEZIFISCHE ALLOKATIONS-LIMITS ([strategy_limits])
+# -----------------------------------------------------------------------------
 [strategy_limits]
-# Überschreibt default_limit_pct pro Strategie-Name aus der CSV
-Momentum = 0.10                   # Beispiel: 10% Allokation für Momentum-Strategie
+# Überschreibt default_limit_pct für bestimmte Strategienamen aus der Spalte strategy_name der CSV.
+# Werte als Dezimalzahl (z. B. 0.10 = 10 % Allokation).
+Momentum = 0.10
 MeanReversion = 0.05
 
+
+# -----------------------------------------------------------------------------
+# 5. TELEGRAM-BENACHRICHTIGUNGEN ([telegram])
+# -----------------------------------------------------------------------------
 [telegram]
-rate_limit_delay_s = 1.5          # Rate-Limit-Intervall in Sekunden zur Einhaltung der Telegram API-Vorgaben
-request_timeout_s = 10.0          # HTTP-Request-Timeout für Telegram sendMessage Calls
+# Zwangspause in Sekunden zwischen ausgehenden Telegram-Nachrichten (Rate-Limit-Schutz der API).
+rate_limit_delay_s = 1.5
+
+# HTTP-Request-Timeout in Sekunden für API-Calls an den Telegram-Server.
+request_timeout_s = 10.0
+# HINWEIS: TELEGRAM_BOT_TOKEN und TELEGRAM_CHAT_ID werden in .env hinterlegt!
+
+
+# -----------------------------------------------------------------------------
+# 6. UNIVERSELLES FUTURE-ASSET-MAPPING ([future_asset_mapping])
+# -----------------------------------------------------------------------------
+# Definiert die universelle Zuordnung eines Basiswerts (ETF/Aktie aus der CSV)
+# zum entsprechenden CME-Micro-Future. Dies ist eine globale Markteigenschaft.
+# Format: <BASISWERT> = "<CME_MICRO_FUTURE_SYMBOL>"
+[future_asset_mapping]
+QQQ = "MNQ"                       # CME Micro E-mini Nasdaq-100 Future
+SPY = "MES"                       # CME Micro E-mini S&P 500 Future
+IWM = "M2K"                       # CME Micro E-mini Russell 2000 Future
+DIA = "MYM"                       # CME Micro E-mini Dow Jones Industrial Future
+
+
+# -----------------------------------------------------------------------------
+# 7. DEKLARATIVE FUTURE-STRATEGIEN ([future_strategies])
+# -----------------------------------------------------------------------------
+# Liste aller Strategienamen aus der CSV, für die Signale auf gemappte Basiswerte
+# automatisch als Future (1 Kontrakt @ CME) statt als Aktie/ETF ausgeführt werden.
+# Alle nicht aufgeführten Strategien werden regulär als Aktien/ETFs gehandelt.
+[future_strategies]
+enabled = ["BounceBandit"]

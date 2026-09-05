@@ -488,30 +488,37 @@ async def _process_and_upsert_group(
                 return False
     # ----------------------------------------
 
-    # --- TRANSFORMATION FÜR BOUNCEBANDIT QQQ -> MNQ FUTURE ---
-    is_bounce_bandit_qqq = (
-        strategy is not None
-        and strategy.lower() == "bouncebandit"
-        and first_leg.symbol.upper() == "QQQ"
+    # --- UNIVERSELLE TRANSFORMATION IN CME-FUTURES (z. B. QQQ -> MNQ, SPY -> MES) ---
+    is_future_strategy = (
+        strategy is not None and strategy.lower() in config.futures.enabled_strategies
     )
+    source_symbol = first_leg.symbol.strip().upper()
+    target_future_symbol = config.futures.asset_mapping.get(source_symbol)
+    is_future_transformed = bool(is_future_strategy and target_future_symbol)
 
-    if is_bounce_bandit_qqq:
+    if is_future_transformed:
+        assert target_future_symbol is not None
         try:
             active_contract = await resolve_active_future_contract(
-                interactive_brokers, symbol="MNQ", exchange="CME"
+                interactive_brokers, symbol=target_future_symbol, exchange="CME"
             )
-            future_symbol = active_contract.localSymbol or "MNQ"
+            future_symbol = active_contract.localSymbol or target_future_symbol
         except Exception as resolve_error:
             logger.error(
-                "Failed to resolve active MNQ future contract for BounceBandit",
+                "Failed to resolve active future contract",
                 error=str(resolve_error),
+                strategy=strategy,
+                source_symbol=source_symbol,
+                target_future_symbol=target_future_symbol,
                 trade_group_id=trade_group_id,
             )
-            future_symbol = "MNQ"
+            future_symbol = target_future_symbol
 
         logger.info(
-            "Transforming BounceBandit QQQ order to MNQ future contract",
+            "Transforming equity order to future contract",
             trade_group_id=trade_group_id,
+            strategy=strategy,
+            source_symbol=source_symbol,
             resolved_contract=future_symbol,
         )
 
@@ -532,7 +539,8 @@ async def _process_and_upsert_group(
             file_name=trade_group_id,
             status="Future Transformation",
             details=(
-                f"BounceBandit QQQ wurde in 1 Kontrakt MNQ ({future_symbol}) Future @ CME transformiert. "
+                f"Strategie '{strategy}' ({source_symbol}) wurde in 1 Kontrakt "
+                f"{target_future_symbol} ({future_symbol}) Future @ CME transformiert. "
                 "Order-Sizing wurde auf 1 Kontrakt fixiert."
             ),
             emoji="🔄",
@@ -542,8 +550,8 @@ async def _process_and_upsert_group(
     account_id = entry_leg.account_id if entry_leg else first_leg.account_id
     account_id = resolve_account_id(interactive_brokers, account_id)
 
-    target_quantity = 1 if is_bounce_bandit_qqq else first_leg.quantity
-    if entry_leg and not is_bounce_bandit_qqq:
+    target_quantity = 1 if is_future_transformed else first_leg.quantity
+    if entry_leg and not is_future_transformed:
         balance_metrics = await fetch_account_balance_metrics(
             interactive_brokers, account_id
         )

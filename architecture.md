@@ -120,7 +120,8 @@ This section provides a detailed reference of all public classes and functions i
 - `AppConfig` (Class): Application-level settings such as loop intervals and thresholds.
 - `AccountConfig` (Class): Account limits, margins, and cushion thresholds.
 - `TelegramConfig` (Class): Telegram credentials and target chat settings.
-- `Config` (Class): Parent configuration object nesting TWS, App, Account, and Telegram configs.
+- `FuturesConfig` (Class): Configuration for automatic signal transformation into CME futures.
+- `Config` (Class): Parent configuration object nesting TWS, App, Account, Telegram, and Futures configs.
 - `load_env` (Function): Loads environment variables from the given environment path.
 - `load_config` (Function): Parses and constructs the type-safe configuration object.
 

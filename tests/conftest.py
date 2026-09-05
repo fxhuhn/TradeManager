@@ -10,6 +10,7 @@ from app.core.config import (
     AccountConfig,
     AppConfig,
     Config,
+    FuturesConfig,
     TelegramConfig,
     TwsConfig,
 )
@@ -85,6 +86,15 @@ def test_config() -> Config:
         rate_limit_delay_s=0.0,
         request_timeout_s=10.0,
     )
+    futures = FuturesConfig(
+        asset_mapping={"QQQ": "MNQ", "SPY": "MES", "IWM": "M2K", "DIA": "MYM"},
+        enabled_strategies=("bouncebandit", "spxtrend"),
+    )
     return Config(
-        tws=tws, app=app, account=account, telegram=telegram, strategy_limits={}
+        tws=tws,
+        app=app,
+        account=account,
+        telegram=telegram,
+        futures=futures,
+        strategy_limits={},
     )

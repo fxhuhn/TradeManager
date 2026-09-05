@@ -73,6 +73,14 @@ class TelegramConfig:
 
 
 @dataclass(frozen=True)
+class FuturesConfig:
+    """Konfiguration für die universelle Signal-Transformation in CME-Futures."""
+
+    asset_mapping: dict[str, str] = field(default_factory=dict)
+    enabled_strategies: tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
 class Config:
     """Zentrale Konfigurationsklasse für das gesamte Trading-System."""
 
@@ -80,6 +88,7 @@ class Config:
     app: AppConfig
     account: AccountConfig
     telegram: TelegramConfig
+    futures: FuturesConfig = field(default_factory=FuturesConfig)
     strategy_limits: dict[str, float] = field(default_factory=dict)
 
 
@@ -232,6 +241,32 @@ def _parse_telegram_config(
     )
 
 
+def _parse_futures_config(toml_data: dict[str, object]) -> FuturesConfig:
+    raw_mapping = toml_data.get("future_asset_mapping")
+    asset_mapping: dict[str, str] = {}
+    if isinstance(raw_mapping, dict):
+        for source, target in raw_mapping.items():
+            if isinstance(source, str) and isinstance(target, str):
+                cleaned_source = source.strip().upper()
+                cleaned_target = target.strip().upper()
+                if cleaned_source and cleaned_target:
+                    asset_mapping[cleaned_source] = cleaned_target
+
+    raw_strategies = toml_data.get("future_strategies")
+    enabled_strategies: list[str] = []
+    if isinstance(raw_strategies, dict):
+        raw_enabled = raw_strategies.get("enabled")
+        if isinstance(raw_enabled, list):
+            enabled_strategies = [
+                str(item).strip().lower() for item in raw_enabled if str(item).strip()
+            ]
+
+    return FuturesConfig(
+        asset_mapping=asset_mapping,
+        enabled_strategies=tuple(enabled_strategies),
+    )
+
+
 def load_config(root_path: Path = Path(".")) -> Config:
     """Lädt die Konfiguration aus config.toml und .env."""
     config_toml_path = root_path / "config.toml"
@@ -255,6 +290,8 @@ def load_config(root_path: Path = Path(".")) -> Config:
         toml_data.get("telegram", {}), environment_variables
     )
 
+    futures_config = _parse_futures_config(toml_data)
+
     strategy_limits = toml_data.get("strategy_limits", {})
     typed_strategy_limits = {
         strategy_name: float(limit_value)
@@ -266,5 +303,6 @@ def load_config(root_path: Path = Path(".")) -> Config:
         app=app_config,
         account=account_config,
         telegram=telegram_config,
+        futures=futures_config,
         strategy_limits=typed_strategy_limits,
     )

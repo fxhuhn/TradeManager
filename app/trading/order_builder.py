@@ -154,6 +154,37 @@ def round_to_tick(price: Decimal | float, tick_size: Decimal | float) -> Decimal
     ) * tick_decimal
 
 
+def _apply_bounce_bandit_conditions(
+    order: Order, order_row: OrderRow, today_string: str
+) -> None:
+    """Wendet die spezifischen Handelszeit- und Preistrigger-Bedingungen für BounceBandit an."""
+    order.orderType = "MKT"
+    order.outsideRth = True
+
+    if order_row.bracket_role == "ENTRY":
+        order.goodAfterTime = f"{today_string} 08:30:00 US/Central"
+    elif order_row.bracket_role in ("TP", "EXIT"):
+        order.goodAfterTime = f"{today_string} 14:59:00 US/Central"
+        order.conditionsIgnoreRth = False
+        order.conditionsCancelOrder = False
+
+        if order_row.target_price is not None:
+            price_condition = PriceCondition()
+            price_condition.conId = QQQ_CON_ID
+            price_condition.exch = "SMART"
+            price_condition.isMore = True  # QQQ Kurs >= target_price
+            price_condition.price = float(order_row.target_price)
+            price_condition.triggerMethod = 2  # Last Price
+            price_condition.conjunction = "a"
+
+            time_condition = TimeCondition()
+            time_condition.isMore = False  # Zeit <= 15:00:00 US/Central
+            time_condition.time = f"{today_string} 15:00:00 US/Central"
+            time_condition.conjunction = "a"
+
+            order.conditions = [price_condition, time_condition]
+
+
 def build_order(order_row: OrderRow) -> Order:
     """
     Konstruiert ein ib_async Order-Objekt aus den DB-Orderzeilen.
@@ -192,39 +223,13 @@ def build_order(order_row: OrderRow) -> Order:
         )
 
     # Spezifische Behandlung für BounceBandit Future-Orders (MNQ @ CME)
-    is_bounce_bandit_future = (
-        order_row.strategy_name is not None
+    if (
+        order_row.sec_type == "FUT"
+        and order_row.strategy_name is not None
         and order_row.strategy_name.lower() == "bouncebandit"
-        and order_row.sec_type == "FUT"
-    )
-
-    if is_bounce_bandit_future:
-        order.orderType = "MKT"
-        order.outsideRth = True
+    ):
         today_string = datetime.now(CME_TIMEZONE).strftime("%Y%m%d")
-
-        if order_row.bracket_role == "ENTRY":
-            order.goodAfterTime = f"{today_string} 08:30:00 US/Central"
-        elif order_row.bracket_role in ("TP", "EXIT"):
-            order.goodAfterTime = f"{today_string} 14:59:00 US/Central"
-            order.conditionsIgnoreRth = False
-            order.conditionsCancelOrder = False
-
-            if order_row.target_price is not None:
-                price_condition = PriceCondition()
-                price_condition.conId = QQQ_CON_ID
-                price_condition.exch = "SMART"
-                price_condition.isMore = True  # QQQ Kurs >= target_price
-                price_condition.price = float(order_row.target_price)
-                price_condition.triggerMethod = 2  # Last Price
-                price_condition.conjunction = "a"
-
-                time_condition = TimeCondition()
-                time_condition.isMore = False  # Zeit <= 15:00:00 US/Central
-                time_condition.time = f"{today_string} 15:00:00 US/Central"
-                time_condition.conjunction = "a"
-
-                order.conditions = [price_condition, time_condition]
+        _apply_bounce_bandit_conditions(order, order_row, today_string)
 
     # OCA (One-Cancels-All) Gruppe konfigurieren für SL, TP und EXIT
     if order_row.bracket_role in ("SL", "TP", "EXIT"):

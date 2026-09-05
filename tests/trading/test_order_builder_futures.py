@@ -146,3 +146,33 @@ def test_build_order_bounce_bandit_tp_with_conditions() -> None:
     assert isinstance(tc, TimeCondition)
     assert "15:00:00 US/Central" in tc.time
     assert tc.isMore is False
+
+
+def test_build_order_generic_future_without_bounce_bandit_conditions() -> None:
+    """Prüft, dass generische Futures-Orders anderer Strategien reguläre LMT/STP-Orders ohne BB-Konditionen bleiben."""
+    entry_row = OrderRow(
+        order_id=20,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG_SPX_1",
+        account_id="ACC1",
+        bracket_role="ENTRY",
+        symbol="MESU6",
+        sec_type="FUT",
+        exchange="CME",
+        action="BUY",
+        quantity=1,
+        order_type="LMT",
+        target_price=Decimal("5500.25"),
+        tif="GTC",
+        strategy_name="SpxTrend",
+        status="Created",
+    )
+    ib_order = build_order(entry_row)
+
+    assert ib_order.action == "BUY"
+    assert ib_order.orderType == "LMT"
+    assert ib_order.lmtPrice == 5500.25
+    assert ib_order.totalQuantity == 1.0
+    assert ib_order.goodAfterTime == ""
+    assert ib_order.conditions == []
