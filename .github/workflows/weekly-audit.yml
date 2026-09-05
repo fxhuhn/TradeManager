@@ -48,6 +48,7 @@ jobs:
           format: 'sarif'
           output: 'trivy-results.sarif'
           exit-code: '1'
+          limit-severities-for-sarif: true
           scanners: 'vuln'
           severity: 'CRITICAL,HIGH'
 

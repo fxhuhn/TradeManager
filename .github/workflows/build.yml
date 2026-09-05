@@ -64,24 +64,26 @@ jobs:
           provenance: false
           sbom: false
 
-      - name: Show Trivy findings (diagnostic table)
+      - name: Run Trivy vulnerability scanner on Docker image (gating)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.IMAGE_TAG }}
           format: 'table'
-          exit-code: '0'
+          exit-code: '1'
           ignore-unfixed: true
           scanners: 'vuln'
           severity: 'CRITICAL,HIGH'
 
-      - name: Run Trivy vulnerability scanner on Docker image
+      - name: Generate Trivy SARIF report for GitHub Security tab
+        if: always()
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.IMAGE_TAG }}
           format: 'sarif'
           output: 'trivy-results.sarif'
-          exit-code: '1'
+          exit-code: '0'
           ignore-unfixed: true
+          limit-severities-for-sarif: true
           scanners: 'vuln'
           severity: 'CRITICAL,HIGH'
 
