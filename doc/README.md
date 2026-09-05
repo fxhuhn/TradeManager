@@ -13,7 +13,7 @@ Willkommen beim offiziellen **Nutzer- und Wartungshandbuch** für das Interactiv
 2. [Installation & Ersteinrichtung](#2-installation--ersteinrichtung)
 3. [Konfigurationsreferenz](#3-konfigurationsreferenz)
 4. [Täglicher Betrieb (Benutzeranleitung)](#4-täglicher-betrieb-benutzeranleitung)
-5. [CSV-Dateiformat & Beispiele](#5-csv-dateiformat--beispiele)
+5. [Schnittstellenvereinbarung: CSV-Order-Dateien](#5-schnittstellenvereinbarung-csv-order-dateien)
 6. [Datenbankschema & Datenmodelle](#6-datenbankschema--datenmodelle)
 7. [Detaillierte Systemabläufe (Flows)](#7-detaillierte-systemabläufe-flows)
 8. [Positionsgrößenbestimmung & Sizing-Workflow](#8-positionsgrößenbestimmung--sizing-workflow)
@@ -435,74 +435,95 @@ Das System fährt kontrolliert herunter:
 | 7       | Nach Börsenschluss       | Automatischen EOD-Tagesabschlussbericht in Telegram prüfen                       |
 
 
----
+## 5. Schnittstellenvereinbarung: CSV-Order-Dateien
 
-## 5. CSV-Dateiformat & Beispiele
+> **Verbindliche Spezifikation:** Die vollständige, maschinenlesbare Schnittstellenvereinbarung für externe Signal-Generatoren (z. B. TradingView-Pipelines) ist als eigenständiges Dokument unter [doc/csv_interface.md](file:///Users/produktmanagement/Python/github/TradeManager/doc/csv_interface.md) hinterlegt.
 
-### 5.1 Spaltenreferenz
+Dieses Kapitel beschreibt die Vereinbarung zur Erstellung der täglichen CSV-Dateien, über welche externe Handelssysteme (ETL-Pipelines, TradingView-Strategien oder manuelle Exporte) dem TradeManager Order-Absichten übergeben.
 
-Die CSV-Datei muss folgende Spalten enthalten (Reihenfolge beliebig, Kopfzeile erforderlich):
+### 5.1 Transport & Dateikonventionen
 
-| Spalte           | Typ      | Pflicht | Beschreibung                                                       |
-|:-----------------|:---------|:--------|:-------------------------------------------------------------------|
-| `trade_group_id` | Text     | ✅       | Eindeutige Gruppen-ID (verknüpft ENTRY mit SL/TP/EXIT)            |
-| `bracket_role`   | Text     | ✅       | Rolle: `ENTRY`, `SL`, `TP`, `EXIT`                                |
-| `symbol`         | Text     | ✅       | Aktien-Tickersymbol (z. B. `TSLA`, `NVDA`)                        |
-| `sec_type`       | Text     | ✅       | Wertpapiertyp (nur `STK` erlaubt)                                 |
-| `exchange`       | Text     | ✅       | Börse (nur `SMART` erlaubt)                                       |
-| `account_id`     | Text     | ✅       | IBKR-Konto-ID (z. B. `U19605236`)                                 |
-| `action`         | Text     | ✅       | Handelsrichtung: `BUY` oder `SELL`                                 |
-| `quantity`       | Ganzzahl | ✅       | Stückzahl (muss > 0 sein)                                         |
-| `order_type`     | Text     | ✅       | Order-Typ: `LMT`, `STP`, `MKT`, `MOC`                             |
-| `target_price`   | Dezimal  | Bedingt | Zielpreis (Pflicht bei `LMT` und `STP`, leer/0 bei `MKT`/`MOC`)  |
-| `tif`            | Text     | Optional | Time-in-Force: `DAY`, `GTC`, `OPG` (Standard: `GTC`)             |
-| `strategy_name`  | Text     | Optional | Strategie-Bezeichnung (z. B. `TurnoverTiming_0.5`)                |
+| Eigenschaft | Vorgabe |
+| :--- | :--- |
+| **Dateinamensmuster** | `orders_YYYY_MM_DD.csv` (z. B. `orders_2026_09_05.csv`) |
+| **Ablageort** | `data/orders/` (wird automatisch überwacht) |
+| **Kodierung** | `UTF-8` oder `UTF-8 mit BOM` (`utf-8-sig`) |
+| **Trennzeichen** | Komma (`,`), Zeilenumbrüche LF oder CRLF |
+| **Kopfzeile** | Zwingend erforderlich (Reihenfolge flexibel) |
+| **Max. Dateigröße** | **5 MB** (Schutz vor DoS/Speicherüberlastung) |
 
-### 5.2 Validierungsregeln
+### 5.2 Spaltenspezifikation (Alle 12 Spalten)
 
-Eine Trade-Gruppe wird beim Import auf folgende Konsistenzregeln geprüft:
+| Spalte | Typ | Pflicht | Erlaubte Werte | Beschreibung & Validierungsregel |
+|:---|:---|:---:|:---|:---|
+| `trade_group_id` | Text | ✅ | 1–64 Zeichen | Eindeutige Gruppen-ID, die ENTRY mit SL/TP/EXIT verbindet (z. B. `20260905_Momentum_001`). |
+| `bracket_role` | Enum | ✅ | `ENTRY`, `SL`, `TP`, `EXIT` | Rolle im Bracket. Case-insensitive. |
+| `symbol` | Text | ✅ | Ticker (z. B. `AAPL`, `QQQ`) | Basiswert. Muss für alle Legs einer Gruppe identisch sein. |
+| `sec_type` | Text | ✅ | `STK` | Wertpapierklasse. In der CSV **stets `STK`** (auch für BounceBandit). |
+| `exchange` | Text | ✅ | `SMART` | Börsenplatz. In der CSV **stets `SMART`**. |
+| `account_id` | Text | ✅ | z. B. `U19605236` | IBKR-Kontonummer. Muss pro Gruppe identisch sein. |
+| `action` | Enum | ✅ | `BUY`, `SELL` | Handelsrichtung. |
+| `quantity` | Ganzzahl | ✅ | Integer > 0 | Soll-Stückzahl. Wird bei Kapitalmangel proportional herunterskaliert. |
+| `order_type` | Enum | ✅ | `LMT`, `STP`, `MKT`, `MOC` | TWS Order-Typ. |
+| `target_price` | Dezimal | Bedingt | Positiv mit Punkt | **Pflicht bei LMT/STP** (z. B. `208.50`). Bei MKT/MOC leer oder `0.00`. |
+| `tif` | Enum | Optional | `DAY`, `GTC`, `OPG` | Gültigkeitsdauer (Standard: `GTC`). |
+| `strategy_name` | Text | Optional | z. B. `Momentum`, `BounceBandit` | Name der Signal-Strategie (steuert Sonderlogiken). |
 
-1. **Maximal eine ENTRY-Order** pro `trade_group_id`
-2. **Ohne ENTRY** muss mindestens eine Exit-Order (SL, TP, EXIT) vorhanden sein
-3. **Einheitliches Symbol:** Alle Legs einer Gruppe müssen dasselbe `symbol` haben
-4. **Einheitliche Account-ID:** Alle Legs einer Gruppe müssen dieselbe `account_id` haben
-5. **Nur STK + SMART:** Ausschließlich `sec_type = 'STK'` und `exchange = 'SMART'`
-6. **Gültige Aktionen:** Nur `BUY` oder `SELL`
-7. **Positive Mengen:** `quantity` muss > 0 sein
-8. **Preispflicht:** Bei `LMT` und `STP` muss `target_price > 0` sein
-9. **Gegenrichtung:** SL/TP/EXIT-Legs müssen entgegengesetzt zur ENTRY-Aktion sein
+### 5.3 Validierungsregeln (`validate_group`)
 
-### 5.3 Beispiel: Vollständige Bracket-Order (ENTRY + SL + TP)
+1. **Maximal eine ENTRY-Order** pro `trade_group_id`.
+2. **Gegenrichtung:** Alle Exit-Legs (`SL`, `TP`, `EXIT`) müssen die Gegenrichtung zur `ENTRY`-Aktion besitzen (`BUY` ➔ `SELL`, `SELL` ➔ `BUY`).
+3. **Reine Exit-Orders:** Gruppen ohne `ENTRY` sind erlaubt, wenn der zugehörige Trade bereits in der lokalen `trading.db` existiert.
+4. **Multi-Exit-Unterstützung:** Mehrere Exits pro Gruppe sind erlaubt (z. B. Limit-TP kombiniert mit MOC-Exit zum Börsenschluss).
 
-```csv
-trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name
-20260604_Momentum_001,ENTRY,NVDA,STK,SMART,U19605236,BUY,10,LMT,208.50,DAY,Momentum
-20260604_Momentum_001,SL,NVDA,STK,SMART,U19605236,SELL,10,STP,195.00,GTC,Momentum
-20260604_Momentum_001,TP,NVDA,STK,SMART,U19605236,SELL,10,LMT,225.00,GTC,Momentum
+### 5.4 Strategie-Sonderregeln
+
+* **BounceBandit (Automatische QQQ ➔ MNQ Future Transformation):**  
+  Der Signal-Generator übergibt `symbol = QQQ`, `sec_type = STK`, `exchange = SMART`, `strategy_name = BounceBandit`. Der TradeManager transformiert dies beim Einlesen vollautomatisch in den liquidesten CME Micro E-mini Nasdaq Future (`MNQ`, `sec_type = FUT`, `exchange = CME`, `quantity = 1`) über den [future_resolver.py](file:///Users/produktmanagement/Python/github/TradeManager/app/trading/future_resolver.py).
+* **DipBuyer:** Reine Exits werden gegen die Datenbank abgeglichen und montags/dienstags bei Wochenend-Holdings durchgelassen.
+
+### 5.5 Verarbeitungs- & Archivierungs-Lifecycle
+
+```text
+data/orders/orders_YYYY_MM_DD.csv
+               │
+      [Import & Ausführung]
+               │
+       ┌───────┴───────┐
+       ▼               ▼
+   [Erfolg]        [Fehler]
+       │               │
+       ▼               ▼
+archive/*.csv.bak  archive/*.csv.err (🚨 Telegram Alarm)
 ```
 
-### 5.4 Beispiel: Reine Entry-Order (ohne Absicherung)
+### 5.6 Typische CSV-Beispiele
 
-```csv
-trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name
-20260604_TurnoverTiming_001,ENTRY,MU,STK,SMART,U19605236,BUY,2,LMT,938.82,DAY,TurnoverTiming_0.5
-```
+* **Bracket-Order (ENTRY + SL + TP):**
+  ```csv
+  trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name
+  20260905_Momentum_001,ENTRY,NVDA,STK,SMART,U19605236,BUY,10,LMT,208.50,DAY,Momentum
+  20260905_Momentum_001,SL,NVDA,STK,SMART,U19605236,SELL,10,STP,195.00,GTC,Momentum
+  20260905_Momentum_001,TP,NVDA,STK,SMART,U19605236,SELL,10,LMT,225.00,GTC,Momentum
+  ```
 
-### 5.5 Beispiel: Reine Exit-Order (Position schließen)
+* **Reine Entry-Order:**
+  ```csv
+  trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name
+  20260905_Turnover_001,ENTRY,MU,STK,SMART,U19605236,BUY,2,LMT,938.82,DAY,TurnoverTiming
+  ```
 
-Wenn der ENTRY bereits in der Datenbank existiert, kann eine reine Exit-Order importiert werden:
+* **Reine Exit-Order (Positionsschluss via Market-on-Open):**
+  ```csv
+  trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name
+  20260905_Exit_001,EXIT,TSLA,STK,SMART,U19605236,SELL,4,MKT,0.00,OPG,Momentum
+  ```
 
-```csv
-trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name
-768_TurnoverTiming_0.5_TSLA,EXIT,TSLA,STK,SMART,U19605236,SELL,4,MKT,0.00,OPG,TurnoverTiming_0.5
-```
-
-### 5.6 Beispiel: Market-on-Open-Order (OPG)
-
-```csv
-trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name
-20260604_NDXMomentum_010,ENTRY,LITE,STK,SMART,U19605236,BUY,10,MKT,0.00,OPG,NDXMomentum
-```
+* **BounceBandit (wird automatisch in CME MNQ-Future gewandelt):**
+  ```csv
+  trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name
+  20260905_Bounce_001,ENTRY,QQQ,STK,SMART,U19605236,BUY,1,MKT,0.00,DAY,BounceBandit
+  ```
 
 ---
 
@@ -510,18 +531,12 @@ trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,
 
 Das System verwendet eine SQLite-Datenbank (`trading.db`) im **Write-Ahead Logging (WAL)** Modus. Dies ermöglicht hervorragende Parallelität zwischen lesenden Hintergrunddiensten (z. B. Alert-Watcher) und schreibenden Transaktionen.
 
+> **Verbindliche DDL-Spezifikation:** Die vollständigen Spaltendefinitionen, Datentypen, Indizes und Constraints aller Tabellen sind in [references/architecture.md](file:///Users/produktmanagement/Python/github/TradeManager/references/architecture.md) verbindlich spezifiziert.
+
 ### 6.1 ER-Diagramm
 
 ```mermaid
 erDiagram
-    orders {
-        INTEGER order_id PK "Lokale / TWS-Order ID"
-        INTEGER perm_id "Eindeutige TWS Permanent ID"
-        INTEGER parent_id FK "Verweis auf Entry Order"
-        TEXT trade_group_id "Zugehörige Trade-Gruppe"
-        TEXT account_id "Handelskonto"
-        TEXT bracket_role "ENTRY, SL, TP, EXIT"
-        TEXT symbol "Aktiensymbol (z. B. MU)"
     orders {
         INTEGER order_id PK "Lokale / TWS-Order ID"
         INTEGER perm_id "Eindeutige TWS Permanent ID"

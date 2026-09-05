@@ -100,6 +100,8 @@ Stores the latest snapshot of account balance metrics, margin usage, and cushion
 
 Daily files must follow the pattern `orders_YYYY_MM_DD.csv` and use UTF-8-sig encoding.
 
+> **Full Interface Contract:** The exhaustive standalone interface specification for upstream signal generators (e.g. TradingView ETL) is maintained at [doc/csv_interface.md](file:///Users/produktmanagement/Python/github/TradeManager/doc/csv_interface.md).
+
 ### 2.1 CSV Fields Contract
 
 | Variable Name | Data Type | Validation Rules | Description |
@@ -107,15 +109,15 @@ Daily files must follow the pattern `orders_YYYY_MM_DD.csv` and use UTF-8-sig en
 | `trade_group_id` | `TEXT` | `NOT NULL`, max length 64 | Unique ID linking ENTRY and exit orders of a trade setup. |
 | `bracket_role` | `TEXT` | `IN ('ENTRY', 'SL', 'TP', 'EXIT')` | Bracket execution classification role. Case-insensitive. |
 | `symbol` | `TEXT` | `NOT NULL`, uppercase letters | Asset symbol representing target trade instrument. |
-| `sec_type` | `TEXT` | `CHECK = 'STK'` | Asset type; must match 'STK' (Equities). |
+| `sec_type` | `TEXT` | `CHECK = 'STK'` | Asset type in CSV; must match 'STK' (Equities). BounceBandit QQQ is auto-transformed to 'FUT' internally. |
 | `exchange` | `TEXT` | `CHECK = 'SMART'` | Trading exchange target; must match 'SMART'. |
 | `account_id` | `TEXT` | `NOT NULL` | Associated Interactive Brokers account identifier. |
 | `action` | `TEXT` | `IN ('BUY', 'SELL')` | Buying or selling trading side. Case-insensitive. |
-| `quantity` | `INTEGER` | `NOT NULL`, `quantity > 0` | Target amount of shares proposed to trade. |
+| `quantity` | `INTEGER` | `NOT NULL`, `quantity > 0` | Target amount of shares proposed to trade (scaled by sizing engine). |
 | `order_type` | `TEXT` | `IN ('LMT', 'STP', 'MKT', 'MOC')` | Execution trigger style (Limit, Stop, Market, Market-on-Close). |
 | `target_price` | `Decimal` | `Positive if LMT/STP`, `Empty if MKT/MOC` | Reference limit or trigger activation price boundary. |
-| `tif` | `TEXT` | `IN ('DAY', 'GTC')`, `Default: 'GTC'` | Order validity duration instruction (Time-In-Force). |
-| `strategy_name` | `TEXT` | `Optional` | Strategy system classification key name. |
+| `tif` | `TEXT` | `IN ('DAY', 'GTC', 'OPG')`, `Default: 'GTC'` | Order validity duration instruction (Time-In-Force). |
+| `strategy_name` | `TEXT` | `Optional` | Strategy system classification key name (e.g. 'Momentum', 'BounceBandit'). |
 
 ### 2.2 Time Format Contract
 Datetime variables are formatted as **ISO-8601 strings with timezone offset**:

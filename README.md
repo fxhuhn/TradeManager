@@ -34,6 +34,15 @@ TradeManager/
 
 ---
 
+## Dokumentation & Spezifikationen
+
+- 📖 **[Benutzer- und Betriebshandbuch](doc/README.md):** Ausführliche Anleitung für Installation, Konfiguration, Docker-Betrieb und Monitoring.
+- 📋 **[Schnittstellenvereinbarung für Order-CSVs](doc/csv_interface.md):** Verbindliche Spezifikation für externe Signal-Generatoren (z. B. TradingView-Pipelines).
+- 🏛️ **[Systemarchitektur](architecture.md):** High-Level Systemarchitektur, Datenfluss-Topologie und öffentliche Komponenten.
+- 🔬 **[Technische Spezifikation](references/architecture.md):** Low-Level DDL-Schemas, State Machine, CSV-Felder und Fehlerklassifikation.
+
+---
+
 ## Voraussetzungen
 
 - **Python 3.12+**

@@ -92,7 +92,7 @@ The system is constructed around a strict set of architectural rules to ensure d
 ## 3. Dataflow Topologies
 
 ### 3.1 Import, Sizing & Queueing
-1. **File Watcher Detection**: A background task polls for `orders_YYYY_MM_DD.csv` in `data/`. If found, a sizing check is initiated.
+1. **File Watcher Detection**: A background task polls for `orders_YYYY_MM_DD.csv` in `data/orders/` (see [doc/csv_interface.md](file:///Users/produktmanagement/Python/github/TradeManager/doc/csv_interface.md) for the exhaustive CSV interface contract). If found, a sizing check is initiated.
 2. **Capital Zuteilung Limits & Downscaling**: Net liquidation, cash, and buying power are requested from IBKR. The sizing math scales order quantities down symmetrically if estimated costs exceed allocated thresholds.
 3. **Database Insertion**: Orders are saved to SQLite with negative temporary parent/child IDs (to maintain bracket structures before TWS ID assignment).
 4. **Worker Queueing**: Valid trade groups are pushed to an asynchronous processing queue (`asyncio.Queue`).
