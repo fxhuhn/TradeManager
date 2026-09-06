@@ -173,3 +173,39 @@ def test_main_cli_returns_nonzero_on_errors(tmp_path: Path) -> None:
 
     # Assert
     assert exit_code == 1
+
+
+def test_format_status_report_renders_log_issues() -> None:
+    """Verifiziert, dass Log-Probleme im Statusbericht sauber aufgeführt werden."""
+    report_with_issues = SystemStatusReport(
+        db_accessible=True,
+        recent_log_issues=["10:00:00 [error    ] Connection lost"],
+    )
+    output = format_status_report(report_with_issues)
+    assert "📋 System-Log Status:" in output
+    assert "⚠️ 10:00:00 [error    ] Connection lost" in output
+
+    report_clean = SystemStatusReport(
+        db_accessible=True,
+        recent_log_issues=[],
+    )
+    output_clean = format_status_report(report_clean)
+    assert "🟢 Keine aktuellen Fehler oder Warnungen im Log gefunden." in output_clean
+
+
+def test_extract_recent_log_issues(tmp_path: Path) -> None:
+    """Verifiziert das performante Auslesen der letzten Log-Warnungen und -Fehler."""
+    from app.cli.status import _extract_recent_log_issues
+
+    log_file = tmp_path / "app.log"
+    log_file.write_text(
+        "09:00:00 [info     ] App started\n"
+        "09:01:00 [warning  ] High memory usage\n"
+        "09:02:00 [info     ] Keepalive ok\n"
+        "09:03:00 [error    ] Error 322: Summary request exceeded\n"
+    )
+
+    issues = _extract_recent_log_issues(log_file, max_issues=5)
+    assert len(issues) == 2
+    assert "High memory usage" in issues[0]
+    assert "Error 322" in issues[1]

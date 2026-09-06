@@ -137,6 +137,46 @@ async def test_fetch_account_balance_metrics_from_cache() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fetch_account_balance_metrics_retry_cache_streaming() -> None:
+    """Prüft, dass bei verzögertem Cache-Eingang der Retry greift und kein accountSummaryAsync aufgerufen wird."""
+    mock_ib = MagicMock()
+    # Erster Aufruf leer, zweiter Aufruf mit Werten (simuliert verzögertes TWS-Streaming)
+    mock_ib.accountValues.side_effect = [
+        [],
+        [
+            AccountValue(
+                account="U123",
+                tag="NetLiquidation",
+                value="85000.00",
+                currency="EUR",
+                modelCode="",
+            ),
+            AccountValue(
+                account="U123",
+                tag="AvailableFunds",
+                value="55000.00",
+                currency="EUR",
+                modelCode="",
+            ),
+            AccountValue(
+                account="U123",
+                tag="TotalCashValue",
+                value="30000.00",
+                currency="EUR",
+                modelCode="",
+            ),
+        ],
+    ]
+    mock_ib.accountSummaryAsync = AsyncMock()
+
+    metrics = await fetch_account_balance_metrics(mock_ib, "U123")
+    assert metrics.net_liquidation_value == Decimal("85000.00")
+    assert metrics.available_funds_value == Decimal("55000.00")
+    assert metrics.total_cash_value == Decimal("30000.00")
+    mock_ib.accountSummaryAsync.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_fetch_account_balance_metrics_from_summary() -> None:
     """Prüft das Laden der Kontowerte per Fallback via accountSummaryAsync."""
     mock_ib = MagicMock()

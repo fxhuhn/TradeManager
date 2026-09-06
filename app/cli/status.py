@@ -44,17 +44,50 @@ class SystemStatusReport:
     today_net_pnl: Decimal = Decimal("0.00")
     today_total_commissions: Decimal = Decimal("0.00")
     account_metrics: AccountMetricsReport | None = None
+    recent_log_issues: list[str] = field(default_factory=list)
+
+
+def _extract_recent_log_issues(log_path: Path, max_issues: int = 5) -> list[str]:
+    """Liest die letzten Warnungen und Fehler aus der zentralen Logdatei aus."""
+    if not log_path.exists() or not log_path.is_file():
+        return []
+
+    issues: list[str] = []
+    try:
+        with log_path.open("r", encoding="utf-8", errors="replace") as file:
+            file.seek(0, 2)
+            file_size = file.tell()
+            seek_pos = max(0, file_size - 65536)
+            file.seek(seek_pos)
+            lines = file.readlines()
+
+        for line in reversed(lines):
+            line_stripped = line.strip()
+            if any(
+                level in line_stripped
+                for level in ("[error    ]", "[critical ]", "[warning  ]")
+            ):
+                issues.append(line_stripped)
+                if len(issues) >= max_issues:
+                    break
+        issues.reverse()
+    except Exception:
+        return []
+
+    return issues
 
 
 async def generate_system_status_report(
     database_path: Path = Path("data/trading.db"),
     archive_path: Path = Path("data/orders/archive"),
+    log_path: Path = Path("data/logs/app.log"),
 ) -> SystemStatusReport:
-    """Erstellt einen vollständigen Statusbericht aus Datenbank und Dateisystem.
+    """Erstellt einen vollständigen Statusbericht aus Datenbank, Dateisystem und Logdatei.
 
     Args:
         database_path: Pfad zur SQLite-Datenbankdatei.
         archive_path: Pfad zum CSV-Archivverzeichnis.
+        log_path: Pfad zur zentralen App-Logdatei.
 
     Returns:
         SystemStatusReport mit aggregierten Zuständen.
@@ -72,11 +105,14 @@ async def generate_system_status_report(
             if item.name.endswith(".err"):
                 has_errors = True
 
+    recent_log_issues = _extract_recent_log_issues(log_path)
+
     if not database_path.exists():
         return SystemStatusReport(
             db_accessible=False,
             recent_archive_files=recent_files,
             has_archived_errors=has_errors,
+            recent_log_issues=recent_log_issues,
         )
 
     order_counts: dict[str, int] = {}
@@ -175,12 +211,14 @@ async def generate_system_status_report(
             today_net_pnl=today_net_pnl,
             today_total_commissions=today_total_commissions,
             account_metrics=account_metrics_report,
+            recent_log_issues=recent_log_issues,
         )
     except Exception:
         return SystemStatusReport(
             db_accessible=False,
             recent_archive_files=recent_files,
             has_archived_errors=has_errors,
+            recent_log_issues=recent_log_issues,
         )
 
 
@@ -260,6 +298,15 @@ def format_status_report(report: SystemStatusReport) -> str:
     lines.append(
         f"  - Kommissionen gesamt    : $ {report.today_total_commissions:,.2f}"
     )
+
+    # Log-Status
+    lines.append("\n📋 System-Log Status:")
+    if report.recent_log_issues:
+        for issue in report.recent_log_issues:
+            lines.append(f"  ⚠️ {issue}")
+    else:
+        lines.append("  🟢 Keine aktuellen Fehler oder Warnungen im Log gefunden.")
+
     lines.append("============================================================")
 
     return "\n".join(lines)
@@ -287,10 +334,20 @@ def main(argv: list[str] | None = None) -> int:
         default=Path("data/orders/archive"),
         help="Pfad zum Archiv-Verzeichnis",
     )
+    parser.add_argument(
+        "--log",
+        type=Path,
+        default=Path("data/logs/app.log"),
+        help="Pfad zur Logdatei",
+    )
     args = parser.parse_args(argv)
 
     report = asyncio.run(
-        generate_system_status_report(database_path=args.db, archive_path=args.archive)
+        generate_system_status_report(
+            database_path=args.db,
+            archive_path=args.archive,
+            log_path=args.log,
+        )
     )
     output = format_status_report(report)
     print(output)

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import aiosqlite
 import structlog
@@ -895,8 +896,30 @@ async def _upsert_trade_group_legs(
         raise exception
 
 
+def _extract_account_cache_values(
+    account_values_iterable: Any,
+    account_id: str,
+    all_relevant_tags: set[str],
+) -> dict[str, Decimal]:
+    """Extrahiert relevante Kontowerte aus einer Sequenz von AccountValue-Objekten."""
+    extracted: dict[str, Decimal] = {}
+    if not account_values_iterable:
+        return extracted
+    for account_value in account_values_iterable:
+        if account_id and getattr(account_value, "account", "") != account_id:
+            continue
+        tag = getattr(account_value, "tag", "")
+        if tag not in all_relevant_tags:
+            continue
+        try:
+            extracted[tag] = Decimal(str(account_value.value))
+        except (ValueError, ArithmeticError):
+            continue
+    return extracted
+
+
 async def fetch_account_balance_metrics(
-    interactive_brokers: IB, account_id: str
+    interactive_brokers: IB, account_id: str = ""
 ) -> AccountBalanceMetrics:
     """
     Fragt die wichtigsten Kontowerte (NetLiquidation, AvailableFunds, TotalCashValue,
@@ -910,25 +933,38 @@ async def fetch_account_balance_metrics(
     cushion_pct = Decimal("100.0")
     buying_power = Decimal("0.0")
 
-    cache_values: dict[str, Decimal] = {}
     core_tags = {"NetLiquidation", "AvailableFunds", "TotalCashValue"}
     extended_tags = {"MaintMarginReq", "Cushion", "BuyingPower"}
     all_relevant_tags = core_tags | extended_tags
 
-    for account_value in interactive_brokers.accountValues():
-        if account_id and account_value.account != account_id:
-            continue
-        if account_value.tag not in all_relevant_tags:
-            continue
-        try:
-            cache_values[account_value.tag] = Decimal(str(account_value.value))
-        except (ValueError, ArithmeticError) as exception:
-            logger.warning(
-                "Invalid account value found in TWS cache",
-                tag=account_value.tag,
-                raw_value=account_value.value,
-                error=str(exception),
+    cache_values: dict[str, Decimal] = _extract_account_cache_values(
+        interactive_brokers.accountValues(), account_id, all_relevant_tags
+    )
+
+    # 1. Wenn Werte nicht sofort im Cache sind (z.B. unmittelbar nach Reconnect),
+    # kurz warten, da TWS die Streaming-Updates asynchron per Socket nachliefert.
+    if (
+        not core_tags.issubset(cache_values.keys())
+        and getattr(interactive_brokers, "isConnected", lambda: True)()
+    ):
+        for _ in range(3):
+            await asyncio.sleep(0.1)
+            updated_cache = _extract_account_cache_values(
+                interactive_brokers.accountValues(), account_id, all_relevant_tags
             )
+            cache_values.update(updated_cache)
+            if core_tags.issubset(cache_values.keys()):
+                break
+
+    # 2. Falls noch unvollständig, im lokalen Wrapper-acctSummary nachsehen
+    if not core_tags.issubset(cache_values.keys()):
+        wrapper = getattr(interactive_brokers, "wrapper", None)
+        acct_summary = getattr(wrapper, "acctSummary", {})
+        if acct_summary:
+            summary_cached = _extract_account_cache_values(
+                acct_summary.values(), account_id, all_relevant_tags
+            )
+            cache_values.update(summary_cached)
 
     if core_tags.issubset(cache_values.keys()):
         raw_cushion = cache_values.get("Cushion")
@@ -963,22 +999,25 @@ async def fetch_account_balance_metrics(
         "Some account values not in cache. Calling accountSummaryAsync.",
         account=account_id,
     )
-    retrieved_values: dict[str, Decimal] = {}
+    retrieved_values: dict[str, Decimal] = dict(cache_values)
 
     try:
         summary_values = await interactive_brokers.accountSummaryAsync(account_id)
-        for account_value in summary_values:
-            if account_value.tag not in all_relevant_tags:
-                continue
-            try:
-                retrieved_values[account_value.tag] = Decimal(str(account_value.value))
-            except (ValueError, ArithmeticError) as exception:
-                logger.warning(
-                    "Invalid value found in Account Summary response",
-                    tag=account_value.tag,
-                    raw_value=account_value.value,
-                    error=str(exception),
-                )
+        if summary_values:
+            for account_value in summary_values:
+                if account_value.tag not in all_relevant_tags:
+                    continue
+                try:
+                    retrieved_values[account_value.tag] = Decimal(
+                        str(account_value.value)
+                    )
+                except (ValueError, ArithmeticError) as exception:
+                    logger.warning(
+                        "Invalid value found in Account Summary response",
+                        tag=account_value.tag,
+                        raw_value=account_value.value,
+                        error=str(exception),
+                    )
 
         raw_cushion = retrieved_values.get("Cushion")
         calc_cushion = Decimal("100.0")
