@@ -55,3 +55,10 @@ python .agents/skills/python-craftsman/scripts/run_quality_gates.py
 ```
 A task modifying code is NEVER complete if tests fail or if the quality pipeline fails.
 
+## Production Inspection & Log Analysis Invariant (MANDATORY)
+
+When querying, inspecting, or analyzing the production environment (containers, logs, metrics):
+- **DIRECT MCP CALLS ONLY**: You **MUST** use the native `call_mcp_tool` directly with `ServerName: "dozzle"` (`list_containers`, `search_container_logs`, `get_container_logs`, `get_container_stats`, `list_hosts`).
+- **NO SCRATCH SCRIPTS**: You **MUST NEVER** create or execute ad-hoc Python scripts, scratch files (e.g. `dozzle_client.py`), or shell curl/urllib commands to query logs or container states. Direct MCP calls are zero-overhead, faster, and required.
+
+
