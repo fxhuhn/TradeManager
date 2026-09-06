@@ -532,7 +532,7 @@ async def test_execute_reconnect_loop_success(test_config: Config) -> None:
     )
 
     with (
-        patch("asyncio.sleep", AsyncMock()),
+        patch.object(orchestrator, "_wait_reconnect_interval", AsyncMock()),
         patch.object(
             orchestrator, "_attempt_single_reconnect", AsyncMock(return_value=True)
         ),
@@ -619,7 +619,7 @@ async def test_execute_reconnect_loop_already_connected(test_config: Config) -> 
         queue=asyncio.Queue(),
     )
 
-    with patch("asyncio.sleep", AsyncMock()):
+    with patch.object(orchestrator, "_wait_reconnect_interval", AsyncMock()):
         await orchestrator._execute_reconnect_loop()
 
 
@@ -629,7 +629,7 @@ async def test_execute_reconnect_loop_exhausting_attempts(test_config: Config) -
     mock_ib = MagicMock()
     mock_ib.isConnected.return_value = False
     mock_notifier = MagicMock()
-    mock_notifier.send_system_status = AsyncMock()
+    mock_notifier.send_interactive_reconnect_alert = AsyncMock()
 
     orchestrator = TradingSystemOrchestrator(
         root_directory_path=Path("/root"),
@@ -650,7 +650,7 @@ async def test_execute_reconnect_loop_exhausting_attempts(test_config: Config) -
         return False
 
     with (
-        patch("asyncio.sleep", AsyncMock()),
+        patch.object(orchestrator, "_wait_reconnect_interval", AsyncMock()),
         patch.object(
             orchestrator, "_attempt_single_reconnect", side_effect=mock_single_reconnect
         ),
@@ -660,7 +660,36 @@ async def test_execute_reconnect_loop_exhausting_attempts(test_config: Config) -
         except asyncio.CancelledError:
             pass
 
-    assert mock_notifier.send_system_status.called
+    assert mock_notifier.send_interactive_reconnect_alert.called
+
+
+@pytest.mark.asyncio
+async def test_manual_reconnect_trigger_and_status_report(test_config: Config) -> None:
+    """Verifies manual_reconnect_trigger and provide_status_report."""
+    mock_ib = MagicMock()
+    mock_ib.isConnected.return_value = False
+    mock_notifier = MagicMock()
+
+    orchestrator = TradingSystemOrchestrator(
+        root_directory_path=Path("/root"),
+        database_path=Path("/root/data/trading.db"),
+        config=test_config,
+        notifier=mock_notifier,
+        interactive_brokers=mock_ib,
+        queue=asyncio.Queue(),
+    )
+
+    with patch.object(orchestrator, "run_reconnect_callback", AsyncMock()) as mock_cb:
+        await orchestrator.manual_reconnect_trigger()
+        assert orchestrator.reconnect_event.is_set()
+        await asyncio.sleep(0.01)
+        assert mock_cb.called
+
+    # provide_status_report
+    with patch.object(orchestrator, "create_database_connection", AsyncMock()):
+        status = await orchestrator.provide_status_report()
+        assert "TradeManager Status" in status
+        assert "TWS/Gateway" in status
 
 
 @pytest.mark.asyncio
@@ -873,7 +902,7 @@ async def test_start_background_tasks(test_config: Config, tmp_path: Path) -> No
         side_effect=lambda coroutine: (coroutine.close(), MagicMock())[1],
     ):
         orchestrator.start_background_tasks()
-        assert len(orchestrator.tasks) == 6
+        assert len(orchestrator.tasks) == 7
 
 
 @pytest.mark.asyncio

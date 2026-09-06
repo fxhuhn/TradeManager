@@ -152,6 +152,15 @@ rate_limit_delay_s = 1.5
 
 # HTTP-Request-Timeout in Sekunden für API-Calls an den Telegram-Server.
 request_timeout_s = 10.0
+
+# Name des Ziel-Containers für manuelle Neustarts bei Verbindungsverlust (Standard: "ibkr")
+ibkr_container_name = "ibkr"
+
+# Pfad zum Docker UNIX Domain Socket (Standard: "/var/run/docker.sock")
+docker_socket_path = "/var/run/docker.sock"
+
+# Aktiviert den interaktiven Telegram-Command-Listener (Standard: true)
+enable_commands = true
 # HINWEIS: TELEGRAM_BOT_TOKEN und TELEGRAM_CHAT_ID werden in .env hinterlegt!
 
 

@@ -27,8 +27,10 @@ from app.core.config import Config, load_config
 from app.core.db import get_db, run_db_backup, run_migrations, verify_db_integrity
 from app.core.logging_setup import TAG_RECONNECT, configure_logging
 from app.services.alert_watcher import alert_watcher, order_status_sync_loop
+from app.services.container_manager import DockerContainerManager
 from app.services.importer import csv_directory_watcher
 from app.services.notifier import TelegramNotifier
+from app.services.telegram_bot import TelegramCommandListener
 from app.trading.callbacks import TwsCallbacksManager
 from app.trading.recovery import run_recovery
 from app.trading.retry import handle_retriable_error
@@ -80,6 +82,58 @@ class TradingSystemOrchestrator:
         self.tasks: tuple[asyncio.Task[None], ...] = ()
         self.shutdown_event: asyncio.Event = asyncio.Event()
         self.callbacks_manager: TwsCallbacksManager | None = None
+        self.container_manager: DockerContainerManager = DockerContainerManager(
+            docker_socket_path=self.config.telegram.docker_socket_path
+        )
+        self.reconnect_event: asyncio.Event = asyncio.Event()
+        self.telegram_bot: TelegramCommandListener = TelegramCommandListener(
+            config=self.config,
+            notifier=self.notifier,
+            container_manager=self.container_manager,
+            trigger_reconnect_callback=self.manual_reconnect_trigger,
+            status_provider_callback=self.provide_status_report,
+        )
+
+    async def manual_reconnect_trigger(self) -> None:
+        """Triggert eine sofortige Wiederverbindung (z. B. nach manuellem Container-Neustart)."""
+        logger.info("Manual reconnect triggered via Telegram bot")
+        self.reconnect_event.set()
+        if not self.is_reconnecting:
+            asyncio.create_task(self.run_reconnect_callback())
+
+    async def provide_status_report(self) -> str:
+        """Erstellt eine Statusübersicht für die Telegram-Antwort."""
+        is_connected = self.interactive_brokers.isConnected()
+        conn_str = "✅ Verbunden" if is_connected else "❌ Getrennt"
+        socket_str = (
+            "✅ Verfügbar"
+            if self.container_manager.is_available()
+            else "❌ Nicht gemountet"
+        )
+        queue_size = self.queue.qsize()
+
+        open_orders_count = 0
+        try:
+            from app.persistence.database import fetch_open_orders
+
+            db = await self.create_database_connection()
+            try:
+                open_orders = await fetch_open_orders(db)
+                open_orders_count = len(open_orders)
+            finally:
+                await db.close()
+        except Exception:
+            open_orders_count = 0
+
+        return (
+            "📊 <b>TradeManager Status</b>\n\n"
+            f"• <b>TWS/Gateway:</b> {conn_str}\n"
+            f"• <b>Queue Tasks:</b> {queue_size}\n"
+            f"• <b>Offene DB-Orders:</b> {open_orders_count}\n"
+            f"• <b>Docker Socket:</b> {socket_str}\n"
+            f"• <b>Container:</b> <code>{self.config.telegram.ibkr_container_name}</code>\n"
+            f"• <b>Reconnecting:</b> {'Ja' if self.is_reconnecting else 'Nein'}"
+        )
 
     async def create_database_connection(self) -> aiosqlite.Connection:
         """Erstellt eine neue type-safe Verbindung zur Datenbank.
@@ -228,6 +282,7 @@ class TradingSystemOrchestrator:
 
         heartbeat_task = asyncio.create_task(self.heartbeat_loop())
         backup_task = asyncio.create_task(self.database_backup_loop())
+        bot_task = asyncio.create_task(self.telegram_bot.start_polling())
 
         self.tasks = (
             importer_task,
@@ -236,11 +291,13 @@ class TradingSystemOrchestrator:
             sync_task,
             heartbeat_task,
             backup_task,
+            bot_task,
         )
 
     async def graceful_shutdown(self) -> None:
         """Führt eine geordnete Shutdown-Sequenz des gesamten Systems aus."""
         logger.info("Beginning shutdown sequence...")
+        self.telegram_bot.stop()
         await self.notifier.send_system_status(
             title="System Shutdown initiiert", emoji="⚠️"
         )
@@ -273,6 +330,17 @@ class TradingSystemOrchestrator:
             title="System geordnet heruntergefahren", emoji="🛑"
         )
 
+    async def _wait_reconnect_interval(self, current_delay: float) -> None:
+        """Wartet auf das Intervall oder bricht bei externem Reconnect-Event sofort ab."""
+        try:
+            await asyncio.wait_for(self.reconnect_event.wait(), timeout=current_delay)
+            self.reconnect_event.clear()
+            logger.info(
+                "Reconnect loop awakened by external event (e.g. Telegram restart)"
+            )
+        except TimeoutError:
+            pass
+
     async def _execute_reconnect_loop(self) -> None:
         """Führt die Wiederverbindungsschleife mit steigenden Intervallen aus."""
         logger.info(f"{TAG_RECONNECT} Starting automatic reconnection...")
@@ -292,7 +360,7 @@ class TradingSystemOrchestrator:
                 attempt=attempt,
                 delay_seconds=current_delay,
             )
-            await asyncio.sleep(current_delay)
+            await self._wait_reconnect_interval(current_delay)
 
             if self.interactive_brokers.isConnected():
                 logger.info("Already connected. Ending reconnect loop.")
@@ -316,12 +384,9 @@ class TradingSystemOrchestrator:
                     "Switching to hourly retry mode.",
                     max_attempts,
                 )
-                await self.notifier.send_system_status(
-                    title=(
-                        f"WIEDERVERBINDUNG FEHLGESCHLAGEN ({max_attempts} Versuche). "
-                        "Stündlicher Retry-Modus aktiv."
-                    ),
-                    emoji="🚨",
+                await self.notifier.send_interactive_reconnect_alert(
+                    title=f"WIEDERVERBINDUNG FEHLGESCHLAGEN ({max_attempts} Versuche)",
+                    container_name=self.config.telegram.ibkr_container_name,
                 )
 
             attempt += 1

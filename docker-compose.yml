@@ -11,6 +11,7 @@ services:
     volumes:
       - ./data:/app/data                     # Persistenter Speicher für SQLite DB und CSV-Datei
       - ./config.toml:/app/config.toml:ro    # Read-only Konfiguration
+      - /var/run/docker.sock:/var/run/docker.sock # Erlaubt kontrollierten Neustart des IBKR Containers
     env_file:
       - .env                                 # Secrets (Telegram API-Keys)
     environment:

@@ -109,10 +109,19 @@ class TelegramNotifier:
         if not self.is_active:
             logger.warning("Telegram Notifier inactive (DUMMY or empty configuration)")
 
-    async def send_message(self, text: str) -> bool:
-        """
-        Sendet eine Nachricht asynchron via Telegram.
+    async def send_message(
+        self, text: str, reply_markup: dict[str, Any] | None = None
+    ) -> bool:
+        """Sendet eine Nachricht asynchron via Telegram.
+
         Nutzt aiohttp, damit der Event-Loop nicht blockiert wird.
+
+        Args:
+            text: Der zu sendende Text (HTML formatiert).
+            reply_markup: Optionales Telegram-Reply-Markup (z. B. Inline-Keyboard).
+
+        Returns:
+            bool: True bei Erfolg, sonst False.
         """
         if not self.is_active:
             logger.info("Telegram Alert (MOCK):", message=_strip_html(text))
@@ -123,12 +132,14 @@ class TelegramNotifier:
 
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
 
-        payload = {
+        payload: dict[str, Any] = {
             "chat_id": self.chat_id,
             "text": text,
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
         }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
 
         try:
             request_timeout = aiohttp.ClientTimeout(total=self.request_timeout_seconds)
@@ -156,6 +167,9 @@ class TelegramNotifier:
                                 "text": plain_text,
                                 "disable_web_page_preview": True,
                             }
+                            if reply_markup is not None:
+                                plain_payload["reply_markup"] = reply_markup
+
                             async with session.post(
                                 url, json=plain_payload, timeout=request_timeout
                             ) as retry_response:
@@ -182,6 +196,60 @@ class TelegramNotifier:
                         return False
         except Exception as exception:
             logger.error("Error sending Telegram alert", error=str(exception))
+            return False
+
+    async def send_interactive_reconnect_alert(
+        self,
+        title: str,
+        container_name: str = "ibkr",
+        button_text: str = "🔄 IBKR Gateway neu starten",
+        callback_data: str = "restart_ibkr",
+    ) -> bool:
+        """Sendet einen Reconnect-Alert mit einem interaktiven Inline-Keyboard-Button."""
+        from datetime import datetime
+
+        now_str = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+        message = (
+            f"🚨 <b>IBKR: {title}</b>\n"
+            f"🕒 Time: {now_str}\n\n"
+            f"Der Container <code>{container_name}</code> scheint nicht erreichbar zu sein.\n"
+            f"Sobald Du am Smartphone bereit bist (IBKR Mobile 2FA), klicke unten auf den Button "
+            f"oder sende <code>/restart_ibkr</code>:"
+        )
+        reply_markup = {
+            "inline_keyboard": [[{"text": button_text, "callback_data": callback_data}]]
+        }
+        return await self.send_message(message, reply_markup=reply_markup)
+
+    async def answer_callback_query(
+        self,
+        callback_query_id: str,
+        text: str,
+        show_alert: bool = False,
+    ) -> bool:
+        """Beantwortet eine Telegram-Callback-Query (Klick auf Inline-Button)."""
+        if not self.is_active:
+            return True
+
+        url = f"https://api.telegram.org/bot{self.token}/answerCallbackQuery"
+        payload = {
+            "callback_query_id": callback_query_id,
+            "text": text,
+            "show_alert": show_alert,
+        }
+        try:
+            request_timeout = aiohttp.ClientTimeout(total=self.request_timeout_seconds)
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url, json=payload, timeout=request_timeout
+                ) as response:
+                    if response.status == 200:
+                        return True
+                    return False
+        except Exception as exception:
+            logger.warning(
+                "Failed to answer Telegram callback query", error=str(exception)
+            )
             return False
 
     async def send_system_status(self, title: str, emoji: str = "🚀") -> bool:

@@ -624,3 +624,99 @@ async def test_send_message_html_parse_error_fallback(mock_config: MagicMock) ->
         second_call_payload = mock_session.post.call_args_list[1][1]["json"]
         assert "parse_mode" not in second_call_payload
         assert second_call_payload["text"] == "Header\nSome text"
+
+
+@pytest.mark.asyncio
+async def test_send_message_includes_reply_markup(mock_config: MagicMock) -> None:
+    """Verifiziert, dass reply_markup im JSON-Payload an Telegram übergeben wird."""
+    notifier = TelegramNotifier(mock_config)
+    mock_response = AsyncMock()
+    mock_response.status = 200
+
+    mock_post_context = MagicMock()
+    mock_post_context.__aenter__ = AsyncMock(return_value=mock_response)
+    mock_post_context.__aexit__ = AsyncMock(return_value=False)
+
+    mock_session = MagicMock()
+    mock_session.post = MagicMock(return_value=mock_post_context)
+
+    mock_client_session_context = MagicMock()
+    mock_client_session_context.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_client_session_context.__aexit__ = AsyncMock(return_value=False)
+
+    inline_keyboard = {
+        "inline_keyboard": [[{"text": "Button", "callback_data": "btn"}]]
+    }
+
+    with (
+        patch("aiohttp.ClientSession", return_value=mock_client_session_context),
+        patch.object(notifier.limiter, "wait", new_callable=AsyncMock),
+    ):
+        result = await notifier.send_message("Test Text", reply_markup=inline_keyboard)
+
+        assert result is True
+        payload = mock_session.post.call_args[1]["json"]
+        assert payload["reply_markup"] == inline_keyboard
+
+
+@pytest.mark.asyncio
+async def test_send_interactive_reconnect_alert(mock_config: MagicMock) -> None:
+    """Verifiziert send_interactive_reconnect_alert mit Button-Markup."""
+    notifier = TelegramNotifier(mock_config)
+    with patch.object(notifier, "send_message", new_callable=AsyncMock) as mock_send:
+        mock_send.return_value = True
+
+        result = await notifier.send_interactive_reconnect_alert(
+            title="Verbindung verloren",
+            container_name="ibkr",
+            button_text="Neu starten",
+            callback_data="restart_ibkr",
+        )
+
+        assert result is True
+        mock_send.assert_awaited_once()
+        text_arg = mock_send.call_args[0][0]
+        markup_arg = mock_send.call_args[1]["reply_markup"]
+
+        assert "Verbindung verloren" in text_arg
+        assert markup_arg["inline_keyboard"][0][0]["text"] == "Neu starten"
+        assert markup_arg["inline_keyboard"][0][0]["callback_data"] == "restart_ibkr"
+
+
+@pytest.mark.asyncio
+async def test_answer_callback_query_success(mock_config: MagicMock) -> None:
+    """Verifiziert answer_callback_query bei Erfolg."""
+    notifier = TelegramNotifier(mock_config)
+    mock_response = AsyncMock()
+    mock_response.status = 200
+
+    mock_post_context = MagicMock()
+    mock_post_context.__aenter__ = AsyncMock(return_value=mock_response)
+    mock_post_context.__aexit__ = AsyncMock(return_value=False)
+
+    mock_session = MagicMock()
+    mock_session.post = MagicMock(return_value=mock_post_context)
+
+    mock_client_session_context = MagicMock()
+    mock_client_session_context.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_client_session_context.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("aiohttp.ClientSession", return_value=mock_client_session_context):
+        result = await notifier.answer_callback_query("query_123", "OK Text")
+
+        assert result is True
+        payload = mock_session.post.call_args[1]["json"]
+        assert payload["callback_query_id"] == "query_123"
+        assert payload["text"] == "OK Text"
+
+
+@pytest.mark.asyncio
+async def test_answer_callback_query_inactive() -> None:
+    """Verifiziert answer_callback_query wenn Notifier inaktiv ist."""
+    config = MagicMock()
+    config.telegram.bot_token = ""
+    config.telegram.chat_id = ""
+
+    notifier = TelegramNotifier(config)
+    result = await notifier.answer_callback_query("query_123", "OK Text")
+    assert result is True

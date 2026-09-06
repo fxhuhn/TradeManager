@@ -24,6 +24,8 @@ flowchart TB
         Notifier[notifier.py: TelegramNotifier]
         Alerts[alert_watcher.py: AlertWatcher]
         Recovery[recovery.py: Status Sync]
+        Bot[telegram_bot.py: TelegramCommandListener]
+        DockerMgr[container_manager.py: DockerContainerManager]
     end
 
     subgraph Functional Core [Functional Core: Pure Math & Rules]
@@ -37,6 +39,7 @@ flowchart TB
     subgraph External [External Interfaces]
         IBKR((IBKR TWS / Gateway))
         Telegram((Telegram API))
+        DockerDaemon((/var/run/docker.sock))
     end
 
     %% Flow connections
@@ -68,7 +71,11 @@ flowchart TB
     Recovery -.->|Sync Active Orders| IBKR
     Recovery -.->|Sync Database State| DB
 
-    Notifier -->|Send Alert / Status HTML| Telegram
+    Notifier -->|Send Alert / Status HTML & Buttons| Telegram
+    Telegram -->|Commands / Callbacks| Bot
+    Bot -->|Restart Container Request| DockerMgr
+    DockerMgr -->|POST /containers/restart| DockerDaemon
+    Bot -.->|Awaken Loop| Recovery
 ```
 
 ---
@@ -176,7 +183,11 @@ This section provides a detailed reference of all public classes and functions i
 ### 4.8 Module: `app.services.notifier`
 - `AsyncTelegramRateLimiter` (Class): Implements message throttling for the Telegram API.
   - `wait` (Method)
+- `TelegramNotifier` (Class): High-level Telegram notification service.
+  - `is_active` (Property)
   - `send_message` (Method)
+  - `send_interactive_reconnect_alert` (Method)
+  - `answer_callback_query` (Method)
   - `send_system_status` (Method)
   - `send_order_filled` (Method)
   - `send_order_failed` (Method)
@@ -191,8 +202,18 @@ This section provides a detailed reference of all public classes and functions i
   - `send_archived_error_alert` (Method)
   - `send_daily_summary` (Method)
 
+### 4.9 Module: `app.services.container_manager`
+- `DockerContainerManager` (Class): Manages container lifecycle via Docker Unix socket.
+  - `is_available` (Method): Checks if the Docker socket exists and is accessible.
+  - `restart_container` (Method): Triggers an asynchronous container restart.
 
-### 4.9 Module: `app.trading.callbacks`
+### 4.10 Module: `app.services.telegram_bot`
+- `TelegramCommandListener` (Class): Long-polling bot listener for user commands and inline buttons.
+  - `is_active` (Property): Checks whether Telegram commands are enabled and configured.
+  - `start_polling` (Method): Starts the background polling loop.
+  - `stop_polling` (Method): Signals the polling loop to stop.
+
+### 4.11 Module: `app.trading.callbacks`
 - `register_all` (Function/Method): Binds TwsCallbacksManager event handlers to TWS.
 - `on_order_status` (Function/Method): Callback invoked when order states transition.
 - `on_exec_details` (Function/Method): Callback for trade execution details.
@@ -203,13 +224,13 @@ This section provides a detailed reference of all public classes and functions i
 - `handle_unassigned_execution` (Function): Logs detailed warnings for execution events not matching any local order in SQLite.
 
 
-### 4.10 Module: `app.trading.error_codes`
+### 4.12 Module: `app.trading.error_codes`
 - `ErrorClass` (Class): Enumeration classifying IBKR error severity.
 - `classify_error_code` (Function): Categorizes error codes into actionable retry/fail classes.
 - `is_reauthorization_error` (Function): Evaluates whether a TWS error code or message indicates a 2FA/token reauthorization requirement in the Client Portal.
 - `is_market_closed_for_symbol` (Function): Checks if regular trading hours have ended for a given symbol (e.g., 17:30 Berlin for Xetra or 16:00 New York for US equities).
 
-### 4.11 Module: `app.trading.order_builder`
+### 4.13 Module: `app.trading.order_builder`
 - `normalize_symbol` (Function): Normalizes asset symbols by stripping exchange suffixes (e.g., `.DE`).
 - `symbols_match` (Function): Robustly verifies whether two symbols match after normalization.
 - `make_stock_contract` (Function): Instantiates Stock contract structures for TWS.
@@ -220,20 +241,20 @@ This section provides a detailed reference of all public classes and functions i
 - `build_order` (Function): Constructs raw `Order` models with stop/limit brackets or conditional parameters.
 - `extract_transmitted_price` (Function): Extracts actual tick-rounded price from a constructed `Order`.
 
-### 4.12 Module: `app.trading.future_resolver`
+### 4.14 Module: `app.trading.future_resolver`
 - `resolve_active_future_contract` (Function): Dynamically resolves the active CME future contract with highest volume.
 
-### 4.13 Module: `app.trading.recovery`
+### 4.15 Module: `app.trading.recovery`
 - `run_recovery` (Function): Restores system database matching gateway states.
 - `fetch_active_orders` (Function): Requests outstanding execution brackets.
 - `fetch_completed_orders` (Function): Fetches finalized bracket details.
 - `reconcile_broker_positions` (Function): Reconciles live IBKR positions with local database, auto-recovering unassigned positions into orders and executions tables.
 
 
-### 4.14 Module: `app.trading.retry`
+### 4.16 Module: `app.trading.retry`
 - `handle_retriable_error` (Function): Processes transitory order errors for rescheduling.
 
-### 4.15 Module: `app.trading.settlement`
+### 4.17 Module: `app.trading.settlement`
 - `trigger_settlement` (Function): Evaluates completed execution lists to write final logs.
 - `get_settlement_lock` (Function): Obtains execution lock for a trade group.
 - `cleanup_settlement_lock` (Function): Releases execution lock for a trade group.
@@ -242,17 +263,17 @@ This section provides a detailed reference of all public classes and functions i
 - `SettlementOutput` (Class): Summary variables calculated for DB storage.
 - `calculate_settlement` (Function): Resolves net price, profit, and commissions.
 
-### 4.16 Module: `app.trading.worker`
+### 4.18 Module: `app.trading.worker`
 - `process_trade_group` (Function): Core worker loop evaluating a single trade group sequence.
 - `handle_reauthorization_wait` (Function): Pauses order execution upon a token/reauthorization requirement, performs periodic What-If probes, sends Telegram alerts, and cancels expired orders upon market close.
 
-### 4.17 Module: `app.services.account_metrics`
+### 4.19 Module: `app.services.account_metrics`
 - `AccountMetricsSnapshot` (Class): Encapsulates equity, margin requirements, cushion, and cash.
 - `save_account_metrics` (Function): Persists an account metrics snapshot atomically into SQLite.
 - `get_latest_account_metrics` (Function): Queries the latest account metrics snapshot from SQLite.
 - `sync_and_save_account_metrics` (Function): Fetches account balance metrics from IBKR and saves them to SQLite.
 
-### 4.18 Module: `app.main`
+### 4.20 Module: `app.main`
 - `TradingSystemOrchestrator` (Class): Core system loop coordinator and scheduler.
   - `create_database_connection` (Method)
   - `trigger_settlement_callback` (Method)
@@ -260,6 +281,8 @@ This section provides a detailed reference of all public classes and functions i
   - `handle_retriable_error_callback` (Method)
   - `run_recovery_callback` (Method)
   - `run_reconnect_callback` (Method)
+  - `manual_reconnect_trigger` (Method)
+  - `provide_status_report` (Method)
   - `start_background_tasks` (Method)
   - `graceful_shutdown` (Method)
   - `heartbeat_loop` (Method)
@@ -267,7 +290,7 @@ This section provides a detailed reference of all public classes and functions i
 - `signal_handler` (Function): Receives OS signals for cleanup.
 - `connect_to_tws` (Function): Establishes gateway network socket connection.
 
-### 4.19 Module: `app.cli.status`
+### 4.21 Module: `app.cli.status`
 - `AccountMetricsReport` (Class): Encapsulates account and margin figures for CLI display.
 - `SystemStatusReport` (Class): Aggregates runtime system, file, and database statistics.
 - `generate_system_status_report` (Function): Collects and aggregates database and filesystem states.

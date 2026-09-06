@@ -201,3 +201,17 @@ Governed by [app/trading/error_codes.py](app/trading/error_codes.py), IBKR API e
 | **`CANCEL`** | `202`, `10147`, `10149`, `10268` | Order marked as `Cancelled` in database. Stop execution of remaining bracket elements if necessary to prevent exposure. |
 | **`REAUTH`** | `201` (with token/client portal verification text) | Execution paused. Order kept in `Created`. Retry loop every 30m via What-If simulation. Telegram alert on each attempt. If market closes without reauth, transition to `Cancelled` and archive CSV as `.err`. |
 | **`FATAL`** | *All other codes* (default) | Halt order transmission. Mark status as `Error`. Alert administrator immediately via Telegram message (Critical notification). |
+
+---
+
+## 6. Remote Management & Telegram Control Interface
+
+Governed by [app/services/container_manager.py](app/services/container_manager.py) and [app/services/telegram_bot.py](app/services/telegram_bot.py):
+
+| Component / Action | Implementation Detail | Security & Operational Invariants |
+| :--- | :--- | :--- |
+| **Telegram Inbound Listener** | `telegram_command_listener` via Telegram Bot API `GET /getUpdates` (Long-Polling `timeout=20`). | **Strict Whitelisting**: Drops and logs any update whose chat ID does not match `TELEGRAM_CHAT_ID`. |
+| **Interactive Alert** | `send_interactive_reconnect_alert` with Inline-Keyboard (`[🔄 IBKR Gateway neu starten]`, `callback_data="restart_ibkr"`). | Sent when reconnection attempts reach maximum configured threshold before entering hourly retry backoff. |
+| **Docker Container Restart** | `DockerContainerManager` via UNIX domain socket `/var/run/docker.sock` (`POST http://localhost/containers/{name}/restart?t=10`). | **Debounce Invariant**: Enforces a 60-second cooldown between restart attempts to prevent 2FA boot-loops and API flooding. |
+| **Immediate Reconnect** | `manual_reconnect_trigger` via `asyncio.Event` (`reconnect_event.set()`). | Awakens the reconnection sleep loop instantly without waiting for the 3600-second backoff timer. |
+| **Status Inspection** | `/status` command returns connection health, queue size, open database orders, and Docker socket availability. | Read-only inspection; non-blocking database queries. |

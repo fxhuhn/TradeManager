@@ -70,6 +70,9 @@ class TelegramConfig:
     chat_id: str
     rate_limit_delay_s: float
     request_timeout_s: float
+    ibkr_container_name: str = "ibkr"
+    docker_socket_path: str = "/var/run/docker.sock"
+    enable_commands: bool = True
 
 
 @dataclass(frozen=True)
@@ -238,6 +241,11 @@ def _parse_telegram_config(
         chat_id=telegram_chat_id,
         rate_limit_delay_s=_to_float(telegram_data.get("rate_limit_delay_s"), 1.5),
         request_timeout_s=_to_float(telegram_data.get("request_timeout_s"), 10.0),
+        ibkr_container_name=str(telegram_data.get("ibkr_container_name", "ibkr")),
+        docker_socket_path=str(
+            telegram_data.get("docker_socket_path", "/var/run/docker.sock")
+        ),
+        enable_commands=bool(telegram_data.get("enable_commands", True)),
     )
 
 
