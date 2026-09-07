@@ -7,6 +7,7 @@ hoher Ausführungs-Slippage und Abgleich offener TWS-Order-Zustände.
 
 import asyncio
 from collections.abc import Awaitable, Callable, Coroutine
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -22,6 +23,17 @@ from app.services.notifier import TelegramNotifier
 from app.trading.recovery import run_recovery
 
 logger = structlog.get_logger()
+
+
+@dataclass(frozen=True)
+class DeadOrderMarketSession:
+    """Container holding market session times and thresholds for dead order evaluation."""
+
+    current_time_new_york: datetime
+    market_open_today: datetime
+    market_close_today: datetime
+    new_york_timezone: ZoneInfo
+    threshold_minutes: int
 
 
 async def alert_watcher(
@@ -157,17 +169,60 @@ async def check_dead_orders(
         logger.error("Error during dead order check", error=str(exception))
         return
 
+    session = DeadOrderMarketSession(
+        current_time_new_york=current_time_new_york,
+        market_open_today=market_open_today,
+        market_close_today=market_close_today,
+        new_york_timezone=new_york_timezone,
+        threshold_minutes=threshold_minutes,
+    )
+
     for row in rows:
         await _process_single_potential_dead_order(
             order_row=row,
             notifier=notifier,
             alert_state=state,
-            current_time_new_york=current_time_new_york,
-            market_open_today=market_open_today,
-            market_close_today=market_close_today,
-            new_york_timezone=new_york_timezone,
-            threshold_minutes=threshold_minutes,
+            session=session,
         )
+
+
+async def _evaluate_and_alert_single_slippage_row(
+    row: aiosqlite.Row,
+    notifier: TelegramNotifier,
+    state: "AlertState",
+    max_slippage_percentage: float,
+) -> None:
+    """Evaluates slippage on an individual trade group entry and sends alert if excessive."""
+    target_price_raw = row["target_price"]
+    if target_price_raw is None:
+        return
+    target_price = Decimal(str(target_price_raw))
+    if target_price <= Decimal("0"):
+        return
+
+    avg_entry_price = Decimal(str(row["avg_entry_price"]))
+    if avg_entry_price <= Decimal("0"):
+        return
+
+    price_diff_slippage = Decimal(str(row["price_diff_slippage"]))
+    slippage_limit = avg_entry_price * Decimal(str(max_slippage_percentage))
+    if abs(price_diff_slippage) <= slippage_limit:
+        return
+
+    trade_group_id = str(row["trade_group_id"])
+    if state.is_group_reported(trade_group_id):
+        return
+
+    symbol = str(row["symbol"])
+    message_content = f"📉 <b>HIGH SLIPPAGE</b> | <code>{symbol}</code>"
+    logger.warning(
+        "High slippage detected",
+        trade_group_id=trade_group_id,
+        slippage=float(price_diff_slippage),
+    )
+
+    if await notifier.send_message(message_content):
+        state.mark_group_reported(trade_group_id)
 
 
 async def check_high_slippage(
@@ -188,37 +243,12 @@ async def check_high_slippage(
     try:
         async with db.execute(query) as cursor:
             async for row in cursor:
-                trade_group_id = row["trade_group_id"]
-                price_diff_slippage = Decimal(str(row["price_diff_slippage"]))
-                avg_entry_price = Decimal(str(row["avg_entry_price"]))
-                symbol = row["symbol"]
-                target_price_raw = row["target_price"]
-
-                # Ignoriere Orders ohne echten Target-Preis (z. B. Target 0, MKT, MOC, MOO)
-                if target_price_raw is None:
-                    continue
-                target_price = Decimal(str(target_price_raw))
-                if target_price <= Decimal("0"):
-                    continue
-
-                # Prämisse: ABS(price_diff_slippage) > avg_entry_price * max_slippage_percentage
-                if avg_entry_price > Decimal("0"):
-                    slippage_limit = avg_entry_price * Decimal(
-                        str(max_slippage_percentage)
-                    )
-                    if abs(price_diff_slippage) > slippage_limit:
-                        if not state.is_group_reported(trade_group_id):
-                            message_content = (
-                                f"📉 <b>HIGH SLIPPAGE</b> | <code>{symbol}</code>"
-                            )
-                            logger.warning(
-                                "High slippage detected",
-                                trade_group_id=trade_group_id,
-                                slippage=float(price_diff_slippage),
-                            )
-
-                            if await notifier.send_message(message_content):
-                                state.mark_group_reported(trade_group_id)
+                await _evaluate_and_alert_single_slippage_row(
+                    row=row,
+                    notifier=notifier,
+                    state=state,
+                    max_slippage_percentage=max_slippage_percentage,
+                )
     except Exception as exception:
         logger.error("Error during slippage check", error=str(exception))
 
@@ -285,9 +315,9 @@ async def check_archived_error_files(
         return
 
     try:
-        err_files = sorted(archive_dir.glob("*.err"))
-        for err_file in err_files:
-            file_name = err_file.name
+        error_files = sorted(archive_dir.glob("*.err"))
+        for error_file in error_files:
+            file_name = error_file.name
             if not state.is_file_reported(file_name):
                 logger.warning(
                     "Archived error file discovered by watcher",
@@ -370,11 +400,7 @@ async def _process_single_potential_dead_order(
     order_row: aiosqlite.Row,
     notifier: TelegramNotifier,
     alert_state: AlertState,
-    current_time_new_york: datetime,
-    market_open_today: datetime,
-    market_close_today: datetime,
-    new_york_timezone: ZoneInfo,
-    threshold_minutes: int,
+    session: DeadOrderMarketSession,
 ) -> None:
     """Überprüft eine einzelne Order auf Überschreiten des Timeouts und alarmiert ggf."""
     order_id = order_row["order_id"]
@@ -399,21 +425,21 @@ async def _process_single_potential_dead_order(
         )
         return
 
-    transmitted_at_new_york = transmitted_at_utc.astimezone(new_york_timezone)
+    transmitted_at_new_york = transmitted_at_utc.astimezone(session.new_york_timezone)
 
     if order_type == "MOC":
         # MOC-Orders werden erst ab Börsenschluss aktiv geschaltet.
-        effective_activation_time = market_close_today
-    elif transmitted_at_new_york < market_open_today:
-        effective_activation_time = market_open_today
+        effective_activation_time = session.market_close_today
+    elif transmitted_at_new_york < session.market_open_today:
+        effective_activation_time = session.market_open_today
     else:
         effective_activation_time = transmitted_at_new_york
 
-    if current_time_new_york < effective_activation_time:
+    if session.current_time_new_york < effective_activation_time:
         return
 
-    active_duration = current_time_new_york - effective_activation_time
-    threshold_duration = timedelta(minutes=threshold_minutes)
+    active_duration = session.current_time_new_york - effective_activation_time
+    threshold_duration = timedelta(minutes=session.threshold_minutes)
 
     if active_duration <= threshold_duration:
         return

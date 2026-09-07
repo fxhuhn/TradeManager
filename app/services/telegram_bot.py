@@ -86,10 +86,7 @@ class TelegramCommandListener:
             try:
                 updates = await self._fetch_updates()
                 error_backoff_seconds = 2.0  # Reset bei Erfolg
-
-                for update in updates:
-                    await self._process_single_update(update)
-
+                await self._dispatch_updates_batch(updates)
             except asyncio.CancelledError:
                 logger.info("Telegram command listener polling loop cancelled.")
                 self._is_running = False
@@ -104,6 +101,11 @@ class TelegramCommandListener:
                 error_backoff_seconds = min(
                     error_backoff_seconds * 2.0, max_backoff_seconds
                 )
+
+    async def _dispatch_updates_batch(self, updates: list[dict[str, Any]]) -> None:
+        """Leitet einen Batch empfangener Updates an die Einzelverarbeitung weiter."""
+        for update in updates:
+            await self._process_single_update(update)
 
     def stop(self) -> None:
         """Beendet die Polling-Schleife."""

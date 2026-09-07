@@ -152,6 +152,7 @@ This section provides a detailed reference of all public classes and functions i
 - `SettlementRow` (Class): Relational structure for calculated trade group settlements.
 
 ### 4.5 Module: `app.services.alert_watcher`
+- `DeadOrderMarketSession` (Class): Immutable parameter container encapsulating market session timestamps, timezone, and threshold limits for dead order evaluation.
 - `order_status_sync_loop` (Function): Continuous task to synchronize order statuses.
 - `check_dead_orders` (Function): Periodically checks for unresponsive orders.
 - `check_high_slippage` (Function): Compares actual fills against targets for slippage warnings.

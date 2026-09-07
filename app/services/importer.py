@@ -10,12 +10,11 @@ import asyncio
 import dataclasses
 import json
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
 
 import aiosqlite
 import structlog
@@ -272,7 +271,7 @@ async def _process_daily_csv_file(
                     "  OR (status = 'Cancelled' AND transmitted_at IS NULL)"
                     ")"
                 )
-                params: tuple[object, ...] = (
+                parameters: tuple[object, ...] = (
                     json.dumps(imported_group_ids),
                     file_date,
                 )
@@ -285,9 +284,9 @@ async def _process_daily_csv_file(
                     "  OR (status = 'Cancelled' AND transmitted_at IS NULL)"
                     ")"
                 )
-                params = (json.dumps(imported_group_ids),)
+                parameters = (json.dumps(imported_group_ids),)
 
-            async with database_connection.execute(query, params) as cursor:
+            async with database_connection.execute(query, parameters) as cursor:
                 async for row in cursor:
                     failed_orders_summary.append(
                         {
@@ -897,7 +896,7 @@ async def _upsert_trade_group_legs(
 
 
 def _extract_account_cache_values(
-    account_values_iterable: Any,
+    account_values_iterable: Iterable[object] | None,
     account_id: str,
     all_relevant_tags: set[str],
 ) -> dict[str, Decimal]:
@@ -912,7 +911,8 @@ def _extract_account_cache_values(
         if tag not in all_relevant_tags:
             continue
         try:
-            extracted[tag] = Decimal(str(account_value.value))
+            raw_value = getattr(account_value, "value", "")
+            extracted[tag] = Decimal(str(raw_value))
         except (ValueError, ArithmeticError):
             continue
     return extracted

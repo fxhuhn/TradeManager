@@ -68,20 +68,20 @@ async def save_account_metrics(
             """,
             (
                 account_id,
-                float(metrics.net_liquidation),
-                float(metrics.total_cash_value),
-                float(metrics.available_funds),
-                float(metrics.maint_margin_req),
-                float(metrics.cushion_pct),
-                float(metrics.buying_power),
+                str(metrics.net_liquidation),
+                str(metrics.total_cash_value),
+                str(metrics.available_funds),
+                str(metrics.maint_margin_req),
+                str(metrics.cushion_pct),
+                str(metrics.buying_power),
             ),
         )
     logger.info(
         "Account metrics snapshot persisted",
         account_id=account_id,
-        net_liquidation=float(metrics.net_liquidation),
-        cushion_pct=float(metrics.cushion_pct),
-        available_funds=float(metrics.available_funds),
+        net_liquidation=str(metrics.net_liquidation),
+        cushion_pct=str(metrics.cushion_pct),
+        available_funds=str(metrics.available_funds),
     )
 
 
