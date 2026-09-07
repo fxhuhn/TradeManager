@@ -203,9 +203,11 @@ This section provides a detailed reference of all public classes and functions i
   - `send_daily_summary` (Method)
 
 ### 4.9 Module: `app.services.container_manager`
+- `ContainerStatusReport` (Class): Dataclass encapsulating container execution and health status.
 - `DockerContainerManager` (Class): Manages container lifecycle via Docker Unix socket.
   - `is_available` (Method): Checks if the Docker socket exists and is accessible.
   - `restart_container` (Method): Triggers an asynchronous container restart.
+  - `get_container_status` (Method): Queries container execution state and health via Docker Engine API.
 
 ### 4.10 Module: `app.services.telegram_bot`
 - `TelegramCommandListener` (Class): Long-polling bot listener for user commands and inline buttons.

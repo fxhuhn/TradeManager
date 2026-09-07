@@ -54,3 +54,7 @@ save_account_metrics
 sync_and_save_account_metrics
 AccountMetricsSnapshot
 AccountMetricsReport
+
+# Container Manager public models and attributes
+ContainerStatusReport
+name_or_id
