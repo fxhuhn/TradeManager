@@ -790,3 +790,20 @@ async def test_reconcile_broker_positions_skips_negative_qty_and_decrements_temp
 
     await reconcile_broker_positions(db, mock_ib, mock_notifier)
     mock_notifier.send_unassigned_position_recovered.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_recovery_skips_when_disconnected(mock_config: Config) -> None:
+    """Verifies run_recovery returns early without fetching orders if session is disconnected."""
+    mock_db = AsyncMock()
+    mock_ib = MagicMock()
+    mock_ib.isConnected.return_value = False
+    mock_queue = MagicMock()
+    mock_notifier = MagicMock()
+    mock_trigger = AsyncMock()
+
+    with patch("app.trading.recovery.fetch_active_orders") as mock_fetch:
+        await run_recovery(
+            mock_db, mock_ib, mock_queue, mock_notifier, mock_trigger, mock_config
+        )
+        mock_fetch.assert_not_called()

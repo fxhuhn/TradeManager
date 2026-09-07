@@ -42,6 +42,13 @@ async def run_recovery(
     Gleicht ausstehende lokale Orders mit der TWS ab und veranlasst bei Bedarf
     ein Re-queue oder Settlement.
     """
+    if (
+        hasattr(interactive_brokers_session, "isConnected")
+        and not interactive_brokers_session.isConnected()
+    ):
+        logger.warning("Recovery skipped: IBKR session is not connected.")
+        return
+
     logger.debug("Starting recovery phase")
 
     await fetch_active_orders(interactive_brokers_session, config.tws.request_timeout_s)

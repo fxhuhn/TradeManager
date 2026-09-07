@@ -223,6 +223,10 @@ class TradingSystemOrchestrator:
 
         Gleicht offene Orders und Positionen zwischen der Datenbank und der TWS ab.
         """
+        if not self.interactive_brokers.isConnected():
+            logger.warning("Recovery skipped: IB is not connected")
+            return
+
         database_connection_instance = await self.create_database_connection()
         try:
             await run_recovery(
@@ -588,11 +592,26 @@ async def main() -> None:
     notifier = TelegramNotifier(config)
     await notifier.send_system_status(title="Trading System startet", emoji="🚀")
 
-    # 3. Datenbank-Integrity Check
+    # 3. Datenbank-Integrity Check & Schema-Migrationen
     database_path = await _verify_database_integrity(root_directory_path, notifier)
-
-    # 4. Verbindung zu TWS aufbauen (mit optionaler Docker-Health-Prüfung)
     interactive_brokers = IB()
+    await _run_database_migrations(
+        root_directory_path, database_path, interactive_brokers
+    )
+
+    # 4. Orchestrator initialisieren und Hintergrunddienste starten
+    orchestrator = await _initialize_and_start_orchestrator(
+        root_directory_path=root_directory_path,
+        database_path=database_path,
+        config=config,
+        notifier=notifier,
+        interactive_brokers=interactive_brokers,
+    )
+
+    # 5. Graceful Shutdown Event registrieren
+    _setup_graceful_shutdown(orchestrator)
+
+    # 6. Verbindung zu TWS aufbauen (mit optionaler Docker-Health-Prüfung)
     initial_container_manager = DockerContainerManager(
         docker_socket_path=config.telegram.docker_socket_path
     )
@@ -602,33 +621,21 @@ async def main() -> None:
         container_manager=initial_container_manager,
         notifier=notifier,
     )
-    if not is_connected:
-        sys.exit(1)
 
-    # 5. DB-Verbindung öffnen und Migrationen ausführen
-    await _run_database_migrations(
-        root_directory_path, database_path, interactive_brokers
-    )
-
-    # 6. reqAutoOpenOrders aktivieren
-    interactive_brokers.reqAutoOpenOrders(True)
-
-    # 7. Orchestrator initialisieren und Hintergrunddienste starten
-    orchestrator = await _initialize_and_start_orchestrator(
-        root_directory_path=root_directory_path,
-        database_path=database_path,
-        config=config,
-        notifier=notifier,
-        interactive_brokers=interactive_brokers,
-    )
-
-    # 8. Graceful Shutdown Event registrieren
-    _setup_graceful_shutdown(orchestrator)
+    if is_connected:
+        interactive_brokers.reqAutoOpenOrders(True)
+        await orchestrator.run_recovery_callback()
+        await orchestrator.update_account_metrics_callback()
+    else:
+        logger.warning(
+            "Initial TWS connection failed. Starting background reconnect loop."
+        )
+        asyncio.create_task(orchestrator.run_reconnect_callback())
 
     # Auf Beendigungssignal warten
     await orchestrator.shutdown_event.wait()
 
-    # 9. Graceful Shutdown Sequenz ausführen
+    # 7. Graceful Shutdown Sequenz ausführen
     await orchestrator.graceful_shutdown()
 
 
@@ -639,7 +646,7 @@ async def _initialize_and_start_orchestrator(
     notifier: TelegramNotifier,
     interactive_brokers: IB,
 ) -> TradingSystemOrchestrator:
-    """Instanziiert den Orchestrator und startet alle Hintergrunddienste und Recovery.
+    """Instanziiert den Orchestrator und startet alle Hintergrunddienste und Callbacks.
 
     Args:
         root_directory_path: Pfad zum Hauptverzeichnis der Anwendung.
@@ -661,8 +668,6 @@ async def _initialize_and_start_orchestrator(
         queue=queue,
     )
     _register_callbacks(orchestrator, interactive_brokers, notifier, config)
-    await orchestrator.run_recovery_callback()
-    await orchestrator.update_account_metrics_callback()
     orchestrator.start_background_tasks()
     return orchestrator
 
@@ -670,7 +675,7 @@ async def _initialize_and_start_orchestrator(
 async def _run_database_migrations(
     root_directory_path: Path,
     database_path: Path,
-    interactive_brokers: IB,
+    interactive_brokers: IB | None = None,
 ) -> None:
     """Führt die Datenbankschemas-Migrationen aus."""
     database_connection_instance = await get_db(database_path)
@@ -679,7 +684,8 @@ async def _run_database_migrations(
         await run_migrations(database_connection_instance, migrations_directory)
     except Exception as exception:
         logger.critical("Error executing database migrations", error=str(exception))
-        interactive_brokers.disconnect()
+        if interactive_brokers and hasattr(interactive_brokers, "disconnect"):
+            interactive_brokers.disconnect()
         await database_connection_instance.close()
         sys.exit(1)
     finally:
@@ -785,8 +791,8 @@ async def connect_to_tws(
         await asyncio.sleep(delay)
         delay = min(delay * 2.0, config.tws.reconnect_max_delay_s)
 
-    logger.critical(
-        f"Connection to TWS impossible after {max_attempts} attempts. Terminating application."
+    logger.warning(
+        f"Connection to TWS impossible after {max_attempts} attempts. Entering background reconnection mode."
     )
     if notifier and not container_alert_sent:
         await notifier.send_message(

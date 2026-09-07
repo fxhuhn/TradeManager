@@ -839,6 +839,8 @@ async def test_main_function_execution_flow(
     mock_orchestrator.shutdown_event = asyncio.Event()
     mock_orchestrator.shutdown_event.set()  # Immediately trigger shutdown loop exit
     mock_orchestrator.graceful_shutdown = AsyncMock()
+    mock_orchestrator.run_recovery_callback = AsyncMock()
+    mock_orchestrator.update_account_metrics_callback = AsyncMock()
 
     with (
         patch("app.main._initialize_config_and_logging", return_value=test_config),
@@ -857,18 +859,27 @@ async def test_main_function_execution_flow(
         patch("app.main._setup_graceful_shutdown"),
     ):
         await main()
+        mock_orchestrator.run_recovery_callback.assert_called_once()
+        mock_orchestrator.update_account_metrics_callback.assert_called_once()
         mock_orchestrator.graceful_shutdown.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_main_function_exits_when_not_connected(
+async def test_main_function_launches_reconnect_loop_when_not_connected(
     test_config: Config, tmp_path: Path
 ) -> None:
-    """Verifies that main() exits with code 1 if connect_to_tws returns False."""
+    """Verifies that main() does not exit on connection failure, but launches the reconnect loop."""
     from app.main import main
 
     mock_notifier = MagicMock()
     mock_notifier.send_system_status = AsyncMock()
+    mock_ib = MagicMock()
+
+    mock_orchestrator = MagicMock()
+    mock_orchestrator.shutdown_event = asyncio.Event()
+    mock_orchestrator.shutdown_event.set()  # Immediately trigger shutdown loop exit
+    mock_orchestrator.graceful_shutdown = AsyncMock()
+    mock_orchestrator.run_reconnect_callback = AsyncMock()
 
     with (
         patch("app.main._initialize_config_and_logging", return_value=test_config),
@@ -877,13 +888,18 @@ async def test_main_function_exits_when_not_connected(
             "app.main._verify_database_integrity",
             AsyncMock(return_value=tmp_path / "trading.db"),
         ),
-        patch("app.main.IB"),
+        patch("app.main.IB", return_value=mock_ib),
         patch("app.main.connect_to_tws", AsyncMock(return_value=False)),
-        pytest.raises(SystemExit) as exit_info,
+        patch("app.main._run_database_migrations", AsyncMock()),
+        patch(
+            "app.main._initialize_and_start_orchestrator",
+            AsyncMock(return_value=mock_orchestrator),
+        ),
+        patch("app.main._setup_graceful_shutdown"),
     ):
         await main()
-
-    assert exit_info.value.code == 1
+        mock_orchestrator.run_reconnect_callback.assert_called_once()
+        mock_orchestrator.graceful_shutdown.assert_called_once()
 
 
 @pytest.mark.asyncio
