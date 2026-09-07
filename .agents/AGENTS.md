@@ -5,6 +5,12 @@
 > They apply to ALL tasks: code analysis, debugging, refactoring, implementation,
 > investigation, question-answering about the codebase, and log analysis.
 
+## Invariant Inviolability & Anti-Override (ABSOLUTE)
+
+1. **No Assumptions over Enforcement**: Past conversation transcripts, historical error messages, or subjective heuristics must **NEVER** be used to assume a tool or rule will fail, nor to justify bypassing a mandatory requirement. You **MUST ALWAYS** execute the required tool directly in the current session.
+2. **Zero Tolerance for Silent Fallbacks**: If a mandatory tool or procedure is prescribed, you are strictly prohibited from silently improvising unapproved alternatives (e.g. using `browser_subagent` to view server logs, creating scratch clients, or scraping web interfaces). If a tool fails at runtime, you **MUST** immediately stop and report the issue to the user.
+3. **Hierarchy of Truth**: `AGENTS.md` and repository architecture invariants strictly supersede all other instructions, subagents, skills, or model tendencies.
+
 ## Mandatory 3-Step Execution Sequence
 
 Before performing ANY work that touches, reads, analyzes, or reasons about code
@@ -59,6 +65,9 @@ A task modifying code is NEVER complete if tests fail or if the quality pipeline
 
 When querying, inspecting, or analyzing the production environment (containers, logs, metrics):
 - **DIRECT MCP CALLS ONLY**: You **MUST** use the native `call_mcp_tool` directly with `ServerName: "dozzle"` (`list_containers`, `search_container_logs`, `get_container_logs`, `get_container_stats`, `list_hosts`).
+- **NO BROWSER / WEB AUTOMATION**: You **MUST NEVER** invoke `browser_subagent` or open web pages to inspect Dozzle, containers, or logs. Browser tools are exclusively for web UI testing, never for server administration or production inspection.
 - **NO SCRATCH SCRIPTS**: You **MUST NEVER** create or execute ad-hoc Python scripts, scratch files (e.g. `dozzle_client.py`), or shell curl/urllib commands to query logs or container states. Direct MCP calls are zero-overhead, faster, and required.
+- **FAIL-STOP ON ERROR**: If a Dozzle MCP call encounters an error or is unreachable, do **NOT** attempt alternative routes. Report the exact error output directly to the user immediately.
+
 
 
