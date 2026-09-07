@@ -247,6 +247,8 @@ Das System wird über zwei Dateien konfiguriert: `config.toml` (strukturelle Par
 | `completed_orders_timeout_s`| Float  | `15.0`   | Timeout beim Abrufen abgeschlossener Orders                        |
 | `heartbeat_interval_s`     | Float   | `60.0`   | Intervall in Sekunden für den Ping-Heartbeat (Keep-Alive)           |
 | `heartbeat_timeout_s`      | Float   | `15.0`   | Timeout in Sekunden für die Antwort des Pings (reqCurrentTimeAsync) |
+| `whatif_timeout_s`         | Float   | `10.0`   | Timeout in Sekunden für What-If Vorab-Margin-Simulationen           |
+
 
 #### `[app]` — Anwendungsparameter
 

@@ -346,6 +346,22 @@ async def _evaluate_margin_warnings(
         )
 
 
+def _get_whatif_timeout_s(config: Config) -> float:
+    """
+    Extrahiert den What-If Timeout-Wert sicher aus der Konfiguration.
+
+    Gibt den konfigurierten Wert zurück, oder 10.0 als Fallback, falls kein gültiger
+    numerischer Timeout konfiguriert oder der Wert gemockt ist.
+    """
+    try:
+        val = getattr(getattr(config, "tws", None), "whatif_timeout_s", 10.0)
+        if isinstance(val, int | float):
+            return float(val)
+    except Exception:
+        pass
+    return 10.0
+
+
 async def handle_reauthorization_wait(
     db: aiosqlite.Connection,
     interactive_brokers: IB,
@@ -451,10 +467,11 @@ async def handle_reauthorization_wait(
             attempt=attempt,
         )
 
+        timeout_s = _get_whatif_timeout_s(config)
         try:
             await asyncio.wait_for(
                 interactive_brokers.whatIfOrderAsync(contract, simulated_order),
-                timeout=5.0,
+                timeout=timeout_s,
             )
             logger.info(
                 "Reauthorization successfully verified via What-If!",
@@ -513,11 +530,12 @@ async def _verify_margin_and_cushion(
 
     contract = make_contract_for_order(entry_order)
     simulated_order = build_order(entry_order)
+    whatif_timeout_s = _get_whatif_timeout_s(config)
 
     try:
         order_state = await asyncio.wait_for(
             interactive_brokers.whatIfOrderAsync(contract, simulated_order),
-            timeout=5.0,
+            timeout=whatif_timeout_s,
         )
     except Exception as exception:
         if is_reauthorization_error(0, str(exception)):
@@ -534,7 +552,7 @@ async def _verify_margin_and_cushion(
                 try:
                     order_state = await asyncio.wait_for(
                         interactive_brokers.whatIfOrderAsync(contract, simulated_order),
-                        timeout=5.0,
+                        timeout=whatif_timeout_s,
                     )
                 except Exception as retry_exc:
                     logger.error(

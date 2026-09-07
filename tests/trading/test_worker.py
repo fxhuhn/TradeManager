@@ -1288,6 +1288,7 @@ async def test_handle_reauthorization_wait_success_on_retry(db) -> None:
 
     mock_config = MagicMock()
     mock_config.app.reauth_check_interval_s = 0.05  # fast for test
+    mock_config.tws.whatif_timeout_s = 5.0
 
     with patch("app.trading.worker.is_market_closed_for_symbol", return_value=False):
         result = await handle_reauthorization_wait(
@@ -1346,6 +1347,7 @@ async def test_handle_reauthorization_wait_market_closed_cancellation(db) -> Non
     mock_notifier.send_message = AsyncMock(return_value=True)
     mock_config = MagicMock()
     mock_config.app.reauth_check_interval_s = 0.05
+    mock_config.tws.whatif_timeout_s = 5.0
 
     # Simulate market close reached immediately
     with patch("app.trading.worker.is_market_closed_for_symbol", return_value=True):
@@ -1407,6 +1409,7 @@ async def test_handle_reauthorization_wait_market_closed_during_slice(db) -> Non
     mock_notifier.send_message = AsyncMock(return_value=True)
     mock_config = MagicMock()
     mock_config.app.reauth_check_interval_s = 0.5
+    mock_config.tws.whatif_timeout_s = 5.0
 
     # First check: open, Second check (during slice): closed
     with patch(
@@ -1481,6 +1484,7 @@ async def test_verify_margin_and_cushion_reauth_handling(db) -> None:
     mock_config.account.max_margin_usage_pct = 0.8
     mock_config.account.min_cushion_pct = 0.1
     mock_config.app.reauth_check_interval_s = 0.05
+    mock_config.tws.whatif_timeout_s = 5.0
 
     with (
         patch(
@@ -1524,6 +1528,7 @@ async def test_process_trade_group_reauth_cancelled_at_market_close(db) -> None:
     mock_config.app.reauth_check_interval_s = 0.05
     mock_config.account.max_margin_usage_pct = 0.8
     mock_config.account.min_cushion_pct = 0.1
+    mock_config.tws.whatif_timeout_s = 5.0
 
     with (
         patch(
@@ -1556,3 +1561,62 @@ async def test_process_trade_group_reauth_cancelled_at_market_close(db) -> None:
         assert len(rows) == 2
         for r in rows:
             assert r["status"] == "Cancelled"
+
+
+def test_get_whatif_timeout_returns_configured_float(test_config: Config) -> None:
+    """Verifies that _get_whatif_timeout_s extracts the float value from real configuration."""
+    # Arrange
+    from app.trading.worker import _get_whatif_timeout_s
+
+    # Act
+    timeout_result = _get_whatif_timeout_s(test_config)
+
+    # Assert
+    assert timeout_result == 10.0
+
+
+def test_get_whatif_timeout_converts_int_to_float() -> None:
+    """Verifies that an integer timeout is properly converted to a float."""
+    # Arrange
+    from app.trading.worker import _get_whatif_timeout_s
+
+    mock_config = MagicMock()
+    mock_config.tws.whatif_timeout_s = 15
+
+    # Act
+    timeout_result = _get_whatif_timeout_s(mock_config)
+
+    # Assert
+    assert timeout_result == 15.0
+    assert isinstance(timeout_result, float)
+
+
+def test_get_whatif_timeout_falls_back_when_mocked_or_invalid() -> None:
+    """Verifies that _get_whatif_timeout_s falls back to 10.0 default on unconfigured mock or invalid type."""
+    # Arrange
+    from app.trading.worker import _get_whatif_timeout_s
+
+    mock_config = MagicMock()
+
+    # Act
+    timeout_result = _get_whatif_timeout_s(mock_config)
+
+    # Assert
+    assert timeout_result == 10.0
+
+
+def test_get_whatif_timeout_falls_back_when_exception_occurs() -> None:
+    """Verifies that _get_whatif_timeout_s falls back to 10.0 when accessing config raises an error."""
+    # Arrange
+    from app.trading.worker import _get_whatif_timeout_s
+
+    mock_config = MagicMock()
+    type(mock_config).tws = property(
+        lambda self: (_ for _ in ()).throw(RuntimeError("Config error"))
+    )
+
+    # Act
+    timeout_result = _get_whatif_timeout_s(mock_config)
+
+    # Assert
+    assert timeout_result == 10.0

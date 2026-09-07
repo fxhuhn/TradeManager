@@ -59,6 +59,10 @@ heartbeat_interval_s = 60.0
 # Timeout in Sekunden auf eine Antwort des Heartbeat-Pings, bevor Reconnect eingeleitet wird.
 heartbeat_timeout_s = 15.0
 
+# Timeout in Sekunden für What-If Vorab-Margin-Simulationen auf dem IBKR Gateway.
+whatif_timeout_s = 10.0
+
+
 
 # -----------------------------------------------------------------------------
 # 2. ANWENDUNG & ORCHESTRIERUNG ([app])

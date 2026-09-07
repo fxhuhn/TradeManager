@@ -58,6 +58,7 @@ def test_config_parsing_from_toml(tmp_path: Path) -> None:
         assert config.tws.host == "10.0.0.1"
         assert config.tws.port == 9999
         assert config.tws.client_id == 42
+        assert config.tws.whatif_timeout_s == 10.0
 
 
 def test_config_parsing_env_overrides(tmp_path: Path) -> None:
@@ -226,3 +227,57 @@ def test_config_parsing_futures_sections(tmp_path: Path) -> None:
 
         assert config.futures.asset_mapping == {"QQQ": "MNQ", "SPY": "MES"}
         assert config.futures.enabled_strategies == ("bouncebandit", "spxtrend")
+
+
+def test_config_parsing_whatif_timeout_toml_and_env_overrides(tmp_path: Path) -> None:
+    """Verifies whatif_timeout_s parses from TOML and respects environment variable overrides."""
+    # Arrange
+    config_content = """
+    [tws]
+    host = "10.0.0.1"
+    port = 9999
+    client_id = 42
+    connection_timeout_s = 5.0
+    reconnect_initial_delay_s = 2.0
+    reconnect_max_attempts = 5
+    reconnect_max_delay_s = 60.0
+    request_timeout_s = 5.0
+    completed_orders_timeout_s = 10.0
+    whatif_timeout_s = 15.0
+
+    [app]
+    max_retries = 3
+    order_rate_limit_s = 0.02
+    dead_order_threshold_minutes = 15
+    alert_watcher_interval_s = 60
+    csv_watcher_interval_s = 60
+    order_sync_interval_s = 300
+    retry_backoff_base_s = 5.0
+    shutdown_join_timeout_s = 15.0
+    database_timeout_s = 30.0
+    max_csv_size_bytes = 5242880
+    log_file_path = "data/app.log"
+    log_rotation_backup_count = 5
+
+    [account]
+    default_limit_pct = 0.05
+    margin_multiplier_factor = 2.0
+    sizing_mode = "margin_adjusted_capital"
+    max_margin_usage_pct = 0.80
+    min_cushion_pct = 0.10
+    """
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(config_content, encoding="utf-8")
+
+    # Act & Assert: parsed from TOML
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("TWS_WHATIF_TIMEOUT_S", None)
+        for key in ["TWS_HOST", "TWS_PORT", "TWS_CLIENT_ID"]:
+            os.environ.pop(key, None)
+        config = load_config(tmp_path)
+        assert config.tws.whatif_timeout_s == 15.0
+
+    # Act & Assert: overridden by environment variable
+    with patch.dict(os.environ, {"TWS_WHATIF_TIMEOUT_S": "25.0"}):
+        config_env = load_config(tmp_path)
+        assert config_env.tws.whatif_timeout_s == 25.0

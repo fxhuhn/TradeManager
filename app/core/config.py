@@ -29,6 +29,7 @@ class TwsConfig:
     completed_orders_timeout_s: float
     heartbeat_interval_s: float = 60.0
     heartbeat_timeout_s: float = 15.0
+    whatif_timeout_s: float = 10.0
 
 
 @dataclass(frozen=True)
@@ -174,6 +175,12 @@ def _parse_tws_config(
         ),
         heartbeat_interval_s=_to_float(tws_data.get("heartbeat_interval_s"), 60.0),
         heartbeat_timeout_s=_to_float(tws_data.get("heartbeat_timeout_s"), 15.0),
+        whatif_timeout_s=_to_float(
+            os.environ.get("TWS_WHATIF_TIMEOUT_S")
+            or environment_variables.get("TWS_WHATIF_TIMEOUT_S")
+            or tws_data.get("whatif_timeout_s"),
+            10.0,
+        ),
     )
 
 
