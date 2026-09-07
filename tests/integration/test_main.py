@@ -2,6 +2,7 @@
 """Integration tests for TradingSystemOrchestrator, TWS connection loop, and heartbeat monitoring."""
 
 import asyncio
+import dataclasses
 import datetime as dt
 import socket
 from pathlib import Path
@@ -1130,3 +1131,565 @@ async def test_provide_status_report_with_container_health(
 
     assert "IBKR Container:" in report_text
     assert "🚨 unhealthy" in report_text
+
+
+@pytest.mark.parametrize(
+    "year, month, day, hour, minute, second, expected_inside",
+    [
+        (2026, 6, 21, 11, 59, 59, False),  # Sunday just before window
+        (2026, 6, 21, 12, 0, 0, True),  # Sunday exact window start
+        (2026, 6, 21, 12, 4, 59, True),  # Sunday exact window end edge
+        (2026, 6, 21, 12, 5, 0, False),  # Sunday 12:05:00 exact window closed
+        (2026, 6, 20, 12, 2, 0, False),  # Saturday at 12:02
+        (2026, 6, 22, 12, 2, 0, False),  # Monday at 12:02
+    ],
+)
+def test_is_inside_maintenance_window_boundaries(
+    test_config: Config,
+    tmp_path: Path,
+    year: int,
+    month: int,
+    day: int,
+    hour: int,
+    minute: int,
+    second: int,
+    expected_inside: bool,
+) -> None:
+    """Verifies boundary conditions and day-of-week checks for weekly maintenance window."""
+    # Arrange
+    orchestrator = TradingSystemOrchestrator(
+        root_directory_path=tmp_path,
+        database_path=tmp_path / "trading.db",
+        config=test_config,
+        notifier=MagicMock(),
+        interactive_brokers=MagicMock(),
+        queue=asyncio.Queue(),
+    )
+    mock_target_time = dt.datetime(year, month, day, hour, minute, second)
+
+    # Act
+    with patch("datetime.datetime") as mock_datetime:
+        mock_datetime.side_effect = dt.datetime
+        mock_datetime.now.return_value = mock_target_time
+        result = orchestrator._is_inside_maintenance_window()
+
+    # Assert
+    assert result is expected_inside
+
+
+@pytest.mark.parametrize(
+    "is_available, report, expected_status_substring",
+    [
+        (False, None, "❌ Nicht gemountet"),
+        (
+            True,
+            ContainerStatusReport(
+                name_or_id="ibkr",
+                exists=True,
+                is_running=True,
+                status="running",
+                health_status="healthy",
+            ),
+            "🟢 healthy (running)",
+        ),
+        (
+            True,
+            ContainerStatusReport(
+                name_or_id="ibkr",
+                exists=True,
+                is_running=True,
+                status="running",
+                health_status="unhealthy",
+            ),
+            "🚨 unhealthy (running)",
+        ),
+        (
+            True,
+            ContainerStatusReport(
+                name_or_id="ibkr",
+                exists=True,
+                is_running=True,
+                status="starting",
+                health_status="starting",
+            ),
+            "🟡 starting (starting)",
+        ),
+        (
+            True,
+            ContainerStatusReport(
+                name_or_id="ibkr",
+                exists=True,
+                is_running=True,
+                status="running",
+                health_status=None,
+            ),
+            "🟢 running",
+        ),
+        (
+            True,
+            ContainerStatusReport(
+                name_or_id="ibkr",
+                exists=True,
+                is_running=False,
+                status="exited",
+                health_status=None,
+            ),
+            "⏹️ exited",
+        ),
+        (
+            True,
+            ContainerStatusReport(
+                name_or_id="ibkr",
+                exists=False,
+                is_running=False,
+                status="not_found",
+                health_status=None,
+            ),
+            "❌ not_found",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_provide_status_report_container_variants(
+    test_config: Config,
+    tmp_path: Path,
+    is_available: bool,
+    report: ContainerStatusReport | None,
+    expected_status_substring: str,
+) -> None:
+    """Verifies all permutations of container manager health and execution statuses in report."""
+    # Arrange
+    orchestrator = TradingSystemOrchestrator(
+        root_directory_path=tmp_path,
+        database_path=tmp_path / "trading.db",
+        config=test_config,
+        notifier=MagicMock(),
+        interactive_brokers=MagicMock(),
+        queue=asyncio.Queue(),
+    )
+    orchestrator.container_manager.is_available = MagicMock(return_value=is_available)
+    if report is not None:
+        orchestrator.container_manager.get_container_status = AsyncMock(
+            return_value=report
+        )
+
+    # Act
+    report_text = await orchestrator.provide_status_report()
+
+    # Assert
+    assert expected_status_substring in report_text
+
+
+@pytest.mark.asyncio
+async def test_provide_status_report_with_open_orders_success(
+    test_config: Config, tmp_path: Path
+) -> None:
+    """Verifies that open orders count from database is correctly queried and formatted."""
+    import sys
+
+    # Arrange
+    orchestrator = TradingSystemOrchestrator(
+        root_directory_path=tmp_path,
+        database_path=tmp_path / "trading.db",
+        config=test_config,
+        notifier=MagicMock(),
+        interactive_brokers=MagicMock(),
+        queue=asyncio.Queue(),
+    )
+    mock_db = AsyncMock()
+    orchestrator.create_database_connection = AsyncMock(return_value=mock_db)
+
+    mock_module = MagicMock()
+    mock_module.fetch_open_orders = AsyncMock(
+        return_value=["order_1", "order_2", "order_3"]
+    )
+
+    # Act
+    with patch.dict(sys.modules, {"app.persistence.database": mock_module}):
+        report_text = await orchestrator.provide_status_report()
+
+    # Assert
+    assert "• <b>Offene DB-Orders:</b> 3" in report_text
+    mock_db.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_update_account_metrics_callback_skips_when_account_unresolved(
+    test_config: Config, tmp_path: Path
+) -> None:
+    """Verifies that metrics update terminates early without touching DB if account cannot be resolved."""
+    # Arrange
+    orchestrator = TradingSystemOrchestrator(
+        root_directory_path=tmp_path,
+        database_path=tmp_path / "trading.db",
+        config=test_config,
+        notifier=MagicMock(),
+        interactive_brokers=MagicMock(),
+        queue=asyncio.Queue(),
+    )
+    orchestrator.create_database_connection = AsyncMock()
+
+    # Act
+    with patch("app.services.importer.resolve_account_id", return_value=None):
+        await orchestrator.update_account_metrics_callback(account_id="INVALID")
+
+    # Assert
+    orchestrator.create_database_connection.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_update_account_metrics_callback_handles_sync_exception_cleanly(
+    test_config: Config, tmp_path: Path
+) -> None:
+    """Verifies that metrics update catches exceptions during sync and guarantees DB closure."""
+    # Arrange
+    orchestrator = TradingSystemOrchestrator(
+        root_directory_path=tmp_path,
+        database_path=tmp_path / "trading.db",
+        config=test_config,
+        notifier=MagicMock(),
+        interactive_brokers=MagicMock(),
+        queue=asyncio.Queue(),
+    )
+    mock_db = AsyncMock()
+    orchestrator.create_database_connection = AsyncMock(return_value=mock_db)
+
+    # Act
+    with (
+        patch("app.services.importer.resolve_account_id", return_value="DU12345"),
+        patch(
+            "app.services.account_metrics.sync_and_save_account_metrics",
+            AsyncMock(side_effect=RuntimeError("IBKR API balance parse error")),
+        ),
+    ):
+        await orchestrator.update_account_metrics_callback(account_id="DU12345")
+
+    # Assert
+    mock_db.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_run_recovery_callback_skips_when_disconnected(
+    test_config: Config, tmp_path: Path
+) -> None:
+    """Verifies that recovery execution skips completely when IBKR is disconnected."""
+    # Arrange
+    mock_ib = MagicMock()
+    mock_ib.isConnected.return_value = False
+    orchestrator = TradingSystemOrchestrator(
+        root_directory_path=tmp_path,
+        database_path=tmp_path / "trading.db",
+        config=test_config,
+        notifier=MagicMock(),
+        interactive_brokers=mock_ib,
+        queue=asyncio.Queue(),
+    )
+    orchestrator.create_database_connection = AsyncMock()
+
+    # Act
+    await orchestrator.run_recovery_callback()
+
+    # Assert
+    orchestrator.create_database_connection.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_reconnect_callback_normal_execution_flow(
+    test_config: Config, tmp_path: Path
+) -> None:
+    """Verifies that run_reconnect_callback runs reconnect loop and resets is_reconnecting to False."""
+    # Arrange
+    orchestrator = TradingSystemOrchestrator(
+        root_directory_path=tmp_path,
+        database_path=tmp_path / "trading.db",
+        config=test_config,
+        notifier=MagicMock(),
+        interactive_brokers=MagicMock(),
+        queue=asyncio.Queue(),
+    )
+    reconnecting_during_execution = None
+
+    async def mock_execute() -> None:
+        nonlocal reconnecting_during_execution
+        reconnecting_during_execution = orchestrator.is_reconnecting
+
+    orchestrator._execute_reconnect_loop = mock_execute
+
+    # Act
+    await orchestrator.run_reconnect_callback()
+
+    # Assert
+    assert reconnecting_during_execution is True
+    assert orchestrator.is_reconnecting is False
+
+
+@pytest.mark.asyncio
+async def test_run_reconnect_callback_resets_reconnecting_flag_on_exception(
+    test_config: Config, tmp_path: Path
+) -> None:
+    """Verifies that run_reconnect_callback resets is_reconnecting to False even on uncaught error."""
+    # Arrange
+    orchestrator = TradingSystemOrchestrator(
+        root_directory_path=tmp_path,
+        database_path=tmp_path / "trading.db",
+        config=test_config,
+        notifier=MagicMock(),
+        interactive_brokers=MagicMock(),
+        queue=asyncio.Queue(),
+    )
+    orchestrator._execute_reconnect_loop = AsyncMock(
+        side_effect=RuntimeError("Catastrophic reconnect failure")
+    )
+
+    # Act & Assert
+    with pytest.raises(RuntimeError, match="Catastrophic reconnect failure"):
+        await orchestrator.run_reconnect_callback()
+
+    assert orchestrator.is_reconnecting is False
+
+
+@pytest.mark.asyncio
+async def test_manual_reconnect_trigger_does_not_spawn_task_if_already_reconnecting(
+    test_config: Config, tmp_path: Path
+) -> None:
+    """Verifies that manual_reconnect_trigger only sets event and does not start task if already reconnecting."""
+    # Arrange
+    orchestrator = TradingSystemOrchestrator(
+        root_directory_path=tmp_path,
+        database_path=tmp_path / "trading.db",
+        config=test_config,
+        notifier=MagicMock(),
+        interactive_brokers=MagicMock(),
+        queue=asyncio.Queue(),
+    )
+    orchestrator.is_reconnecting = True
+
+    # Act
+    with patch("asyncio.create_task") as mock_create_task:
+        await orchestrator.manual_reconnect_trigger()
+
+    # Assert
+    assert orchestrator.reconnect_event.is_set()
+    mock_create_task.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_wait_reconnect_interval_handles_external_event_awakening(
+    test_config: Config, tmp_path: Path
+) -> None:
+    """Verifies that _wait_reconnect_interval wakes up early and clears event when external event occurs."""
+    # Arrange
+    orchestrator = TradingSystemOrchestrator(
+        root_directory_path=tmp_path,
+        database_path=tmp_path / "trading.db",
+        config=test_config,
+        notifier=MagicMock(),
+        interactive_brokers=MagicMock(),
+        queue=asyncio.Queue(),
+    )
+    orchestrator.reconnect_event.set()
+
+    # Act
+    await orchestrator._wait_reconnect_interval(current_delay=10.0)
+
+    # Assert
+    assert not orchestrator.reconnect_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_execute_heartbeat_cycle_during_maintenance_window_sleeps(
+    test_config: Config, tmp_path: Path
+) -> None:
+    """Verifies that _execute_heartbeat_cycle sleeps 60s and returns during maintenance window."""
+    # Arrange
+    mock_ib = MagicMock()
+    orchestrator = TradingSystemOrchestrator(
+        root_directory_path=tmp_path,
+        database_path=tmp_path / "trading.db",
+        config=test_config,
+        notifier=MagicMock(),
+        interactive_brokers=mock_ib,
+        queue=asyncio.Queue(),
+    )
+    orchestrator._is_inside_maintenance_window = MagicMock(return_value=True)
+
+    # Act
+    with patch("asyncio.sleep", AsyncMock()) as mock_sleep:
+        await orchestrator._execute_heartbeat_cycle()
+
+    # Assert
+    mock_sleep.assert_awaited_once_with(60.0)
+    mock_ib.reqCurrentTimeAsync.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_ping_timeout_includes_container_health_suffix(
+    test_config: Config, tmp_path: Path
+) -> None:
+    """Verifies that heartbeat ping timeout embeds container health status in Telegram alert."""
+    # Arrange
+    mock_ib = MagicMock()
+    mock_ib.reqCurrentTimeAsync = AsyncMock(side_effect=TimeoutError())
+    mock_notifier = MagicMock()
+    mock_notifier.send_message = AsyncMock()
+
+    orchestrator = TradingSystemOrchestrator(
+        root_directory_path=tmp_path,
+        database_path=tmp_path / "trading.db",
+        config=test_config,
+        notifier=mock_notifier,
+        interactive_brokers=mock_ib,
+        queue=asyncio.Queue(),
+    )
+    orchestrator.container_manager.is_available = MagicMock(return_value=True)
+    orchestrator.container_manager.get_container_status = AsyncMock(
+        return_value=ContainerStatusReport(
+            name_or_id="ibkr",
+            exists=True,
+            is_running=True,
+            status="running",
+            health_status="unhealthy",
+        )
+    )
+
+    # Act
+    await orchestrator._send_ping_and_handle_timeout()
+
+    # Assert
+    mock_ib.disconnect.assert_called_once()
+    mock_notifier.send_message.assert_awaited_once()
+    sent_text = mock_notifier.send_message.call_args[0][0]
+    assert "Container-Status: <b>unhealthy</b>" in sent_text
+
+
+def test_setup_graceful_shutdown_handles_not_implemented_error() -> None:
+    """Verifies that _setup_graceful_shutdown suppresses NotImplementedError cleanly on unsupported OS."""
+    # Arrange
+    mock_loop = MagicMock()
+    mock_loop.add_signal_handler.side_effect = NotImplementedError(
+        "Signal handler not supported"
+    )
+    mock_orchestrator = MagicMock()
+
+    # Act & Assert (should not raise)
+    with patch("asyncio.get_running_loop", return_value=mock_loop):
+        _setup_graceful_shutdown(mock_orchestrator)
+
+    assert mock_loop.add_signal_handler.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_connect_to_tws_sends_alert_when_retries_exhausted_and_no_container_alert(
+    test_config: Config,
+) -> None:
+    """Verifies that connect_to_tws sends INITIALER VERBINDUNGSAUFBAU FEHLGESCHLAGEN if container alert wasn't sent."""
+    # Arrange
+    mock_ib = MagicMock()
+    mock_notifier = MagicMock()
+    mock_notifier.send_message = AsyncMock()
+
+    # Act
+    with (
+        patch("app.main._attempt_connection", AsyncMock(return_value=False)),
+        patch("asyncio.sleep", AsyncMock()),
+    ):
+        result = await connect_to_tws(
+            mock_ib, test_config, container_manager=None, notifier=mock_notifier
+        )
+
+    # Assert
+    assert result is False
+    mock_notifier.send_message.assert_awaited_once()
+    sent_text = mock_notifier.send_message.call_args[0][0]
+    assert "INITIALER VERBINDUNGSAUFBAU FEHLGESCHLAGEN" in sent_text
+
+
+@pytest.mark.asyncio
+async def test_connect_to_tws_exponential_delay_growth_and_cap(
+    test_config: Config,
+) -> None:
+    """Verifies that connect_to_tws doubles delay on each attempt up to reconnect_max_delay_s."""
+    # Arrange
+    mock_ib = MagicMock()
+    slept_delays: list[float] = []
+
+    async def mock_sleep(delay: float) -> None:
+        slept_delays.append(delay)
+
+    updated_tws = dataclasses.replace(
+        test_config.tws,
+        reconnect_initial_delay_s=0.01,
+        reconnect_max_delay_s=0.03,
+        reconnect_max_attempts=4,
+    )
+    custom_config = dataclasses.replace(test_config, tws=updated_tws)
+
+    # Act
+    with (
+        patch("app.main._attempt_connection", AsyncMock(return_value=False)),
+        patch("asyncio.sleep", side_effect=mock_sleep),
+    ):
+        result = await connect_to_tws(mock_ib, custom_config)
+
+    # Assert
+    assert result is False
+    assert slept_delays == [0.01, 0.02, 0.03]
+
+
+def test_enable_socket_keepalive_handles_missing_transport() -> None:
+    """Verifies that _enable_socket_keepalive exits cleanly if transport attribute is None."""
+    # Arrange
+    mock_ib = MagicMock()
+    mock_ib.isConnected.return_value = True
+    mock_ib.client.conn.transport = None
+
+    # Act
+    _enable_socket_keepalive(mock_ib)
+
+    # Assert (no exception raised, cleanly handled)
+
+
+@pytest.mark.asyncio
+async def test_run_database_migrations_failure_without_ib_instance(
+    tmp_path: Path,
+) -> None:
+    """Verifies _run_database_migrations exits cleanly even if interactive_brokers is None."""
+    # Arrange
+    from app.main import _run_database_migrations
+
+    mock_db_conn = AsyncMock()
+
+    # Act & Assert
+    with (
+        patch("app.main.get_db", AsyncMock(return_value=mock_db_conn)),
+        patch(
+            "app.main.run_migrations",
+            AsyncMock(side_effect=RuntimeError("Migration failure without IB")),
+        ),
+        pytest.raises(SystemExit) as exit_info,
+    ):
+        await _run_database_migrations(
+            tmp_path, tmp_path / "trading.db", interactive_brokers=None
+        )
+
+    assert exit_info.value.code == 1
+    assert mock_db_conn.close.await_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_wait_reconnect_interval_handles_timeout(
+    test_config: Config, tmp_path: Path
+) -> None:
+    """Verifies that _wait_reconnect_interval catches TimeoutError cleanly when no event is set."""
+    # Arrange
+    orchestrator = TradingSystemOrchestrator(
+        root_directory_path=tmp_path,
+        database_path=tmp_path / "trading.db",
+        config=test_config,
+        notifier=MagicMock(),
+        interactive_brokers=MagicMock(),
+        queue=asyncio.Queue(),
+    )
+
+    # Act & Assert (timeout passes cleanly)
+    await orchestrator._wait_reconnect_interval(current_delay=0.001)
