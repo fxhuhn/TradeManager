@@ -19,6 +19,10 @@ from app.main import (
     _verify_database_integrity,
     connect_to_tws,
 )
+from app.services.container_manager import (
+    ContainerStatusReport,
+    DockerContainerManager,
+)
 from app.trading.callbacks import TwsCallbacksManager
 
 
@@ -977,3 +981,136 @@ async def test_heartbeat_loop_and_backup_loop_exceptions(
     ):
         with pytest.raises(asyncio.CancelledError):
             await orchestrator.database_backup_loop()
+
+
+@pytest.mark.asyncio
+async def test_connect_to_tws_alerts_when_container_unhealthy(
+    test_config: Config,
+) -> None:
+    """Verifiziert, dass connect_to_tws sofort alarmiert, wenn der Container unhealthy ist."""
+    mock_ib = MagicMock()
+    mock_ib.connectAsync = AsyncMock(side_effect=TimeoutError("Connection timeout"))
+
+    mock_container_mgr = MagicMock(spec=DockerContainerManager)
+    mock_container_mgr.is_available.return_value = True
+    mock_container_mgr.get_container_status = AsyncMock(
+        return_value=ContainerStatusReport(
+            name_or_id="ibkr",
+            exists=True,
+            is_running=True,
+            status="running",
+            health_status="unhealthy",
+        )
+    )
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_message = AsyncMock()
+
+    with patch("asyncio.sleep", AsyncMock()):
+        result = await connect_to_tws(
+            mock_ib,
+            test_config,
+            container_manager=mock_container_mgr,
+            notifier=mock_notifier,
+        )
+
+    assert result is False
+    # Verifiziere, dass die spezifische Gateway-Unhealthy-Warnung versendet wurde
+    assert mock_notifier.send_message.call_count >= 1
+    first_call_text = mock_notifier.send_message.call_args_list[0][0][0]
+    assert "UNHEALTHY" in first_call_text
+    assert "ibkr" in first_call_text
+
+
+@pytest.mark.asyncio
+async def test_execute_reconnect_loop_fast_alerts_when_container_unhealthy(
+    test_config: Config, tmp_path: Path
+) -> None:
+    """Verifiziert, dass _execute_reconnect_loop sofort die interaktive Warnung triggert, wenn der Container unhealthy ist."""
+    mock_ib = MagicMock()
+    mock_ib.isConnected.return_value = False
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_interactive_reconnect_alert = AsyncMock()
+    mock_notifier.send_system_status = AsyncMock()
+
+    orchestrator = TradingSystemOrchestrator(
+        root_directory_path=tmp_path,
+        database_path=tmp_path / "trading.db",
+        config=test_config,
+        notifier=mock_notifier,
+        interactive_brokers=mock_ib,
+        queue=asyncio.Queue(),
+    )
+
+    # Mock container manager so it returns unhealthy
+    orchestrator.container_manager.is_available = MagicMock(return_value=True)
+    orchestrator.container_manager.get_container_status = AsyncMock(
+        return_value=ContainerStatusReport(
+            name_or_id="ibkr",
+            exists=True,
+            is_running=True,
+            status="running",
+            health_status="unhealthy",
+        )
+    )
+
+    # Let reconnect fail on attempt 1, then connect on attempt 2
+    attempt_count = 0
+
+    async def mock_single_reconnect(attempt: int) -> bool:
+        nonlocal attempt_count
+        attempt_count += 1
+        if attempt_count == 1:
+            return False
+        return True
+
+    orchestrator._attempt_single_reconnect = AsyncMock(
+        side_effect=mock_single_reconnect
+    )
+    orchestrator._wait_reconnect_interval = AsyncMock()
+    orchestrator.run_recovery_callback = AsyncMock()
+    orchestrator.update_account_metrics_callback = AsyncMock()
+
+    await orchestrator._execute_reconnect_loop()
+
+    # Fast alert should have been called on attempt 1!
+    assert mock_notifier.send_interactive_reconnect_alert.call_count == 1
+    alert_args = mock_notifier.send_interactive_reconnect_alert.call_args[1]
+    assert "IBKR GATEWAY UNHEALTHY" in alert_args["title"]
+
+
+@pytest.mark.asyncio
+async def test_provide_status_report_with_container_health(
+    test_config: Config, tmp_path: Path
+) -> None:
+    """Verifiziert, dass provide_status_report die Container-Health sauber einbettet."""
+    mock_ib = MagicMock()
+    mock_ib.isConnected.return_value = True
+
+    mock_notifier = MagicMock()
+
+    orchestrator = TradingSystemOrchestrator(
+        root_directory_path=tmp_path,
+        database_path=tmp_path / "trading.db",
+        config=test_config,
+        notifier=mock_notifier,
+        interactive_brokers=mock_ib,
+        queue=asyncio.Queue(),
+    )
+
+    orchestrator.container_manager.is_available = MagicMock(return_value=True)
+    orchestrator.container_manager.get_container_status = AsyncMock(
+        return_value=ContainerStatusReport(
+            name_or_id="ibkr",
+            exists=True,
+            is_running=True,
+            status="running",
+            health_status="unhealthy",
+        )
+    )
+
+    report_text = await orchestrator.provide_status_report()
+
+    assert "IBKR Container:" in report_text
+    assert "🚨 unhealthy" in report_text
