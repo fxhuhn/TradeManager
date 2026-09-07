@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.services.notifier import DEFAULT_BOT_KEYBOARD
 from app.services.telegram_bot import TelegramCommandListener
 
 
@@ -187,7 +188,9 @@ async def test_handle_authorized_status_command(mock_config: MagicMock) -> None:
     await listener._handle_text_message(message)
 
     status_cb.assert_awaited_once()
-    notifier.send_message.assert_awaited_once_with("Custom Status Info")
+    notifier.send_message.assert_awaited_once_with(
+        "Custom Status Info", reply_markup=DEFAULT_BOT_KEYBOARD
+    )
 
 
 @pytest.mark.asyncio
@@ -344,3 +347,71 @@ async def test_stop_polling() -> None:
     listener._is_running = True
     listener.stop()
     assert listener._is_running is False
+
+
+@pytest.mark.asyncio
+async def test_handle_button_text_commands(mock_config: MagicMock) -> None:
+    """Verifiziert, dass Button-Texte von Reply-Keyboards korrekt erkannt werden."""
+    notifier = MagicMock()
+    notifier.send_message = AsyncMock(return_value=True)
+    container_mgr = MagicMock()
+    container_mgr.restart_container = AsyncMock(return_value=(True, "OK"))
+    reconnect_cb = AsyncMock()
+
+    listener = TelegramCommandListener(
+        config=mock_config,
+        notifier=notifier,
+        container_manager=container_mgr,
+        trigger_reconnect_callback=reconnect_cb,
+    )
+
+    # 1. Klick auf '📊 Status'
+    await listener._handle_text_message(
+        {"chat": {"id": 987654321}, "text": "📊 Status"}
+    )
+    assert notifier.send_message.await_count == 1
+    assert "TradeManager Status" in notifier.send_message.call_args[0][0]
+
+    # 2. Klick auf '🔄 IBKR Neustart'
+    await listener._handle_text_message(
+        {"chat": {"id": 987654321}, "text": "🔄 IBKR Neustart"}
+    )
+    container_mgr.restart_container.assert_awaited_once_with(container_name="ibkr")
+    reconnect_cb.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_register_bot_commands_success_and_failure(
+    mock_config: MagicMock,
+) -> None:
+    """Verifiziert Registrierung von Bot-Commands via setMyCommands."""
+    listener = TelegramCommandListener(
+        config=mock_config,
+        notifier=MagicMock(),
+        container_manager=MagicMock(),
+        trigger_reconnect_callback=AsyncMock(),
+    )
+
+    mock_response = AsyncMock()
+    mock_response.status = 200
+    mock_response.text = AsyncMock(return_value="OK")
+
+    mock_post_context = MagicMock()
+    mock_post_context.__aenter__ = AsyncMock(return_value=mock_response)
+    mock_post_context.__aexit__ = AsyncMock(return_value=False)
+
+    mock_session = MagicMock()
+    mock_session.post = MagicMock(return_value=mock_post_context)
+
+    mock_client_context = MagicMock()
+    mock_client_context.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_client_context.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("aiohttp.ClientSession", return_value=mock_client_context):
+        success = await listener._register_bot_commands()
+        assert success is True
+
+        # Fehlerfall (z. B. HTTP 400)
+        mock_response.status = 400
+        failure = await listener._register_bot_commands()
+        assert failure is False

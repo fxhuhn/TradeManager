@@ -14,7 +14,7 @@ import structlog
 
 from app.core.config import Config
 from app.services.container_manager import DockerContainerManager
-from app.services.notifier import TelegramNotifier
+from app.services.notifier import DEFAULT_BOT_KEYBOARD, TelegramNotifier
 
 logger = structlog.get_logger()
 
@@ -79,6 +79,8 @@ class TelegramCommandListener:
             authorized_chat_id=self._config.telegram.chat_id,
         )
 
+        await self._register_bot_commands()
+
         error_backoff_seconds = 2.0
         max_backoff_seconds = 30.0
 
@@ -110,6 +112,49 @@ class TelegramCommandListener:
     def stop(self) -> None:
         """Beendet die Polling-Schleife."""
         self._is_running = False
+
+    async def _register_bot_commands(self) -> bool:
+        """Registriert Bot-Befehle bei der Telegram Bot API (setMyCommands)."""
+        url = f"https://api.telegram.org/bot{self._config.telegram.bot_token}/setMyCommands"
+        payload = {
+            "commands": [
+                {
+                    "command": "status",
+                    "description": "📊 System- und Kontostatus anzeigen",
+                },
+                {
+                    "command": "restart_ibkr",
+                    "description": "🔄 IBKR Gateway Container neu starten",
+                },
+                {
+                    "command": "help",
+                    "description": "ℹ️ Hilfe und Befehle anzeigen",
+                },
+            ]
+        }
+        try:
+            request_timeout = aiohttp.ClientTimeout(total=10.0)
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url, json=payload, timeout=request_timeout
+                ) as response:
+                    if response.status == 200:
+                        logger.info(
+                            "Telegram bot commands successfully registered via setMyCommands"
+                        )
+                        return True
+                    response_text = await response.text()
+                    logger.warning(
+                        "Failed to register Telegram bot commands",
+                        status=response.status,
+                        details=response_text,
+                    )
+                    return False
+        except Exception as exception:
+            logger.warning(
+                "Error registering Telegram bot commands", error=str(exception)
+            )
+            return False
 
     async def _fetch_updates(self) -> list[dict[str, Any]]:
         """Ruft neue Updates von der Telegram Bot API ab."""
@@ -231,11 +276,18 @@ class TelegramCommandListener:
             command=clean_text,
         )
 
-        if clean_text in ("/restart_ibkr", "/restart", "restart"):
+        if clean_text in (
+            "/restart_ibkr",
+            "/restart",
+            "restart",
+            "🔄 ibkr neustart",
+            "ibkr neustart",
+            "🔄 ibkr neu starten",
+        ):
             await self._execute_ibkr_restart_flow()
-        elif clean_text in ("/status", "status"):
+        elif clean_text in ("/status", "status", "📊 status"):
             await self._send_status_reply()
-        elif clean_text in ("/help", "/start", "help"):
+        elif clean_text in ("/help", "/start", "help", "hilfe", "start"):
             await self._send_help_reply()
 
     async def _execute_ibkr_restart_flow(self) -> None:
@@ -255,7 +307,9 @@ class TelegramCommandListener:
                 f"Ein Neustart wurde vor kurzem ausgelöst. Bitte warte noch "
                 f"<b>{remaining_seconds}s</b> und halte Dein Smartphone für den 2FA-Push bereit."
             )
-            await self._notifier.send_message(debounce_message)
+            await self._notifier.send_message(
+                debounce_message, reply_markup=DEFAULT_BOT_KEYBOARD
+            )
             return
 
         self._last_restart_timestamp = now
@@ -266,7 +320,9 @@ class TelegramCommandListener:
             f"Container <code>{container_name}</code> wird neu gestartet...\n\n"
             f"📲 <i>Bitte halte jetzt Dein Smartphone für den IBKR 2FA-Push bereit!</i>"
         )
-        await self._notifier.send_message(initiation_message)
+        await self._notifier.send_message(
+            initiation_message, reply_markup=DEFAULT_BOT_KEYBOARD
+        )
 
         success, detail_message = await self._container_manager.restart_container(
             container_name=container_name
@@ -277,7 +333,9 @@ class TelegramCommandListener:
                 f"❌ <b>Fehler beim Neustart von <code>{container_name}</code>:</b>\n"
                 f"{detail_message}"
             )
-            await self._notifier.send_message(failure_message)
+            await self._notifier.send_message(
+                failure_message, reply_markup=DEFAULT_BOT_KEYBOARD
+            )
             return
 
         success_message = (
@@ -286,7 +344,9 @@ class TelegramCommandListener:
             f"📲 <b>Sobald der 2FA-Push auf dem Smartphone ankommt, bitte bestätigen!</b>\n\n"
             f"TradeManager löst nun unmittelbar die Wiederverbindung aus."
         )
-        await self._notifier.send_message(success_message)
+        await self._notifier.send_message(
+            success_message, reply_markup=DEFAULT_BOT_KEYBOARD
+        )
 
         # Trigger sofortige Wiederverbindung
         try:
@@ -302,7 +362,9 @@ class TelegramCommandListener:
         if self._status_provider_callback is not None:
             try:
                 status_text = await self._status_provider_callback()
-                await self._notifier.send_message(status_text)
+                await self._notifier.send_message(
+                    status_text, reply_markup=DEFAULT_BOT_KEYBOARD
+                )
                 return
             except Exception as exception:
                 logger.error(
@@ -318,14 +380,18 @@ class TelegramCommandListener:
             f"• Ziel-Container: <code>{self._config.telegram.ibkr_container_name}</code>\n"
             f"• Befehle aktiv: ✅"
         )
-        await self._notifier.send_message(status_message)
+        await self._notifier.send_message(
+            status_message, reply_markup=DEFAULT_BOT_KEYBOARD
+        )
 
     async def _send_help_reply(self) -> None:
-        """Sendet Hilfetexte zu verfügbaren Befehlen."""
+        """Sendet Hilfetexte zu verfügbaren Befehlen inklusive Keyboard-Buttons."""
         help_message = (
             "🤖 <b>TradeManager Bot-Befehle</b>\n\n"
-            "• <code>/restart_ibkr</code>: Startet den IBKR-Container neu und triggert 2FA & Reconnect.\n"
-            "• <code>/status</code>: Fragt den aktuellen Systemstatus ab.\n"
+            "• <code>/status</code> oder <b>📊 Status</b>: Fragt den aktuellen Systemstatus ab.\n"
+            "• <code>/restart_ibkr</code> oder <b>🔄 IBKR Neustart</b>: Startet den IBKR-Container neu und triggert 2FA & Reconnect.\n"
             "• <code>/help</code>: Zeigt diese Hilfemeldung an."
         )
-        await self._notifier.send_message(help_message)
+        await self._notifier.send_message(
+            help_message, reply_markup=DEFAULT_BOT_KEYBOARD
+        )

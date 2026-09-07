@@ -9,7 +9,7 @@ import asyncio
 import re
 import time
 from decimal import Decimal
-from typing import Any
+from typing import Any, Final
 
 import aiohttp
 import structlog
@@ -17,6 +17,12 @@ import structlog
 from app.core.config import Config
 
 logger = structlog.get_logger()
+
+DEFAULT_BOT_KEYBOARD: Final[dict[str, Any]] = {
+    "keyboard": [[{"text": "📊 Status"}, {"text": "🔄 IBKR Neustart"}]],
+    "resize_keyboard": True,
+    "persistent": True,
+}
 
 
 def _strip_html(text: str) -> str:
@@ -252,13 +258,19 @@ class TelegramNotifier:
             )
             return False
 
-    async def send_system_status(self, title: str, emoji: str = "🚀") -> bool:
+    async def send_system_status(
+        self,
+        title: str,
+        emoji: str = "🚀",
+        reply_markup: dict[str, Any] | None = None,
+    ) -> bool:
         """Sendet eine System-Status-Nachricht (Start/Stop)."""
         from datetime import datetime
 
         now_str = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
         message = f"{emoji} <b>IBKR: {title}</b>\n🕒 Time: {now_str}"
-        return await self.send_message(message)
+        markup = reply_markup if reply_markup is not None else DEFAULT_BOT_KEYBOARD
+        return await self.send_message(message, reply_markup=markup)
 
     async def send_broker_connection_status(
         self, is_connected: bool, error_code: int, details: str
