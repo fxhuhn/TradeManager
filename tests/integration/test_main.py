@@ -691,7 +691,9 @@ async def test_manual_reconnect_trigger_and_status_report(test_config: Config) -
         assert mock_cb.called
 
     # provide_status_report
-    with patch.object(orchestrator, "create_database_connection", AsyncMock()):
+    with patch.object(
+        orchestrator, "_query_open_orders_count", AsyncMock(return_value=0)
+    ):
         status = await orchestrator.provide_status_report()
         assert "TradeManager Status" in status
         assert "TWS/Gateway" in status
@@ -1285,8 +1287,6 @@ async def test_provide_status_report_with_open_orders_success(
     test_config: Config, tmp_path: Path
 ) -> None:
     """Verifies that open orders count from database is correctly queried and formatted."""
-    import sys
-
     # Arrange
     orchestrator = TradingSystemOrchestrator(
         root_directory_path=tmp_path,
@@ -1297,16 +1297,16 @@ async def test_provide_status_report_with_open_orders_success(
         queue=asyncio.Queue(),
     )
     mock_db = AsyncMock()
+    mock_cursor = AsyncMock()
+    mock_cursor.fetchone = AsyncMock(return_value=(3,))
+    mock_context = MagicMock()
+    mock_context.__aenter__ = AsyncMock(return_value=mock_cursor)
+    mock_context.__aexit__ = AsyncMock(return_value=None)
+    mock_db.execute = MagicMock(return_value=mock_context)
     orchestrator.create_database_connection = AsyncMock(return_value=mock_db)
 
-    mock_module = MagicMock()
-    mock_module.fetch_open_orders = AsyncMock(
-        return_value=["order_1", "order_2", "order_3"]
-    )
-
     # Act
-    with patch.dict(sys.modules, {"app.persistence.database": mock_module}):
-        report_text = await orchestrator.provide_status_report()
+    report_text = await orchestrator.provide_status_report()
 
     # Assert
     assert "• <b>Offene DB-Orders:</b> 3" in report_text

@@ -27,7 +27,10 @@ from app.core.config import Config, load_config
 from app.core.db import get_db, run_db_backup, run_migrations, verify_db_integrity
 from app.core.logging_setup import TAG_RECONNECT, configure_logging
 from app.services.alert_watcher import alert_watcher, order_status_sync_loop
-from app.services.container_manager import DockerContainerManager
+from app.services.container_manager import (
+    ContainerStatusReport,
+    DockerContainerManager,
+)
 from app.services.importer import csv_directory_watcher
 from app.services.notifier import TelegramNotifier
 from app.services.telegram_bot import TelegramCommandListener
@@ -43,11 +46,43 @@ logger = structlog.get_logger()
 
 # System- und Reconnection-Konstanten
 RECONNECT_DELAYS_SECONDS: tuple[float, ...] = (30.0, 60.0, 120.0, 240.0)
+HOURLY_RECONNECT_DELAY_SECONDS: float = 3600.0
+MAINTENANCE_PAUSE_SECONDS: float = 60.0
 MAINTENANCE_WINDOW_WEEKDAY: int = (
     6  # 6 = Sonntag (datetime.weekday: Montag=0, Sonntag=6)
 )
 MAINTENANCE_WINDOW_HOUR: int = 12
 MAINTENANCE_WINDOW_DURATION_MINUTES: int = 5
+
+
+def _format_container_status_display(
+    is_available: bool,
+    container_report: ContainerStatusReport | None,
+) -> str:
+    """Formatiert den Container-Status und Health-Zustand für Status-Reports.
+
+    Args:
+        is_available: Gibt an, ob der Docker-Socket gemountet und erreichbar ist.
+        container_report: Optionaler Status-Report des Containers.
+
+    Returns:
+        str: Formatierter HTML-kompatibler Status-Text inklusive Emojis.
+    """
+    if not is_available:
+        return "❌ Nicht gemountet"
+    if container_report is None:
+        return "❓ Unbekannt"
+    if not container_report.exists:
+        return f"❌ {container_report.status}"
+    if container_report.health_status == "healthy":
+        return f"🟢 healthy ({container_report.status})"
+    if container_report.health_status == "unhealthy":
+        return f"🚨 unhealthy ({container_report.status})"
+    if container_report.health_status:
+        return f"🟡 {container_report.health_status} ({container_report.status})"
+
+    running_emoji = "🟢" if container_report.is_running else "⏹️"
+    return f"{running_emoji} {container_report.status}"
 
 
 class TradingSystemOrchestrator:
@@ -61,6 +96,8 @@ class TradingSystemOrchestrator:
         notifier: TelegramNotifier,
         interactive_brokers: IB,
         queue: asyncio.Queue[str],
+        container_manager: DockerContainerManager | None = None,
+        telegram_bot: TelegramCommandListener | None = None,
     ) -> None:
         """Initialisiert den Orchestrator mit allen benötigten Abhängigkeiten.
 
@@ -71,6 +108,8 @@ class TradingSystemOrchestrator:
             notifier: Der Telegram-Notifier-Dienst.
             interactive_brokers: Die Interactive Brokers API-Clientinstanz.
             queue: Die asynchrone Queue für die Abarbeitung von Trade-Gruppen.
+            container_manager: Optionaler Container-Manager für Docker-Health-Checks.
+            telegram_bot: Optionaler Telegram-Bot-Listener für Befehle.
         """
         self.root_directory_path: Path = root_directory_path
         self.database_path: Path = database_path
@@ -79,19 +118,26 @@ class TradingSystemOrchestrator:
         self.interactive_brokers: IB = interactive_brokers
         self.queue: asyncio.Queue[str] = queue
         self.is_reconnecting: bool = False
-        self.tasks: tuple[asyncio.Task[None], ...] = ()
+        self.tasks: tuple[asyncio.Task[object], ...] = ()
         self.shutdown_event: asyncio.Event = asyncio.Event()
         self.callbacks_manager: TwsCallbacksManager | None = None
-        self.container_manager: DockerContainerManager = DockerContainerManager(
-            docker_socket_path=self.config.telegram.docker_socket_path
-        )
         self.reconnect_event: asyncio.Event = asyncio.Event()
-        self.telegram_bot: TelegramCommandListener = TelegramCommandListener(
-            config=self.config,
-            notifier=self.notifier,
-            container_manager=self.container_manager,
-            trigger_reconnect_callback=self.manual_reconnect_trigger,
-            status_provider_callback=self.provide_status_report,
+
+        self.container_manager: DockerContainerManager = (
+            container_manager
+            or DockerContainerManager(
+                docker_socket_path=self.config.telegram.docker_socket_path
+            )
+        )
+        self.telegram_bot: TelegramCommandListener = (
+            telegram_bot
+            or TelegramCommandListener(
+                config=self.config,
+                notifier=self.notifier,
+                container_manager=self.container_manager,
+                trigger_reconnect_callback=self.manual_reconnect_trigger,
+                status_provider_callback=self.provide_status_report,
+            )
         )
 
     async def manual_reconnect_trigger(self) -> None:
@@ -104,54 +150,56 @@ class TradingSystemOrchestrator:
     async def provide_status_report(self) -> str:
         """Erstellt eine Statusübersicht für die Telegram-Antwort."""
         is_connected = self.interactive_brokers.isConnected()
-        conn_str = "✅ Verbunden" if is_connected else "❌ Getrennt"
-        socket_str = (
+        connection_display_text = "✅ Verbunden" if is_connected else "❌ Getrennt"
+        docker_socket_display = (
             "✅ Verfügbar"
             if self.container_manager.is_available()
             else "❌ Nicht gemountet"
         )
         queue_size = self.queue.qsize()
 
-        container_status_str = "❓ Unbekannt"
+        container_report: ContainerStatusReport | None = None
         if self.container_manager.is_available():
             container_report = await self.container_manager.get_container_status(
                 self.config.telegram.ibkr_container_name
             )
-            if container_report.exists:
-                if container_report.health_status == "healthy":
-                    container_status_str = f"🟢 healthy ({container_report.status})"
-                elif container_report.health_status == "unhealthy":
-                    container_status_str = f"🚨 unhealthy ({container_report.status})"
-                elif container_report.health_status:
-                    container_status_str = f"🟡 {container_report.health_status} ({container_report.status})"
-                else:
-                    running_emoji = "🟢" if container_report.is_running else "⏹️"
-                    container_status_str = f"{running_emoji} {container_report.status}"
-            else:
-                container_status_str = f"❌ {container_report.status}"
+        container_status_display = _format_container_status_display(
+            is_available=self.container_manager.is_available(),
+            container_report=container_report,
+        )
 
-        open_orders_count = 0
-        try:
-            from app.persistence.database import fetch_open_orders
-
-            db = await self.create_database_connection()
-            try:
-                open_orders = await fetch_open_orders(db)
-                open_orders_count = len(open_orders)
-            finally:
-                await db.close()
-        except Exception:
-            open_orders_count = 0
+        open_orders_count = await self._query_open_orders_count()
 
         return (
             "📊 <b>TradeManager Status</b>\n\n"
-            f"• <b>TWS/Gateway:</b> {conn_str}\n"
+            f"• <b>TWS/Gateway:</b> {connection_display_text}\n"
             f"• <b>Queue Tasks:</b> {queue_size}\n"
             f"• <b>Offene DB-Orders:</b> {open_orders_count}\n"
-            f"• <b>Docker Socket:</b> {socket_str}\n"
-            f"• <b>IBKR Container:</b> <code>{self.config.telegram.ibkr_container_name}</code> [{container_status_str}]\n"
+            f"• <b>Docker Socket:</b> {docker_socket_display}\n"
+            f"• <b>IBKR Container:</b> <code>{self.config.telegram.ibkr_container_name}</code> [{container_status_display}]\n"
             f"• <b>Reconnecting:</b> {'Ja' if self.is_reconnecting else 'Nein'}"
         )
+
+    async def _query_open_orders_count(self) -> int:
+        """Ermittelt sicher die Anzahl offener Orders in der Datenbank."""
+        query = (
+            "SELECT COUNT(*) FROM orders "
+            "WHERE status IN ('Created', 'Submitted', 'PreSubmitted')"
+        )
+        try:
+            database_connection = await self.create_database_connection()
+            try:
+                async with database_connection.execute(query) as cursor:
+                    row = await cursor.fetchone()
+                    return int(row[0]) if row else 0
+            finally:
+                await database_connection.close()
+        except Exception as query_error:
+            logger.warning(
+                "Failed to count open orders for status report",
+                error=str(query_error),
+            )
+            return 0
 
     async def create_database_connection(self) -> aiosqlite.Connection:
         """Erstellt eine neue type-safe Verbindung zur Datenbank.
@@ -371,13 +419,7 @@ class TradingSystemOrchestrator:
         unhealthy_alert_sent = False
 
         while True:
-            if attempt > max_attempts:
-                current_delay = 3600.0
-            else:
-                current_delay = RECONNECT_DELAYS_SECONDS[
-                    min(attempt - 1, len(RECONNECT_DELAYS_SECONDS) - 1)
-                ]
-
+            current_delay = self._resolve_reconnect_delay(attempt, max_attempts)
             logger.info(
                 "Waiting before reconnection attempt",
                 attempt=attempt,
@@ -389,54 +431,79 @@ class TradingSystemOrchestrator:
                 logger.info("Already connected. Ending reconnect loop.")
                 return
 
-            success = await self._attempt_single_reconnect(attempt)
-            if success:
-                logger.info("Reconnection successfully established!")
-                await self.notifier.send_system_status(
-                    title="WIEDERVERBUNDEN", emoji="✅"
-                )
-                self.interactive_brokers.reqAutoOpenOrders(True)
-                logger.info("Triggering recovery run after reconnection...")
-                await self.run_recovery_callback()
-                await self.update_account_metrics_callback()
+            if await self._attempt_single_reconnect(attempt):
+                await self._handle_successful_reconnection()
                 return
 
-            # Schneller Alarm, wenn Container ungesund oder gestoppt ist
-            if not unhealthy_alert_sent and self.container_manager.is_available():
-                container_status = await self.container_manager.get_container_status(
-                    self.config.telegram.ibkr_container_name
-                )
-                if container_status.exists and (
-                    container_status.health_status == "unhealthy"
-                    or not container_status.is_running
-                ):
-                    status_reason = (
-                        container_status.health_status or container_status.status
-                    )
-                    logger.warning(
-                        "IBKR container is unhealthy/stopped during reconnect loop. Fast-triggering alert.",
-                        status=container_status.status,
-                        health=container_status.health_status,
-                        attempt=attempt,
-                    )
-                    await self.notifier.send_interactive_reconnect_alert(
-                        title=f"IBKR GATEWAY {status_reason.upper()}",
-                        container_name=self.config.telegram.ibkr_container_name,
-                    )
-                    unhealthy_alert_sent = True
+            unhealthy_alert_sent = await self._check_and_alert_unhealthy_container(
+                attempt=attempt,
+                unhealthy_alert_sent=unhealthy_alert_sent,
+            )
 
             if attempt == max_attempts and not unhealthy_alert_sent:
-                logger.error(
-                    "Reconnection failed after %d attempts. "
-                    "Switching to hourly retry mode.",
-                    max_attempts,
-                )
-                await self.notifier.send_interactive_reconnect_alert(
-                    title=f"WIEDERVERBINDUNG FEHLGESCHLAGEN ({max_attempts} Versuche)",
-                    container_name=self.config.telegram.ibkr_container_name,
-                )
+                await self._alert_reconnect_exhausted(max_attempts)
 
             attempt += 1
+
+    def _resolve_reconnect_delay(self, attempt: int, max_attempts: int) -> float:
+        """Bestimmt das Warteintervall abhängig vom aktuellen Verbindungsversuch."""
+        if attempt > max_attempts:
+            return HOURLY_RECONNECT_DELAY_SECONDS
+        return RECONNECT_DELAYS_SECONDS[
+            min(attempt - 1, len(RECONNECT_DELAYS_SECONDS) - 1)
+        ]
+
+    async def _handle_successful_reconnection(self) -> None:
+        """Behandelt erfolgreichen Wiederaufbau der Gateway-Verbindung."""
+        logger.info("Reconnection successfully established!")
+        await self.notifier.send_system_status(title="WIEDERVERBUNDEN", emoji="✅")
+        self.interactive_brokers.reqAutoOpenOrders(True)
+        logger.info("Triggering recovery run after reconnection...")
+        await self.run_recovery_callback()
+        await self.update_account_metrics_callback()
+
+    async def _check_and_alert_unhealthy_container(
+        self, attempt: int, unhealthy_alert_sent: bool
+    ) -> bool:
+        """Prüft den Container-Status und sendet bei Stopp/Unhealthy sofort einen Alarm."""
+        if unhealthy_alert_sent or not self.container_manager.is_available():
+            return unhealthy_alert_sent
+
+        container_status = await self.container_manager.get_container_status(
+            self.config.telegram.ibkr_container_name
+        )
+        if not container_status.exists:
+            return unhealthy_alert_sent
+
+        if (
+            container_status.health_status == "unhealthy"
+            or not container_status.is_running
+        ):
+            status_reason = container_status.health_status or container_status.status
+            logger.warning(
+                "IBKR container is unhealthy/stopped during reconnect loop. Fast-triggering alert.",
+                status=container_status.status,
+                health=container_status.health_status,
+                attempt=attempt,
+            )
+            await self.notifier.send_interactive_reconnect_alert(
+                title=f"IBKR GATEWAY {status_reason.upper()}",
+                container_name=self.config.telegram.ibkr_container_name,
+            )
+            return True
+
+        return unhealthy_alert_sent
+
+    async def _alert_reconnect_exhausted(self, max_attempts: int) -> None:
+        """Sendet einen Notfallalarm, wenn alle regulären Versuche fehlschlugen."""
+        logger.error(
+            "Reconnection failed after %d attempts. Switching to hourly retry mode.",
+            max_attempts,
+        )
+        await self.notifier.send_interactive_reconnect_alert(
+            title=f"WIEDERVERBINDUNG FEHLGESCHLAGEN ({max_attempts} Versuche)",
+            container_name=self.config.telegram.ibkr_container_name,
+        )
 
     async def _attempt_single_reconnect(self, attempt: int) -> bool:
         """Führt einen einzelnen Verbindungsversuch zur TWS durch.
@@ -527,7 +594,7 @@ class TradingSystemOrchestrator:
             logger.info(
                 f"Inside weekly restart window (Sunday {MAINTENANCE_WINDOW_HOUR}:00-{MAINTENANCE_WINDOW_HOUR}:0{MAINTENANCE_WINDOW_DURATION_MINUTES}). Pausing heartbeat."
             )
-            await asyncio.sleep(60.0)
+            await asyncio.sleep(MAINTENANCE_PAUSE_SECONDS)
             return
 
         if not self.interactive_brokers.isConnected():
@@ -686,7 +753,6 @@ async def _run_database_migrations(
         logger.critical("Error executing database migrations", error=str(exception))
         if interactive_brokers and hasattr(interactive_brokers, "disconnect"):
             interactive_brokers.disconnect()
-        await database_connection_instance.close()
         sys.exit(1)
     finally:
         await database_connection_instance.close()
@@ -759,33 +825,13 @@ async def connect_to_tws(
         if attempt == max_attempts:
             break
 
-        # Schnelle Ursachenanalyse über Docker-Socket bei Fehlschlag
-        if (
-            container_manager
-            and container_manager.is_available()
-            and not container_alert_sent
-        ):
-            container_status = await container_manager.get_container_status(
-                config.telegram.ibkr_container_name
-            )
-            if container_status.exists and (
-                container_status.health_status == "unhealthy"
-                or not container_status.is_running
-            ):
-                status_text = container_status.health_status or container_status.status
-                logger.warning(
-                    "IBKR container is unhealthy or stopped during initial connect",
-                    status=container_status.status,
-                    health=container_status.health_status,
-                    attempt=attempt,
-                )
-                if notifier:
-                    await notifier.send_message(
-                        f"🚨 <b>IBKR GATEWAY {status_text.upper()}</b>\n\n"
-                        f"Container <code>{config.telegram.ibkr_container_name}</code> ist "
-                        f"<b>{status_text}</b>. Bitte Gateway neu starten oder 2FA bestätigen."
-                    )
-                container_alert_sent = True
+        container_alert_sent = await _check_container_on_initial_connect_failure(
+            container_manager=container_manager,
+            notifier=notifier,
+            config=config,
+            attempt=attempt,
+            alert_already_sent=container_alert_sent,
+        )
 
         logger.info("Waiting before retry connection attempt", delay_seconds=delay)
         await asyncio.sleep(delay)
@@ -801,6 +847,45 @@ async def connect_to_tws(
             f"Host: <code>{config.tws.host}:{config.tws.port}</code>"
         )
     return False
+
+
+async def _check_container_on_initial_connect_failure(
+    container_manager: DockerContainerManager | None,
+    notifier: TelegramNotifier | None,
+    config: Config,
+    attempt: int,
+    alert_already_sent: bool,
+) -> bool:
+    """Prüft Docker-Container bei initialem Verbindungsfehler und warnt bei Ausfall."""
+    if (
+        not container_manager
+        or not container_manager.is_available()
+        or alert_already_sent
+    ):
+        return alert_already_sent
+
+    container_status = await container_manager.get_container_status(
+        config.telegram.ibkr_container_name
+    )
+    if container_status.exists and (
+        container_status.health_status == "unhealthy" or not container_status.is_running
+    ):
+        status_text = container_status.health_status or container_status.status
+        logger.warning(
+            "IBKR container is unhealthy or stopped during initial connect",
+            status=container_status.status,
+            health=container_status.health_status,
+            attempt=attempt,
+        )
+        if notifier:
+            await notifier.send_message(
+                f"🚨 <b>IBKR GATEWAY {status_text.upper()}</b>\n\n"
+                f"Container <code>{config.telegram.ibkr_container_name}</code> ist "
+                f"<b>{status_text}</b>. Bitte Gateway neu starten oder 2FA bestätigen."
+            )
+        return True
+
+    return alert_already_sent
 
 
 async def _attempt_connection(
