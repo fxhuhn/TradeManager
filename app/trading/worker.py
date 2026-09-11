@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from decimal import Decimal, InvalidOperation
 from typing import Final
 
@@ -33,9 +33,12 @@ from app.trading.error_codes import (
 )
 from app.trading.order_builder import (
     build_order,
+    compute_loc_gtd_cutoff,
     extract_transmitted_price,
+    is_past_loc_gtd_cutoff,
     make_contract_for_order,
     normalize_symbol,
+    should_apply_loc_gtd,
 )
 
 logger = structlog.get_logger()
@@ -740,6 +743,17 @@ async def _sync_transmitted_price_to_db(
         )
 
 
+async def _sync_transmitted_tif_to_db(
+    db: aiosqlite.Connection, order_id: int, tif: str
+) -> None:
+    """Persists the updated TIF (e.g. GTD) to the DB so it matches the TWS submission."""
+    async with transaction(db):
+        await db.execute(
+            "UPDATE orders SET tif = ? WHERE order_id = ?",
+            (tif, order_id),
+        )
+
+
 async def _process_child_orders(
     db: aiosqlite.Connection,
     interactive_brokers: IB,
@@ -763,6 +777,7 @@ async def _process_child_orders(
             is_last,
             notifier,
             config,
+            sibling_orders=child_orders,
         )
         if success:
             placed_orders.append(updated_child)
@@ -777,6 +792,7 @@ async def _place_single_child_order(
     is_last: bool,
     notifier: TelegramNotifier,
     config: Config,
+    sibling_orders: Sequence[OrderRow] = (),
 ) -> tuple[bool, OrderRow]:
     """Bereitet eine einzelne untergeordnete Order vor und übermittelt sie an TWS."""
     logger.info(
@@ -816,6 +832,42 @@ async def _place_single_child_order(
         )
         child = dataclasses.replace(child, target_price=transmitted_price)
         await _sync_transmitted_price_to_db(db, tws_order_id, transmitted_price)
+
+    # Overfill-Schutz: GTD für LMT-Exits setzen, falls eine LOC/MOC-Schwester existiert
+    if should_apply_loc_gtd(child, sibling_orders):
+        if is_past_loc_gtd_cutoff(child.symbol):
+            logger.warning(
+                "Skipping LMT exit transmission: LOC GTD cutoff already passed",
+                order_id=tws_order_id,
+                trade_group_id=child.trade_group_id,
+                symbol=child.symbol,
+            )
+            child = dataclasses.replace(child, status="Cancelled")
+            async with transaction(db):
+                await db.execute(
+                    "UPDATE orders SET status = 'Cancelled' WHERE order_id = ?",
+                    (tws_order_id,),
+                )
+            await notifier.send_message(
+                f"⚠️ <b>LMT-EXIT ÜBERSPRINGEN (Cut-Off erreicht)</b> | <code>{child.symbol}</code>\n"
+                f"├─ <b>Order-ID:</b> <code>{tws_order_id}</code>\n"
+                f"├─ <b>Status:</b> Cancelled (nicht übermittelt)\n"
+                f"└─ <b>Grund:</b> 15:48 Verfall für LMT erreicht. LOC-Schwester sichert Glattstellung."
+            )
+            return False, child
+
+        cutoff_string = compute_loc_gtd_cutoff(child.symbol)
+        ib_child_order.tif = "GTD"
+        ib_child_order.goodTillDate = cutoff_string
+        child = dataclasses.replace(child, tif="GTD")
+        await _sync_transmitted_tif_to_db(db, tws_order_id, "GTD")
+        logger.info(
+            "Configured GTD expiry for LMT child order due to LOC/MOC sibling",
+            order_id=tws_order_id,
+            trade_group_id=child.trade_group_id,
+            symbol=child.symbol,
+            gtd=cutoff_string,
+        )
 
     if not is_post_fill:
         ib_child_order.parentId = entry_order.order_id

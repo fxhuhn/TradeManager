@@ -34,7 +34,7 @@ Records intended and submitted orders.
 | `quantity` | `INTEGER` | `NOT NULL`, `CHECK (quantity > 0)` | Scaled quantity of shares to trade. |
 | `order_type` | `TEXT` | `NOT NULL` | Order type class (e.g., LMT, STP, MKT, MOC). |
 | `target_price` | `REAL`/`TEXT` | `NULLABLE` | Limit/Stop price. Mandatory if type is LMT or STP (stored as stringified `Decimal`). |
-| `tif` | `TEXT` | `DEFAULT 'GTC'` | Time-In-Force (e.g., DAY, GTC). |
+| `tif` | `TEXT` | `DEFAULT 'GTC'` | Time-In-Force (e.g., DAY, GTC, GTD). Dynamically overridden to 'GTD' for LMT child exits paired with LOC/MOC siblings. |
 | `strategy_name` | `TEXT` | `NULLABLE` | Name of the generating trading logic/strategy. |
 | `status` | `TEXT` | `CHECK IN ('Created', ...)` | Order lifecycle state. |
 | `retry_count` | `INTEGER` | `DEFAULT 0` | Current counter of transmission retries. |

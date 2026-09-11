@@ -5,6 +5,7 @@ Erstellt SMART-Routing US-Aktienkontrakte und konfiguriert
 die entsprechenden Stop-, Limit- oder Market-Orders inkl. OCA-Gruppen.
 """
 
+from collections.abc import Sequence
 from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Final
@@ -264,3 +265,111 @@ def extract_transmitted_price(ib_order: Order) -> Decimal | None:
         return Decimal(str(ib_order.auxPrice))
 
     return None
+
+
+def should_apply_loc_gtd(child: OrderRow, sibling_orders: Sequence[OrderRow]) -> bool:
+    """Prüft, ob eine untergeordnete Order mit TIF=GTD versehen werden muss.
+
+    Verhindert das Overfill-Risiko bei OCA-Gruppen mit ocaType=3:
+    Falls eine Limit-Exit-Order ('TP' oder 'EXIT') eine Schwester-Order mit
+    Typ 'LOC' oder 'MOC' hat, muss die Limit-Order vor dem regulatorischen
+    Cut-Off der Börse (15:50 US/Eastern) automatisch verfallen.
+
+    Args:
+        child: Die zu prüfende untergeordnete Order.
+        sibling_orders: Alle untergeordneten Geschwister-Orders der Trade-Gruppe.
+
+    Returns:
+        True, falls child eine LMT-Exit-Order ist und mindestens eine Geschwister-Order
+        vom Typ LOC oder MOC existiert, sonst False.
+    """
+    if child.bracket_role not in ("TP", "EXIT"):
+        return False
+    if child.order_type.upper() != "LMT":
+        return False
+
+    return any(
+        sibling.order_type.upper() in ("LOC", "MOC")
+        and sibling.order_id != child.order_id
+        for sibling in sibling_orders
+    )
+
+
+def compute_loc_gtd_cutoff(symbol: str, reference_time: datetime | None = None) -> str:
+    """Berechnet den Good-Till-Date (GTD) Verfallszeitpunkt für Limit-Exit-Orders.
+
+    Setzt den Verfallszeitpunkt auf 12 Minuten vor regulärem Marktschluss
+    (2 Minuten Sicherheitsabstand vor dem harten 15:50 US/Eastern Cut-Off der Börse).
+
+    - US-Märkte (Standard): 15:48:00 US/Eastern
+    - Deutsche Märkte (Suffix '.DE'): 17:18:00 Europe/Berlin
+
+    Args:
+        symbol: Das Ticker-Symbol des Wertpapiers.
+        reference_time: Optionaler Referenzzeitpunkt (für Tests). Falls None, wird die aktuelle Zeit verwendet.
+
+    Returns:
+        Formatierter TWS API GTD-String: 'YYYYMMDD HH:mm:ss {TZ}' (z. B. '20260910 15:48:00 US/Eastern').
+    """
+    symbol_upper = symbol.strip().upper()
+    if symbol_upper.endswith(".DE"):
+        target_timezone = ZoneInfo("Europe/Berlin")
+        cutoff_hour = 17
+        cutoff_minute = 18
+        timezone_name = "Europe/Berlin"
+    else:
+        target_timezone = ZoneInfo("America/New_York")
+        cutoff_hour = 15
+        cutoff_minute = 48
+        timezone_name = "US/Eastern"
+
+    if reference_time is None:
+        now_in_target_tz = datetime.now(target_timezone)
+    elif reference_time.tzinfo is None:
+        now_in_target_tz = reference_time.replace(tzinfo=target_timezone)
+    else:
+        now_in_target_tz = reference_time.astimezone(target_timezone)
+
+    cutoff_datetime = now_in_target_tz.replace(
+        hour=cutoff_hour,
+        minute=cutoff_minute,
+        second=0,
+        microsecond=0,
+    )
+    return f"{cutoff_datetime.strftime('%Y%m%d %H:%M:%S')} {timezone_name}"
+
+
+def is_past_loc_gtd_cutoff(symbol: str, current_time: datetime | None = None) -> bool:
+    """Prüft, ob der GTD-Verfallszeitpunkt für ein Symbol bereits erreicht oder überschritten ist.
+
+    Args:
+        symbol: Das Ticker-Symbol des Wertpapiers.
+        current_time: Optionaler Referenzzeitpunkt (für Tests). Falls None, wird die aktuelle Zeit verwendet.
+
+    Returns:
+        True, wenn der aktuelle Zeitpunkt gleich oder nach dem GTD-Cutoff liegt.
+    """
+    symbol_upper = symbol.strip().upper()
+    if symbol_upper.endswith(".DE"):
+        target_timezone = ZoneInfo("Europe/Berlin")
+        cutoff_hour = 17
+        cutoff_minute = 18
+    else:
+        target_timezone = ZoneInfo("America/New_York")
+        cutoff_hour = 15
+        cutoff_minute = 48
+
+    if current_time is None:
+        now_in_target_tz = datetime.now(target_timezone)
+    elif current_time.tzinfo is None:
+        now_in_target_tz = current_time.replace(tzinfo=target_timezone)
+    else:
+        now_in_target_tz = current_time.astimezone(target_timezone)
+
+    cutoff_datetime = now_in_target_tz.replace(
+        hour=cutoff_hour,
+        minute=cutoff_minute,
+        second=0,
+        microsecond=0,
+    )
+    return now_in_target_tz >= cutoff_datetime

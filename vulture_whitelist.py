@@ -24,6 +24,7 @@ _.parentId
 _.whatIf
 _.outsideRth
 _.goodAfterTime
+_.goodTillDate
 _.conditionsIgnoreRth
 _.conditionsCancelOrder
 _.exch
