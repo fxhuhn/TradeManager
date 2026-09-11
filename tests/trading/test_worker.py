@@ -1733,3 +1733,57 @@ async def test_handle_order_rejection_succeeds_if_status_becomes_presubmitted_wi
 
     assert result is True
     mock_notifier.send_order_failed.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_trade_group_unhandled_exception_sends_emergency_alert(
+    db, test_config
+) -> None:
+    """Verifies that unhandled exceptions during trade group processing trigger an emergency Telegram alert."""
+    from app.trading.worker import process_trade_group
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_message = AsyncMock(return_value=True)
+
+    with patch(
+        "app.trading.worker._load_trade_group_orders",
+        side_effect=RuntimeError("Fatal DB lock failure"),
+    ):
+        with pytest.raises(RuntimeError, match="Fatal DB lock failure"):
+            await process_trade_group(
+                db=db,
+                interactive_brokers=MagicMock(),
+                trade_group_id="TG_CRASH_TEST",
+                notifier=mock_notifier,
+                config=test_config,
+            )
+
+    mock_notifier.send_message.assert_awaited_once()
+    sent_text = mock_notifier.send_message.await_args[0][0]
+    assert "KRITISCHER SYSTEMFEHLER BEI ORDER-VERARBEITUNG" in sent_text
+    assert "TG_CRASH_TEST" in sent_text
+    assert "Fatal DB lock failure" in sent_text
+
+
+@pytest.mark.asyncio
+async def test_process_trade_group_unhandled_exception_handles_notifier_failure(
+    db, test_config
+) -> None:
+    """Verifies that process_trade_group still raises even if Telegram emergency notification fails."""
+    from app.trading.worker import process_trade_group
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_message = AsyncMock(side_effect=ConnectionError("Telegram down"))
+
+    with patch(
+        "app.trading.worker._load_trade_group_orders",
+        side_effect=RuntimeError("Core worker crash"),
+    ):
+        with pytest.raises(RuntimeError, match="Core worker crash"):
+            await process_trade_group(
+                db=db,
+                interactive_brokers=MagicMock(),
+                trade_group_id="TG_CRASH_TG_DOWN",
+                notifier=mock_notifier,
+                config=test_config,
+            )

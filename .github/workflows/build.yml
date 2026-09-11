@@ -50,14 +50,12 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha
 
-      - name: Build Docker image
+      - name: Build Docker image for scanning
         uses: docker/build-push-action@v7
         with:
           context: .
           load: true
-          tags: |
-            ${{ steps.meta.outputs.tags }}
-            ${{ env.IMAGE_TAG }}
+          tags: ${{ env.IMAGE_TAG }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -103,6 +101,13 @@ jobs:
 
       - name: Push Docker image
         if: github.event_name != 'pull_request'
-        run: |
-          docker push --all-tags ghcr.io/${{ env.REPO_LOWER }}
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          provenance: false
+          sbom: false
 

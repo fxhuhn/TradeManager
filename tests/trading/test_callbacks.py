@@ -1204,7 +1204,7 @@ async def test_cancel_order_in_db_updates_and_notifies(db, mock_config: Config) 
 async def test_callbacks_additional_coverage_branches(mock_config: Config) -> None:
     """Verifies error handling, status mappings, commission retries, and LOC verification edge cases."""
     # 1. _update_order_status_db exception handler
-    db_err = AsyncMock()
+    db_err = MagicMock()
     db_err.execute.side_effect = RuntimeError("DB error")
     db_err.close = AsyncMock()
 
@@ -1282,7 +1282,7 @@ async def test_callbacks_additional_coverage_branches(mock_config: Config) -> No
         await manager._process_status_change(100, "Submitted", 999)
 
     # 4. _process_status_change missing order_row and exception handler
-    db_empty = AsyncMock()
+    db_empty = MagicMock()
     cursor_empty = AsyncMock()
     cursor_empty.fetchone = AsyncMock(return_value=None)
     db_empty.execute.return_value.__aenter__ = AsyncMock(return_value=cursor_empty)
@@ -1296,7 +1296,7 @@ async def test_callbacks_additional_coverage_branches(mock_config: Config) -> No
         manager.db_factory = db_factory_empty
         await manager._process_status_change(100, "Filled", 999)
 
-        db_err_process = AsyncMock()
+        db_err_process = MagicMock()
         db_err_process.execute.side_effect = RuntimeError("Process DB error")
         db_err_process.close = AsyncMock()
 
@@ -1322,7 +1322,7 @@ async def test_callbacks_additional_coverage_branches(mock_config: Config) -> No
     await manager._fail_order_in_db(999, 500, "Fatal error test")
 
     # 7. _update_commission exception retry logic
-    db_comm_err = AsyncMock()
+    db_comm_err = MagicMock()
     db_comm_err.execute.side_effect = RuntimeError("Comm DB error")
     db_comm_err.close = AsyncMock()
 

@@ -430,3 +430,225 @@ async def test_order_status_cancelled_event_triggers_and_deduplicates(
 
         # Assert 2: Kein zweiter Alarm
         assert mock_notifier.send_order_failed.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_order_status_error_triggers_fatal_alarm(
+    callbacks_manager: TwsCallbacksManager,
+    in_memory_db: aiosqlite.Connection,
+    mock_notifier: MagicMock,
+) -> None:
+    """Verifiziert, dass ein orderStatusEvent('Error') oder unbekannter Status einen fatalen Alarm auslöst."""
+    await in_memory_db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, status)
+        VALUES (2005, 'TG_ERROR_STATUS', 'U12345', 'ENTRY', 'NVDA', 'STK', 'SMART', 'BUY', 10, 'LMT', 'Created')
+        """
+    )
+    await in_memory_db.commit()
+
+    mock_trade = MagicMock()
+    mock_trade.order.orderId = 2005
+    mock_trade.orderStatus.status = "Error"
+    mock_trade.orderStatus.permId = 99999
+    mock_trade.orderStatus.avgFillPrice = 0.0
+    mock_trade.orderStatus.whyHeld = ""
+    mock_trade.contract.symbol = "NVDA"
+    mock_trade.contract.secType = "STK"
+    mock_trade.log = []
+
+    callbacks_manager.on_order_status(mock_trade)
+    await asyncio.sleep(0.05)
+
+    mock_notifier.send_order_failed.assert_awaited_once()
+    call_kwargs = mock_notifier.send_order_failed.await_args.kwargs
+    assert call_kwargs["order_id"] == 2005
+    assert call_kwargs["symbol"] == "NVDA"
+    assert call_kwargs["is_fatal"] is True
+
+
+@pytest.mark.asyncio
+async def test_order_status_extracts_reason_from_log_and_why_held(
+    callbacks_manager: TwsCallbacksManager,
+    in_memory_db: aiosqlite.Connection,
+    mock_notifier: MagicMock,
+) -> None:
+    """Verifiziert, dass on_order_status Stornogründe aus trade.log und trade.orderStatus.whyHeld extrahiert."""
+    # Testfall 1: Aus trade.log
+    mock_trade_log = MagicMock()
+    mock_trade_log.order.orderId = 2006
+    mock_trade_log.orderStatus.status = "Cancelled"
+    mock_trade_log.orderStatus.permId = 12345
+    mock_trade_log.orderStatus.avgFillPrice = 0.0
+    mock_trade_log.orderStatus.whyHeld = ""
+    mock_trade_log.contract.symbol = "AAPL"
+    mock_trade_log.contract.secType = "STK"
+
+    log_entry1 = MagicMock()
+    log_entry1.message = "Initial routing"
+    log_entry2 = MagicMock()
+    log_entry2.message = "Cancelled by user"
+    mock_trade_log.log = [log_entry1, log_entry2]
+
+    with patch.object(
+        callbacks_manager, "_is_near_or_after_market_close", return_value=False
+    ):
+        with patch.object(
+            callbacks_manager, "_process_status_change", AsyncMock()
+        ) as mock_process:
+            callbacks_manager.on_order_status(mock_trade_log)
+            await asyncio.sleep(0.01)
+            mock_process.assert_called_once()
+            assert mock_process.call_args.kwargs["reason"] == "Cancelled by user"
+
+    # Testfall 2: Aus whyHeld
+    mock_trade_held = MagicMock()
+    mock_trade_held.order.orderId = 2007
+    mock_trade_held.orderStatus.status = "Cancelled"
+    mock_trade_held.orderStatus.permId = 12346
+    mock_trade_held.orderStatus.avgFillPrice = 0.0
+    mock_trade_held.orderStatus.whyHeld = "Locate required"
+    mock_trade_held.contract.symbol = "AAPL"
+    mock_trade_held.contract.secType = "STK"
+    mock_trade_held.log = []
+
+    with patch.object(
+        callbacks_manager, "_is_near_or_after_market_close", return_value=False
+    ):
+        with patch.object(
+            callbacks_manager, "_process_status_change", AsyncMock()
+        ) as mock_process:
+            callbacks_manager.on_order_status(mock_trade_held)
+            await asyncio.sleep(0.01)
+            mock_process.assert_called_once()
+            assert mock_process.call_args.kwargs["reason"] == "Locate required"
+
+
+@pytest.mark.asyncio
+async def test_on_order_status_unhandled_exception_sends_emergency_alert(
+    callbacks_manager: TwsCallbacksManager,
+    mock_notifier: MagicMock,
+) -> None:
+    """Verifiziert, dass unbehandelte Ausnahmen in on_order_status einen Notfall-Alarm senden."""
+    broken_trade = MagicMock()
+    # Zugriff auf orderId wirft Ausnahme
+    type(broken_trade.order).orderId = property(lambda self: 1 / 0)
+
+    callbacks_manager.on_order_status(broken_trade)
+    await asyncio.sleep(0.05)
+
+    mock_notifier.send_message.assert_awaited()
+    sent_alert = mock_notifier.send_message.await_args[0][0]
+    assert "KRITISCHER SYSTEMFEHLER IN ON_ORDER_STATUS" in sent_alert
+    assert "division by zero" in sent_alert
+
+
+@pytest.mark.asyncio
+async def test_process_status_change_unhandled_exception_sends_emergency_alert(
+    callbacks_manager: TwsCallbacksManager,
+    mock_notifier: MagicMock,
+) -> None:
+    """Verifiziert, dass unbehandelte Ausnahmen in _process_status_change einen Notfall-Alarm senden."""
+    with patch.object(
+        callbacks_manager,
+        "_update_order_status_db",
+        side_effect=RuntimeError("Corrupt status table"),
+    ):
+        await callbacks_manager._process_status_change(
+            order_id=9999,
+            mapped_status="Filled",
+            permanent_id=1111,
+        )
+
+    mock_notifier.send_message.assert_awaited()
+    sent_alert = mock_notifier.send_message.await_args[0][0]
+    assert "KRITISCHER FEHLER IN STATUSVERARBEITUNG" in sent_alert
+    assert "Corrupt status table" in sent_alert
+
+
+@pytest.mark.asyncio
+async def test_send_emergency_alert_handles_notifier_exception(
+    callbacks_manager: TwsCallbacksManager,
+    mock_notifier: MagicMock,
+) -> None:
+    """Verifiziert, dass _send_emergency_alert nicht abstürzt, wenn Telegram fehlschlägt."""
+    mock_notifier.send_message = AsyncMock(side_effect=ConnectionError("Telegram down"))
+    # Soll lautlos abgefangen und kritisch geloggt werden, keine unhandled exception
+    await callbacks_manager._send_emergency_alert(
+        title="Test Title",
+        details="Test Details",
+    )
+
+
+def test_is_near_or_after_market_close_all_branches(
+    callbacks_manager: TwsCallbacksManager,
+) -> None:
+    """Verifiziert alle Zweige von _is_near_or_after_market_close (None-Symbol, naive und timezoned Zeiten)."""
+    ny_tz = ZoneInfo("America/New_York")
+
+    # 1. symbol is None
+    # Vor Cutoff (15:54 NY)
+    t_before_ny = datetime(2026, 9, 11, 15, 54, 0, tzinfo=ny_tz)
+    assert callbacks_manager._is_near_or_after_market_close(None, t_before_ny) is False
+
+    # Nach Cutoff (15:55 NY)
+    t_after_ny = datetime(2026, 9, 11, 15, 55, 0, tzinfo=ny_tz)
+    assert callbacks_manager._is_near_or_after_market_close(None, t_after_ny) is True
+
+    # Naive Zeit ohne tzinfo für symbol=None
+    t_naive_ny = datetime(2026, 9, 11, 16, 5, 0)
+    assert callbacks_manager._is_near_or_after_market_close(None, t_naive_ny) is True
+
+    # current_time is None für symbol=None
+    res_none = callbacks_manager._is_near_or_after_market_close(None, None)
+    assert isinstance(res_none, bool)
+
+    # 2. Deutscher Markt .DE
+    # current_time is None
+    res_de = callbacks_manager._is_near_or_after_market_close("SAP.DE", None)
+    assert isinstance(res_de, bool)
+
+    # Naive Zeit für .DE
+    t_naive_de_before = datetime(2026, 9, 11, 17, 24, 0)
+    assert (
+        callbacks_manager._is_near_or_after_market_close("SAP.DE", t_naive_de_before)
+        is False
+    )
+    t_naive_de_after = datetime(2026, 9, 11, 17, 26, 0)
+    assert (
+        callbacks_manager._is_near_or_after_market_close("SAP.DE", t_naive_de_after)
+        is True
+    )
+
+    # 3. US Markt
+    # current_time is None
+    res_us = callbacks_manager._is_near_or_after_market_close("AAPL", None)
+    assert isinstance(res_us, bool)
+
+    # Naive Zeit für US
+    t_naive_us_before = datetime(2026, 9, 11, 15, 54, 0)
+    assert (
+        callbacks_manager._is_near_or_after_market_close("AAPL", t_naive_us_before)
+        is False
+    )
+    t_naive_us_after = datetime(2026, 9, 11, 15, 56, 0)
+    assert (
+        callbacks_manager._is_near_or_after_market_close("AAPL", t_naive_us_after)
+        is True
+    )
+
+
+def test_is_market_closed_error_codes_all_branches() -> None:
+    """Verifiziert alle Zweige von is_market_closed in error_codes.py."""
+    from app.trading.error_codes import is_market_closed_for_symbol as is_market_closed
+
+    # None current_time
+    assert isinstance(is_market_closed("SAP.DE", None), bool)
+    assert isinstance(is_market_closed("AAPL", None), bool)
+
+    # Naive current_time
+    t_de_closed = datetime(2026, 9, 11, 17, 31, 0)
+    assert is_market_closed("SAP.DE", t_de_closed) is True
+
+    t_us_closed = datetime(2026, 9, 11, 16, 1, 0)
+    assert is_market_closed("AAPL", t_us_closed) is True

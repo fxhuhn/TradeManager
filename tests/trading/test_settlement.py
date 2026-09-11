@@ -260,7 +260,7 @@ async def test_trigger_settlement_handles_missing_executions(db) -> None:
 @pytest.mark.asyncio
 async def test_trigger_settlement_handles_db_exception() -> None:
     """Verifies trigger_settlement catches and logs database exceptions gracefully."""
-    mock_db = AsyncMock()
+    mock_db = MagicMock()
     mock_db.execute.side_effect = RuntimeError("Database query failed")
     mock_db.close = AsyncMock()
 
