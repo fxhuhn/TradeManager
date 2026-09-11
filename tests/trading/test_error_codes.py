@@ -10,6 +10,8 @@ from app.trading.error_codes import ErrorClass, classify_error_code
 async def test_error_code_classification() -> None:
     """TWS Error-Code Klassifizierung (INFO vs RETRIABLE vs FATAL vs RECONNECT vs CANCEL)."""
     assert classify_error_code(2104) == ErrorClass.INFO
+    assert classify_error_code(2109) == ErrorClass.INFO
+    assert classify_error_code(10167) == ErrorClass.INFO
     assert classify_error_code(321) == ErrorClass.INFO
     assert classify_error_code(322) == ErrorClass.INFO
     assert classify_error_code(1100) == ErrorClass.RETRIABLE

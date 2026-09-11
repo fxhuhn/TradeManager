@@ -195,7 +195,7 @@ Governed by [app/trading/error_codes.py](app/trading/error_codes.py), IBKR API e
 
 | Error Class | Associated Codes | System Action / Response |
 | :--- | :--- | :--- |
-| **`INFO`** | `2104`, `2106`, `2107`, `2108`, `2119`, `2158`, `2100`, `2182`, `399`, `321`, `322` | Log warning/info. No execution actions are taken. System execution continues undisturbed. |
+| **`INFO`** | `2100`, `2103`, `2104`, `2105`, `2106`, `2107`, `2108`, `2109`, `2119`, `2158`, `2182`, `321`, `322`, `399`, `10167` | Log warning/info. No execution actions are taken. System execution continues undisturbed. |
 | **`RECONNECT`**| `1101`, `1102` | Pause outgoing transmissions. Block queue consumption. Gateway disconnect check logic starts. Resume once connection events clear. |
 | **`RETRIABLE`**| `1100`, `1300`, `10148`, `502`, `504`, `162` | Queue worker backs off exponentially. Status reverts to `Created`. Order is queued again for retry (up to max configured retries limit). |
 | **`CANCEL`** | `202`, `10147`, `10149`, `10268` | Order marked as `Cancelled` in database. Stop execution of remaining bracket elements if necessary to prevent exposure. |
