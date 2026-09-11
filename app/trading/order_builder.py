@@ -161,6 +161,7 @@ def _apply_bounce_bandit_conditions(
     """Wendet die spezifischen Handelszeit- und Preistrigger-Bedingungen für BounceBandit an."""
     order.orderType = "MKT"
     order.outsideRth = True
+    order.tif = "DAY"
 
     if order_row.bracket_role == "ENTRY":
         order.goodAfterTime = f"{today_string} 08:30:00 US/Central"
@@ -231,6 +232,15 @@ def build_order(order_row: OrderRow) -> Order:
     ):
         today_string = datetime.now(CME_TIMEZONE).strftime("%Y%m%d")
         _apply_bounce_bandit_conditions(order, order_row, today_string)
+
+    # Defensive Härtung für alle Futures: CME Globex unterstützt kein OPG
+    if order_row.sec_type == "FUT" and order.tif == "OPG":
+        logger.warning(
+            "TIF 'OPG' ist für Futures unzulässig. Wird automatisch auf 'DAY' korrigiert.",
+            symbol=order_row.symbol,
+            order_id=order_row.order_id,
+        )
+        order.tif = "DAY"
 
     # OCA (One-Cancels-All) Gruppe konfigurieren für SL, TP und EXIT
     if order_row.bracket_role in ("SL", "TP", "EXIT"):

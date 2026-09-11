@@ -176,3 +176,55 @@ def test_build_order_generic_future_without_bounce_bandit_conditions() -> None:
     assert ib_order.totalQuantity == 1.0
     assert ib_order.goodAfterTime == ""
     assert ib_order.conditions == []
+
+
+def test_build_order_bounce_bandit_forces_tif_day_even_if_row_has_opg() -> None:
+    """Prüft, dass BounceBandit Entry-Orders stets tif='DAY' haben, selbst wenn in der DB tif='OPG' steht."""
+    entry_row = OrderRow(
+        order_id=30,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG_BB_OPG",
+        account_id="ACC1",
+        bracket_role="ENTRY",
+        symbol="MNQU6",
+        sec_type="FUT",
+        exchange="CME",
+        action="BUY",
+        quantity=1,
+        order_type="MKT",
+        target_price=None,
+        tif="OPG",
+        strategy_name="BounceBandit",
+        status="Created",
+    )
+    ib_order = build_order(entry_row)
+
+    assert ib_order.tif == "DAY"
+    assert ib_order.orderType == "MKT"
+    assert ib_order.outsideRth is True
+
+
+def test_build_order_future_with_opg_defensively_corrected_to_day() -> None:
+    """Prüft, dass jede Future-Order mit tif='OPG' defensiv auf tif='DAY' korrigiert wird (CME Globex Invariante)."""
+    future_row = OrderRow(
+        order_id=31,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG_GEN_FUT",
+        account_id="ACC1",
+        bracket_role="ENTRY",
+        symbol="MESU6",
+        sec_type="FUT",
+        exchange="CME",
+        action="BUY",
+        quantity=1,
+        order_type="MKT",
+        target_price=None,
+        tif="OPG",
+        strategy_name="ArbitraryStrategy",
+        status="Created",
+    )
+    ib_order = build_order(future_row)
+
+    assert ib_order.tif == "DAY"

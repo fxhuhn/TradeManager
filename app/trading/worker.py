@@ -89,19 +89,22 @@ async def execution_worker(
             logger.info("Execution Worker was cancelled.")
             raise
         except Exception as exception:
-            logger.error("Error in Execution Worker loop", error=str(exception))
+            logger.exception("Error in Execution Worker loop", error=str(exception))
+            try:
+                tg_id_str = (
+                    trade_group_id if trade_group_id is not None else "Unbekannt"
+                )
+                await notifier.send_message(
+                    f"🚨 <b>KRITISCHER FEHLER IM EXECUTION WORKER</b>\n"
+                    f"├─ <b>Trade-Gruppe:</b> <code>{tg_id_str}</code>\n"
+                    f"└─ <b>Details:</b> <i>{exception}</i>"
+                )
+            except Exception as tg_exception:
+                logger.critical(
+                    "Failed to send Telegram error notification",
+                    error=str(tg_exception),
+                )
             if trade_group_id is not None:
-                try:
-                    await notifier.send_message(
-                        f"⚠️ <b>FEHLER IM EXECUTION WORKER</b>\n"
-                        f"├─ <b>Trade-Gruppe:</b> <code>{trade_group_id}</code>\n"
-                        f"└─ <b>Details:</b> <i>{exception}</i>"
-                    )
-                except Exception as tg_exception:
-                    logger.error(
-                        "Failed to send Telegram error notification",
-                        error=str(tg_exception),
-                    )
                 queue.task_done()
             await asyncio.sleep(1.0)
 
@@ -119,98 +122,121 @@ async def process_trade_group(
     Übermittelt die ENTRY-Order sowie die zugehörigen Child-Orders (SL, TP, EXIT)
     an die TWS.
     """
-    logger.info("Processing trade group from queue", trade_group_id=trade_group_id)
+    try:
+        logger.info("Processing trade group from queue", trade_group_id=trade_group_id)
 
-    orders = await _load_trade_group_orders(db, trade_group_id)
-    if not orders:
-        logger.warning(
-            "No orders found for trade group in DB",
-            trade_group_id=trade_group_id,
+        orders = await _load_trade_group_orders(db, trade_group_id)
+        if not orders:
+            logger.warning(
+                "No orders found for trade group in DB",
+                trade_group_id=trade_group_id,
+            )
+            return
+
+        entry_order = next(
+            (order for order in orders if order.bracket_role == "ENTRY"), None
         )
-        return
+        child_orders = [order for order in orders if order.bracket_role != "ENTRY"]
 
-    entry_order = next(
-        (order for order in orders if order.bracket_role == "ENTRY"), None
-    )
-    child_orders = [order for order in orders if order.bracket_role != "ENTRY"]
+        if not entry_order:
+            logger.error(
+                "No ENTRY order present in group", trade_group_id=trade_group_id
+            )
+            return
 
-    if not entry_order:
-        logger.error("No ENTRY order present in group", trade_group_id=trade_group_id)
-        return
+        is_post_fill: Final[bool] = entry_order.status == "Filled"
+        placed_orders: list[OrderRow] = []
 
-    is_post_fill: Final[bool] = entry_order.status == "Filled"
-    placed_orders: list[OrderRow] = []
+        if entry_order.status == "Created":
+            logger.info(
+                "Normal entry: Processing ENTRY order",
+                trade_group_id=trade_group_id,
+            )
+            entry_order = await _process_entry_order(
+                db,
+                interactive_brokers,
+                entry_order,
+                child_orders,
+                notifier,
+                config,
+                placed_orders,
+            )
 
-    if entry_order.status == "Created":
-        logger.info(
-            "Normal entry: Processing ENTRY order",
-            trade_group_id=trade_group_id,
-        )
-        entry_order = await _process_entry_order(
+        if not entry_order or entry_order.status in ("Error", "Cancelled"):
+            logger.warning(
+                "ENTRY order failed or cancelled. Skipping child orders.",
+                trade_group_id=trade_group_id,
+            )
+            if entry_order and entry_order.status == "Cancelled":
+                async with transaction(db):
+                    await db.execute(
+                        "UPDATE orders SET status = 'Cancelled' WHERE trade_group_id = ? AND status = 'Created'",
+                        (trade_group_id,),
+                    )
+            else:
+                async with transaction(db):
+                    await db.execute(
+                        "UPDATE orders SET status = 'Error' WHERE trade_group_id = ? AND status = 'Created'",
+                        (trade_group_id,),
+                    )
+            return
+
+        await _process_child_orders(
             db,
             interactive_brokers,
             entry_order,
             child_orders,
+            is_post_fill,
             notifier,
             config,
             placed_orders,
         )
 
-    if not entry_order or entry_order.status in ("Error", "Cancelled"):
-        logger.warning(
-            "ENTRY order failed or cancelled. Skipping child orders.",
-            trade_group_id=trade_group_id,
-        )
-        if entry_order and entry_order.status == "Cancelled":
-            async with transaction(db):
-                await db.execute(
-                    "UPDATE orders SET status = 'Cancelled' WHERE trade_group_id = ? AND status = 'Created'",
-                    (trade_group_id,),
+        if placed_orders:
+            order_dicts = [
+                {
+                    "role": placed_order.bracket_role,
+                    "action": placed_order.action,
+                    "quantity": placed_order.quantity,
+                    "price": placed_order.target_price,
+                    "order_type": placed_order.order_type,
+                }
+                for placed_order in placed_orders
+            ]
+
+            # Sortiere: ENTRY zuerst, dann TP, dann SL
+            order_dicts.sort(
+                key=lambda order_dict: {"ENTRY": 0, "TP": 1, "SL": 2}.get(
+                    str(order_dict.get("role", "")), 3
                 )
-        else:
-            async with transaction(db):
-                await db.execute(
-                    "UPDATE orders SET status = 'Error' WHERE trade_group_id = ? AND status = 'Created'",
-                    (trade_group_id,),
-                )
-        return
-
-    await _process_child_orders(
-        db,
-        interactive_brokers,
-        entry_order,
-        child_orders,
-        is_post_fill,
-        notifier,
-        config,
-        placed_orders,
-    )
-
-    if placed_orders:
-        order_dicts = [
-            {
-                "role": placed_order.bracket_role,
-                "action": placed_order.action,
-                "quantity": placed_order.quantity,
-                "price": placed_order.target_price,
-                "order_type": placed_order.order_type,
-            }
-            for placed_order in placed_orders
-        ]
-
-        # Sortiere: ENTRY zuerst, dann TP, dann SL
-        order_dicts.sort(
-            key=lambda order_dict: {"ENTRY": 0, "TP": 1, "SL": 2}.get(
-                str(order_dict.get("role", "")), 3
             )
-        )
 
-        await notifier.send_bracket_order_submitted(
-            symbol=entry_order.symbol,
+            await notifier.send_bracket_order_submitted(
+                symbol=entry_order.symbol,
+                trade_group_id=trade_group_id,
+                strategy_name=entry_order.strategy_name or "N/A",
+                orders=order_dicts,
+            )
+    except Exception as unhandled:
+        logger.exception(
+            "CRITICAL: Unhandled exception during trade group processing",
             trade_group_id=trade_group_id,
-            strategy_name=entry_order.strategy_name or "N/A",
-            orders=order_dicts,
+            error=str(unhandled),
         )
+        try:
+            await notifier.send_message(
+                f"🚨 <b>KRITISCHER SYSTEMFEHLER BEI ORDER-VERARBEITUNG</b>\n\n"
+                f"├─ <b>Trade-Gruppe:</b> <code>{trade_group_id}</code>\n"
+                f"└─ <b>Fehler:</b> <i>{unhandled}</i>\n\n"
+                f"<i>Die Verarbeitung wurde unterbrochen. Bitte System manuell prüfen!</i>"
+            )
+        except Exception as tg_err:
+            logger.critical(
+                "Failed to send emergency Telegram message",
+                trade_group_id=trade_group_id,
+                error=str(tg_err),
+            )
+        raise
 
 
 async def _load_trade_group_orders(
@@ -973,24 +999,19 @@ async def _handle_order_rejection(
     error_msg = "Unknown error"
     tws_code = 0
 
-    # Kurz auf asynchrones errorEvent von IBKR warten, falls trade.log noch leer/unvollständig ist
+    # Bis zu 1 Sekunde auf asynchrones errorEvent von IBKR warten
     for _ in range(10):
+        # Falls sich der Status zwischenzeitlich auf Submitted/PreSubmitted geändert hat, ist die Order aktiv
+        if trade.orderStatus.status in ("Submitted", "PreSubmitted"):
+            return True
+
         log_errors = [
             entry
             for entry in trade.log
             if entry.errorCode != 0 or entry.status in ("ValidationError", "Error")
         ]
-        is_only_benign_warnings: bool = len(log_errors) > 0 and all(
-            entry.errorCode in (399, 2109) for entry in log_errors
-        )
-        if is_only_benign_warnings:
-            logger.info(
-                "Ignoring benign warning (399/2109) during order placement",
-                order_id=tws_order_id,
-                symbol=order_row.symbol,
-            )
-            return True
 
+        # Prüfe, ob ein echter Fehler (nicht 399/2109) vorliegt
         for entry in log_errors:
             if entry.errorCode not in (399, 2109):
                 error_msg = entry.message
@@ -998,8 +1019,39 @@ async def _handle_order_rejection(
                 break
 
         if error_msg != "Unknown error":
+            # Ein echter Fehler ist eingetroffen -> Abbruch der Warteschleife
             break
+
         await asyncio.sleep(0.1)
+
+    # Wenn nach der Wartezeit kein echter Fehler eingetroffen ist und nur harmlose Warnungen (399/2109) vorliegen:
+    log_errors = [
+        entry
+        for entry in trade.log
+        if entry.errorCode != 0 or entry.status in ("ValidationError", "Error")
+    ]
+    is_only_benign_warnings: bool = len(log_errors) > 0 and all(
+        entry.errorCode in (399, 2109) for entry in log_errors
+    )
+    if is_only_benign_warnings and error_msg == "Unknown error":
+        logger.info(
+            "Ignoring benign warning (399/2109) during order placement (no real error received)",
+            order_id=tws_order_id,
+            symbol=order_row.symbol,
+        )
+        return True
+
+    if error_msg == "Unknown error":
+        if trade.log:
+            for entry in reversed(trade.log):
+                if entry.message and entry.message.strip():
+                    error_msg = entry.message.strip()
+                    tws_code = entry.errorCode
+                    break
+        if error_msg == "Unknown error" and trade.orderStatus.whyHeld:
+            error_msg = str(trade.orderStatus.whyHeld)
+        if error_msg == "Unknown error":
+            error_msg = f"Order im Status '{trade.orderStatus.status}' abgelehnt oder inaktiviert."
 
     logger.error(
         f"{TAG_ORDER_REJECT} Order transmission failed",

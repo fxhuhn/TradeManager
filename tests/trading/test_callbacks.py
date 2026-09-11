@@ -379,7 +379,8 @@ async def test_loc_order_cancel_anomaly_detected(db, mock_config: Config) -> Non
         finally:
             db.close = original_close
 
-    mock_notifier.send_order_failed.assert_called_once()
+    # Storno-Warnung wird bei Marktschluss (16:05 NY) unterdrueckt, Anomalie-Pruefung laeuft weiterhin
+    mock_notifier.send_order_failed.assert_not_called()
     mock_notifier.send_loc_execution_anomaly.assert_called_once_with(
         order_id=45,
         symbol="AMAT",
@@ -468,7 +469,8 @@ async def test_loc_order_cancel_no_anomaly(db, mock_config: Config) -> None:
         finally:
             db.close = original_close
 
-    mock_notifier.send_order_failed.assert_called_once()
+    # Storno-Warnung wird bei Marktschluss (16:05 NY) unterdrueckt
+    mock_notifier.send_order_failed.assert_not_called()
     mock_notifier.send_loc_execution_anomaly.assert_not_called()
 
 

@@ -85,7 +85,7 @@ async def test_bounce_bandit_qqq_transformation(db, test_config, monkeypatch) ->
 
     # Verifiziere DB-Einträge
     async with db.execute(
-        "SELECT bracket_role, symbol, sec_type, exchange, quantity, target_price FROM orders WHERE trade_group_id = 'TG_BOUNCE_1' ORDER BY bracket_role"
+        "SELECT bracket_role, symbol, sec_type, exchange, quantity, target_price, tif FROM orders WHERE trade_group_id = 'TG_BOUNCE_1' ORDER BY bracket_role"
     ) as cursor:
         rows = await cursor.fetchall()
         assert len(rows) == 2
@@ -95,6 +95,7 @@ async def test_bounce_bandit_qqq_transformation(db, test_config, monkeypatch) ->
         assert entry_row["sec_type"] == "FUT"
         assert entry_row["exchange"] == "CME"
         assert entry_row["quantity"] == 1
+        assert entry_row["tif"] == "DAY"
 
         tp_row = next(r for r in rows if r["bracket_role"] == "TP")
         assert tp_row["symbol"] == "MNQU6"

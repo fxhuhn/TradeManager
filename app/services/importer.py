@@ -529,6 +529,7 @@ async def _process_and_upsert_group(
                 sec_type="FUT",
                 exchange="CME",
                 quantity=1,
+                tif="DAY" if leg.tif and leg.tif.upper() == "OPG" else leg.tif,
             )
             for leg in raw_legs
         ]

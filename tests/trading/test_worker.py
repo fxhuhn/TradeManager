@@ -1620,3 +1620,116 @@ def test_get_whatif_timeout_falls_back_when_exception_occurs() -> None:
 
     # Assert
     assert timeout_result == 10.0
+
+
+@pytest.mark.asyncio
+async def test_handle_order_rejection_does_not_falsely_succeed_on_warning_399_when_inactive(
+    db,
+) -> None:
+    """Verifies that _handle_order_rejection does NOT return True when status is Inactive even if warning 399 exists."""
+    from app.trading.worker import _handle_order_rejection
+
+    order_row = OrderRow(
+        order_id=1484,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG_REJECT_1484",
+        account_id="ACC1",
+        bracket_role="ENTRY",
+        symbol="MNQU6",
+        sec_type="FUT",
+        exchange="CME",
+        action="BUY",
+        quantity=1,
+        order_type="MKT",
+        target_price=None,
+        tif="DAY",
+        strategy_name="BounceBandit",
+        status="Submitted",
+    )
+
+    mock_trade = MagicMock()
+    mock_trade.orderStatus.status = "Inactive"
+    mock_trade.orderStatus.whyHeld = ""
+
+    warning_399 = MagicMock()
+    warning_399.errorCode = 399
+    warning_399.message = "Warning: your order will not be placed at the exchange until 2026-09-11 08:30:00 US/Central."
+    warning_399.status = "Submitted"
+
+    error_201 = MagicMock()
+    error_201.errorCode = 201
+    error_201.message = "The time-in-force OPG is invalid for this combination of exchange and security type"
+    error_201.status = "Inactive"
+
+    mock_trade.log = [warning_399, error_201]
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+
+    with patch("app.trading.worker.asyncio.sleep", AsyncMock()):
+        result = await _handle_order_rejection(
+            db=db,
+            trade=mock_trade,
+            order_row=order_row,
+            tws_order_id=1484,
+            notifier=mock_notifier,
+        )
+
+    assert result is False
+    mock_notifier.send_order_failed.assert_awaited_once()
+    kwargs = mock_notifier.send_order_failed.await_args.kwargs
+    assert kwargs["order_id"] == 1484
+    assert kwargs["tws_code"] == 201
+    assert "time-in-force OPG is invalid" in kwargs["reason"]
+
+
+@pytest.mark.asyncio
+async def test_handle_order_rejection_succeeds_if_status_becomes_presubmitted_with_warning_399(
+    db,
+) -> None:
+    """Verifies that _handle_order_rejection returns True when status becomes PreSubmitted with warning 399."""
+    from app.trading.worker import _handle_order_rejection
+
+    order_row = OrderRow(
+        order_id=1485,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG_SUCCESS_1485",
+        account_id="ACC1",
+        bracket_role="ENTRY",
+        symbol="MNQU6",
+        sec_type="FUT",
+        exchange="CME",
+        action="BUY",
+        quantity=1,
+        order_type="MKT",
+        target_price=None,
+        tif="DAY",
+        strategy_name="BounceBandit",
+        status="Submitted",
+    )
+
+    mock_trade = MagicMock()
+    mock_trade.orderStatus.status = "PreSubmitted"
+
+    warning_399 = MagicMock()
+    warning_399.errorCode = 399
+    warning_399.message = "Warning: your order will not be placed at the exchange until 2026-09-11 08:30:00 US/Central."
+    warning_399.status = "PreSubmitted"
+    mock_trade.log = [warning_399]
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+
+    with patch("app.trading.worker.asyncio.sleep", AsyncMock()):
+        result = await _handle_order_rejection(
+            db=db,
+            trade=mock_trade,
+            order_row=order_row,
+            tws_order_id=1485,
+            notifier=mock_notifier,
+        )
+
+    assert result is True
+    mock_notifier.send_order_failed.assert_not_awaited()
