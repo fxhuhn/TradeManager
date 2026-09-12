@@ -90,6 +90,19 @@ def test_simplify_ibkr_warning_without_held_reason() -> None:
     assert result.startswith("IBKR API validation warning:")
 
 
+def test_simplify_ibkr_warning_future_local_symbol() -> None:
+    """Verifies extraction of localSymbol when symbol is empty (e.g. for futures)."""
+    from app.core.logging_setup import _simplify_ibkr_warning
+
+    raw = (
+        "IBKR API validation warning: Trade(contract=Future(conId=793356225, symbol='', "
+        "localSymbol='MNQU6', exchange='CME', currency='USD'), "
+        "order=Order(orderId=1458, action='SELL', totalQuantity=1.0, orderType='MKT', lmtPrice=714.88))"
+    )
+    result = _simplify_ibkr_warning(raw)
+    assert "SELL 1.0 MNQU6 (MKT @ 714.88) (OrderId: 1458)" in result
+
+
 def test_clean_ib_async_warnings_processor() -> None:
     """Verifies that the structlog processor simplifies matching events and passes others."""
     from app.core.logging_setup import clean_ib_async_warnings_processor

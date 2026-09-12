@@ -21,9 +21,13 @@ def _simplify_ibkr_warning(warning_message: str) -> str:
     if not warning_message.startswith("IBKR API validation warning: Trade("):
         return warning_message
 
-    # Extract symbol
+    # Extract symbol (prefer non-empty symbol, fallback to localSymbol for futures)
     symbol_match = re.search(r"symbol='([^']+)'", warning_message)
-    symbol = symbol_match.group(1) if symbol_match else "UNKNOWN"
+    if symbol_match and symbol_match.group(1):
+        symbol = symbol_match.group(1)
+    else:
+        local_symbol_match = re.search(r"localSymbol='([^']+)'", warning_message)
+        symbol = local_symbol_match.group(1) if local_symbol_match else "UNKNOWN"
 
     # Extract orderId
     order_id_match = re.search(r"orderId=(\d+)", warning_message)
