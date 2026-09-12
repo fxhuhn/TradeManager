@@ -144,7 +144,7 @@ Dieses Dokument definiert den verbindlichen Standardablauf für die sichere, sch
      ```
    - Alle neuen oder geänderten öffentlichen Symbole erhalten Google-Style Docstrings ("Why" statt "How").
 3. **Abschlussbericht (Completion Report):**
-   - Erstellung des standardisierten Berichts gemäß [.agents/AGENTS.md](.agents/AGENTS.md):
+   - Erstellung des standardisierten Refactoring-Berichts:
      * `Changed`: Umgesetzte Refactoring-Maßnahmen.
      * `Files`: Modifizierte Dateien.
      * `Validation`: Ausgeführte Test- und Gate-Befehle inklusive Status.

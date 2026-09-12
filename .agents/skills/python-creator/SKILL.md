@@ -42,7 +42,7 @@ Design and implement new modules for the **TradeManager** system — an asynchro
 ### PHASE 2: IMPLEMENTATION (The "Code" Phase)
 Write the solution adhering strictly to the **Code Standards** (as per [python.md](.agents/rules/python.md)):
 
-* **Style:** Python 3.12+, Snake_Case, **No Abbreviations** (`idx` → `index`, `ma` → `moving_average`). Allowed exceptions: `df`, `db`, `avg`, `qty`, `pnl`, `sma`, `rsi`, `sl`, `tp`, `atr`, `loc`, `sec_type`, `tif`, `exec_id`.
+* **Style:** Python 3.12+, Snake_Case, **No Abbreviations** (`idx` → `index`, `ma` → `moving_average`; see [python.md §3.1](.agents/rules/python.md#31-intention-revealing-names-strict) for canonical allowed exceptions).
 * **Type Safety:** `list[str]`, `str | int`. No `Any`.
 * **Safety:** Errors must be typed (e.g., `raise ValueError` not `Exception`).
 * **Docstrings:** Google-Style is mandatory for every function and class.

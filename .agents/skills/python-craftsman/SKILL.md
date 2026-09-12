@@ -25,32 +25,14 @@ python .agents/skills/python-craftsman/scripts/run_quality_gates.py
 
 ## Delegated Review Gates
 
-Before finalizing any task or committing changes, you must pass the code through the following validation gates **in order** (either via `python .agents/skills/python-craftsman/scripts/run_quality_gates.py` or step-by-step):
+All gate commands, flags, and tool resolutions are centrally and authoritatively managed by [run_quality_gates.py](scripts/run_quality_gates.py). Before finalizing any task or creating a commit, code must pass all 5 gates in order:
 
-### 🚀 Gate 1: Linting & Style Check
-Run ruff check and formatting verification to ensure compliance with [python.md](.agents/rules/python.md) style rules:
-```bash
-ruff check .
-ruff format --check .
-```
+- **🚀 Gate 1: Linting, Formatting & Type Safety**: Verifies zero lint errors, formatting compliance, and strict Mypy typing against [python.md](.agents/rules/python.md).
+- **🧪 Gate 2: Test Suite Verification**: Runs the comprehensive test suite with $\ge 80\%$ coverage via the `python-tester` skill (workflow `/test`).
+- **🔍 Gate 3: Architecture & Dead Code Audit**: Runs dead code and quality checks via the `python-auditor` skill (workflow `/auditor`).
+- **🛡️ Gate 4: Security & Dependency Audit**: Scans for vulnerabilities, precision issues (zero float), and package risks via the `python-security` skill (workflow `/security`).
+- **📐 Gate 5: Architecture Sync**: Validates that all public classes and functions in `app/` are documented in `architecture.md` via the `architecture-sync` skill.
 
-### 🧪 Gate 2: Test Suite Verification
-Trigger the `python-tester` skill (workflow `/test`) to design and execute robust unit/integration tests:
-```bash
-pytest tests/ -v --tb=short --cov=app --cov-report=term-missing --cov-fail-under=80
-```
-
-### 🔍 Gate 3: Architecture Audit
-Trigger the `python-auditor` skill (workflow `/auditor`) to run a complete Quality Pyramid audit (Correctness → Readability → Maintainability → Changeability) on your changes.
-
-### 🛡️ Gate 4: Security & Dependency Audit
-Execute static security analysis (`bandit`) and dependency vulnerability auditing (`pip-audit -r requirements.txt`). Trigger the `python-security` skill (workflow `/security`) to run a zero-trust audit for precision loss (using Decimal instead of float), injection risks, and serialization vulnerabilities.
-
-### 📐 Gate 5: Architecture Sync
-Verify all public classes and functions are documented:
-```bash
-python .agents/skills/architecture-sync/scripts/check_sync.py
-```
 
 ---
 
