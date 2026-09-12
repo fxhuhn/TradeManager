@@ -64,10 +64,14 @@ A task modifying code is NEVER complete if tests fail or if the quality pipeline
 ## Production Inspection & Log Analysis Invariant (MANDATORY)
 
 When querying, inspecting, or analyzing the production environment (containers, logs, metrics):
-- **DIRECT MCP CALLS ONLY**: You **MUST** use the native `call_mcp_tool` directly with `ServerName: "dozzle"` (`list_containers`, `search_container_logs`, `get_container_logs`, `get_container_stats`, `list_hosts`).
+- **DIRECT MCP CALLS ONLY**: You **MUST** use the native `call_mcp_tool` directly with `ServerName: "dozzle"`.
+  - **MANDATORY CALL SIGNATURE**: The IDE tool dispatcher strictly requires all 5 parameters: `ServerName`, `ToolName`, `Arguments`, `toolSummary`, and `toolAction`. Calls lacking `toolAction` or `toolSummary` will fail parser validation.
+  - **CANONICAL TOOL REFERENCE**: Refer exclusively to [.agents/plugins/dozzle-mcp/instructions.md](file:///Users/produktmanagement/Python/github/TradeManager/.agents/plugins/dozzle-mcp/instructions.md) for the authoritative list of available tools and parameter schemas.
 - **NO BROWSER / WEB AUTOMATION**: You **MUST NEVER** invoke `browser_subagent` or open web pages to inspect Dozzle, containers, or logs. Browser tools are exclusively for web UI testing, never for server administration or production inspection.
 - **NO SCRATCH SCRIPTS**: You **MUST NEVER** create or execute ad-hoc Python scripts, scratch files (e.g. `dozzle_client.py`), or shell curl/urllib commands to query logs or container states. Direct MCP calls are zero-overhead, faster, and required.
 - **FAIL-STOP ON ERROR**: If a Dozzle MCP call encounters an error or is unreachable, do **NOT** attempt alternative routes. Report the exact error output directly to the user immediately.
+
+
 
 
 

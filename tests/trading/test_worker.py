@@ -929,6 +929,63 @@ async def test_transmit_entry_and_child_orders_tick_rounding_and_rejections(
 
 
 @pytest.mark.asyncio
+async def test_place_and_verify_order_validation_error_not_read_only(
+    db: aiosqlite.Connection, test_config: Config
+) -> None:
+    """Verifies that TWS code 321 with a request validation error (like missing expiry) is NOT marked as Read-Only."""
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price,
+            tif, strategy_name, status, retry_count
+        ) VALUES
+        (2001, NULL, NULL, 'TG_VAL_ERR', 'ACC1', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 10, 'MKT', NULL, 'DAY', 'Strat', 'Created', 0),
+        (2002, NULL, 2001, 'TG_VAL_ERR', 'ACC1', 'TP', 'AAPL', 'STK', 'SMART', 'SELL', 10, 'LMT', 150.0, 'GTC', 'Strat', 'Created', 0)
+        """
+    )
+    await db.commit()
+
+    mock_ib = MagicMock()
+    mock_ib.isConnected.return_value = True
+
+    mock_order_state = MagicMock()
+    mock_order_state.initMarginAfter = "100.0"
+    mock_order_state.maintMarginAfter = "50.0"
+    mock_order_state.equityWithLoanAfter = "1000.0"
+    mock_ib.whatIfOrderAsync = AsyncMock(return_value=mock_order_state)
+
+    mock_trade_entry = MagicMock()
+    mock_trade_entry.orderStatus.status = "Submitted"
+
+    mock_trade_child = MagicMock()
+    mock_trade_child.orderStatus.status = "Inactive"
+    log_err = MagicMock()
+    log_err.errorCode = 321
+    log_err.message = "Error validating request.-'bD' : cause - Please enter a local symbol or an expiry"
+    log_err.status = "Inactive"
+    mock_trade_child.log = [log_err]
+
+    mock_ib.placeOrder.side_effect = [mock_trade_entry, mock_trade_child]
+    mock_ib.client.getReqId.side_effect = [2001, 2002]
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+    mock_notifier.send_bracket_order_submitted = AsyncMock()
+    mock_notifier.send_margin_utilization_warning = AsyncMock()
+    mock_notifier.send_high_margin_usage_warning = AsyncMock()
+
+    with patch("app.trading.worker.asyncio.sleep", AsyncMock()):
+        await process_trade_group(db, mock_ib, "TG_VAL_ERR", mock_notifier, test_config)
+
+    mock_notifier.send_order_failed.assert_called_once()
+    failed_call = mock_notifier.send_order_failed.call_args[1]
+    assert "READ-ONLY" not in failed_call["reason"]
+    assert "Please enter a local symbol or an expiry" in failed_call["reason"]
+    assert failed_call["is_fatal"] is False
+
+
+@pytest.mark.asyncio
 async def test_execution_worker_cancelled_error(test_config: Config) -> None:
     """Verifies execution_worker handles asyncio.CancelledError on task cancellation (lines 75-77)."""
     from app.trading.worker import execution_worker

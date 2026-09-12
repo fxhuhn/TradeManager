@@ -29,6 +29,11 @@ def test_make_future_contract() -> None:
     assert contract_month.symbol == "MNQ"
     assert contract_month.lastTradeDateOrContractMonth == "20260918"
 
+    import pytest
+
+    with pytest.raises(ValueError, match="Cannot build Future contract for 'MNQ'"):
+        make_future_contract("MNQ", exchange="CME")
+
 
 def test_make_contract_for_order() -> None:
     """Prüft, ob je nach sec_type ein Stock- oder Future-Vertrag erstellt wird."""

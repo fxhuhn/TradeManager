@@ -80,6 +80,9 @@ def make_future_contract(
 
     Unterstützt sowohl konkrete LocalSymbols (z. B. 'MNQU6') als auch
     Basis-Symbole mit Verfallsmonat (z. B. symbol='MNQ', contract_month='20260918').
+
+    Raises:
+        ValueError: Wenn weder ein konkretes LocalSymbol mit Ziffern noch ein Verfallsmonat übergeben wurde.
     """
     clean_symbol = normalize_symbol(symbol)
     if len(clean_symbol) > 3 and any(char.isdigit() for char in clean_symbol):
@@ -87,6 +90,11 @@ def make_future_contract(
             localSymbol=clean_symbol,
             exchange=exchange,
             currency=currency,
+        )
+    if not contract_month:
+        raise ValueError(
+            f"Cannot build Future contract for '{symbol}': "
+            "a localSymbol (e.g. 'MNQU6') or contract_month (e.g. '20260918') is required."
         )
     return Future(
         symbol=clean_symbol,

@@ -307,3 +307,64 @@ async def test_unmapped_symbol_remains_equity(db, test_config, monkeypatch) -> N
         assert row["quantity"] == 25
 
     mock_resolve.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_future_transformation_resolution_failure_fails_closed(
+    db, test_config, monkeypatch
+) -> None:
+    """Prüft, dass bei fehlschlagender Kontraktauflösung (z.B. Timeout/Disconnect) die Gruppe abgebrochen wird (Fail-Closed)."""
+    mock_ib = MagicMock()
+    mock_ib.isConnected.return_value = True
+
+    mock_resolve = AsyncMock(side_effect=TimeoutError("Timeout resolving contract"))
+    monkeypatch.setattr(
+        "app.services.importer.resolve_active_future_contract", mock_resolve
+    )
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_importer_info = AsyncMock()
+
+    raw_legs = [
+        LegRow(
+            trade_group_id="TG_FAIL_CLOSED_1",
+            bracket_role="ENTRY",
+            symbol="QQQ",
+            sec_type="STK",
+            exchange="SMART",
+            account_id="U19605236",
+            action="BUY",
+            quantity=10,
+            order_type="MKT",
+            target_price=Decimal("700.00"),
+            tif="DAY",
+            strategy_name="BounceBandit",
+        ),
+    ]
+
+    queue: asyncio.Queue[str] = asyncio.Queue()
+    result = await _process_and_upsert_group(
+        db=db,
+        interactive_brokers=mock_ib,
+        trade_group_id="TG_FAIL_CLOSED_1",
+        raw_legs=raw_legs,
+        queue=queue,
+        notifier=mock_notifier,
+        config=test_config,
+    )
+
+    assert result is False
+
+    async with db.execute(
+        "SELECT COUNT(*) AS cnt FROM orders WHERE trade_group_id = 'TG_FAIL_CLOSED_1'"
+    ) as cursor:
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row["cnt"] == 0
+
+    assert queue.qsize() == 0
+
+    mock_notifier.send_importer_info.assert_called_once()
+    call_kwargs = mock_notifier.send_importer_info.call_args[1]
+    assert call_kwargs["title"] == "KONTRAKT-AUFLÖSUNG FEHLGESCHLAGEN"
+    assert "Fail-Closed" in call_kwargs["status"]

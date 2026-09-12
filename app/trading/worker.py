@@ -1103,10 +1103,10 @@ async def _handle_order_rejection(
         )
 
     reason_upper = clean_error_msg.upper()
-    if "Read-Only mode" in error_msg or "321" in error_msg or tws_code == 321:
+    if "READ-ONLY" in reason_upper or "READ ONLY" in reason_upper:
         formatted_reason = f"API im READ-ONLY Modus. Details: {clean_error_msg}"
         is_fatal = True
-        code = 321
+        code = 321 if tws_code == 0 else tws_code
     elif (
         "LOGIN TO CLIENT PORTAL" in reason_upper
         or "VERIFY USING THE TOKEN" in reason_upper

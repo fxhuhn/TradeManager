@@ -502,17 +502,31 @@ async def _process_and_upsert_group(
             active_contract = await resolve_active_future_contract(
                 interactive_brokers, symbol=target_future_symbol, exchange="CME"
             )
-            future_symbol = active_contract.localSymbol or target_future_symbol
+            future_symbol = active_contract.localSymbol
+            if not future_symbol:
+                raise ValueError(
+                    f"Resolved future contract for '{target_future_symbol}' has no localSymbol"
+                )
         except Exception as resolve_error:
             logger.error(
-                "Failed to resolve active future contract",
+                "Failed to resolve active future contract. Aborting trade group import.",
                 error=str(resolve_error),
                 strategy=strategy,
                 source_symbol=source_symbol,
                 target_future_symbol=target_future_symbol,
                 trade_group_id=trade_group_id,
             )
-            future_symbol = target_future_symbol
+            await notifier.send_importer_info(
+                file_name=trade_group_id,
+                status="Übersprungen (Fail-Closed)",
+                details=(
+                    f"Future-Auflösung für {source_symbol} ➔ {target_future_symbol} an CME "
+                    f"fehlgeschlagen: {resolve_error}. Order-Import abgebrochen."
+                ),
+                emoji="🚨",
+                title="KONTRAKT-AUFLÖSUNG FEHLGESCHLAGEN",
+            )
+            return False
 
         logger.info(
             "Transforming equity order to future contract",
