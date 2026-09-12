@@ -1343,7 +1343,7 @@ async def test_provide_status_report_dual_socket_and_broker_status(
     report = await orchestrator.provide_status_report()
     assert "• <b>TWS/Gateway-Socket:</b> ✅ Verbunden" in report
     assert (
-        "• <b>Broker-Server (WAN):</b> ❌ Getrennt (Code 1100: Keine Broker-Verbindung)"
+        "• <b>Broker-Server (WAN):</b> ❌ Getrennt (IBKR offline / Reconnect nötig)"
         in report
     )
 

@@ -162,7 +162,7 @@ class TradingSystemOrchestrator:
         elif is_broker_connected:
             broker_display = "✅ Verbunden"
         else:
-            broker_display = "❌ Getrennt (Code 1100: Keine Broker-Verbindung)"
+            broker_display = "❌ Getrennt (IBKR offline / Reconnect nötig)"
 
         docker_socket_display = (
             "✅ Verfügbar"
