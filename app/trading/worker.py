@@ -1242,13 +1242,26 @@ async def _reduce_exit_order_quantity(
 def _get_live_position_quantity(
     interactive_brokers: IB, account_id: str, symbol: str
 ) -> Decimal:
-    """Ermittelt den aktuellen Depotbestand für ein bestimmtes Symbol und Account."""
+    """Ermittelt den aktuellen Depotbestand für ein bestimmtes Symbol und Account.
+
+    Unterstützt sowohl Standard-Aktien (symbol) als auch Futures, bei denen
+    IBKR das Root-Symbol (z. B. MNQ) und das Kontrakt-Symbol (z. B. MNQU6) trennt.
+    """
     target_symbol = normalize_symbol(symbol)
     for position in interactive_brokers.positions():
-        if (
-            position.account == account_id
-            and normalize_symbol(position.contract.symbol) == target_symbol
-        ):
+        if position.account != account_id:
+            continue
+        raw_symbol = getattr(position.contract, "symbol", "")
+        contract_symbol = (
+            normalize_symbol(raw_symbol) if isinstance(raw_symbol, str) else ""
+        )
+        raw_local_symbol = getattr(position.contract, "localSymbol", "")
+        contract_local_symbol = (
+            normalize_symbol(raw_local_symbol)
+            if isinstance(raw_local_symbol, str)
+            else ""
+        )
+        if target_symbol in (contract_symbol, contract_local_symbol):
             return Decimal(str(position.position))
     return Decimal("0.0")
 

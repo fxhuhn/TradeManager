@@ -429,12 +429,27 @@ async def _recover_created_order(
 
 
 def _has_live_position(interactive_brokers: IB, account_id: str, symbol: str) -> bool:
-    """Prüft, ob für das Symbol eine offene Position im Depot vorhanden ist."""
+    """Prüft, ob für das Symbol eine offene Position im Depot vorhanden ist.
+
+    Unterstützt sowohl Standard-Aktien (symbol) als auch Futures, bei denen
+    IBKR das Root-Symbol (z. B. MNQ) und das Kontrakt-Symbol (z. B. MNQU6) trennt.
+    """
     target_symbol = normalize_symbol(symbol)
     for position in interactive_brokers.positions():
+        if position.account != account_id:
+            continue
+        raw_symbol = getattr(position.contract, "symbol", "")
+        contract_symbol = (
+            normalize_symbol(raw_symbol) if isinstance(raw_symbol, str) else ""
+        )
+        raw_local_symbol = getattr(position.contract, "localSymbol", "")
+        contract_local_symbol = (
+            normalize_symbol(raw_local_symbol)
+            if isinstance(raw_local_symbol, str)
+            else ""
+        )
         if (
-            position.account == account_id
-            and normalize_symbol(position.contract.symbol) == target_symbol
+            target_symbol in (contract_symbol, contract_local_symbol)
             and abs(position.position) > 0
         ):
             return True
@@ -555,7 +570,41 @@ async def reconcile_broker_positions(
         if broker_qty <= Decimal("0.0"):
             continue
 
-        symbol = normalize_symbol(pos.contract.symbol)
+        raw_sec_type = getattr(pos.contract, "secType", None)
+        sec_type = (
+            raw_sec_type.strip().upper()
+            if isinstance(raw_sec_type, str) and raw_sec_type.strip()
+            else "STK"
+        )
+
+        raw_exchange = getattr(pos.contract, "exchange", None)
+        exchange = (
+            raw_exchange.strip().upper()
+            if isinstance(raw_exchange, str) and raw_exchange.strip()
+            else ("CME" if sec_type == "FUT" else "SMART")
+        )
+
+        raw_local_symbol = getattr(pos.contract, "localSymbol", None)
+        local_symbol = (
+            normalize_symbol(raw_local_symbol)
+            if isinstance(raw_local_symbol, str)
+            else ""
+        )
+        raw_symbol = getattr(pos.contract, "symbol", "")
+        root_symbol = (
+            normalize_symbol(raw_symbol) if isinstance(raw_symbol, str) else ""
+        )
+
+        if sec_type == "FUT" and local_symbol:
+            if local_symbol in db_positions:
+                symbol = local_symbol
+            elif root_symbol in db_positions:
+                symbol = root_symbol
+            else:
+                symbol = local_symbol
+        else:
+            symbol = root_symbol
+
         account_id = pos.account
         avg_cost = Decimal(str(round(float(pos.avgCost), 4)))
 
@@ -566,6 +615,8 @@ async def reconcile_broker_positions(
             logger.info(
                 "Unassigned broker position discrepancy detected. Recovering to DB.",
                 symbol=symbol,
+                sec_type=sec_type,
+                exchange=exchange,
                 broker_qty=float(broker_qty),
                 db_net_qty=float(db_net_qty),
                 delta_qty=float(delta_qty),
@@ -594,8 +645,8 @@ async def reconcile_broker_positions(
                         account_id,
                         "ENTRY",
                         symbol,
-                        "STK",
-                        "SMART",
+                        sec_type,
+                        exchange,
                         "BUY",
                         int(delta_qty),
                         "MKT",

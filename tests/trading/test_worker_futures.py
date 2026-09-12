@@ -152,3 +152,75 @@ async def test_worker_futures_fail_closed_on_cushion_violation(db, test_config) 
 
     # Verifiziere Notifier-Alert
     mock_notifier.send_order_failed.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_worker_process_futures_exit_order_with_matching_local_symbol(
+    db, test_config
+) -> None:
+    """Verifiziert, dass eine Future EXIT-Order den Depotbestand anhand des localSymbol MNQU6 erkennt."""
+    # Parent ENTRY als Filled in DB, Child EXIT als Created
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status, strategy_name)
+        VALUES
+            (6001, 'TG_BB_EXIT_TEST', 'U19605236', 'ENTRY', 'MNQU6', 'FUT', 'CME', 'BUY', 1, 'MKT', NULL, 'Filled', 'BounceBandit'),
+            (6002, 'TG_BB_EXIT_TEST', 'U19605236', 'EXIT', 'MNQU6', 'FUT', 'CME', 'SELL', 1, 'MKT', NULL, 'Created', 'BounceBandit')
+        """
+    )
+    await db.commit()
+
+    config = test_config
+    mock_notifier = MagicMock()
+    mock_notifier.send_importer_info = AsyncMock()
+    mock_notifier.send_message = AsyncMock()
+    mock_notifier.send_bracket_order_submitted = AsyncMock()
+
+    mock_ib = MagicMock()
+    mock_ib.isConnected.return_value = True
+
+    # IBKR Position hat contract.symbol = "MNQ" und contract.localSymbol = "MNQU6"
+    mock_pos = MagicMock()
+    mock_pos.account = "U19605236"
+    mock_pos.contract.symbol = "MNQ"
+    mock_pos.contract.localSymbol = "MNQU6"
+    mock_pos.position = 1.0
+    mock_ib.positions.return_value = [mock_pos]
+
+    placed_trades: list[tuple] = []
+
+    def mock_place_order(contract, order):
+        trade = MagicMock(spec=Trade)
+        trade.order = order
+        trade.contract = contract
+        trade.orderStatus = MagicMock(spec=OrderStatus)
+        trade.orderStatus.status = "Submitted"
+        trade.log = []
+        placed_trades.append((contract, order, trade))
+        return trade
+
+    mock_ib.placeOrder.side_effect = mock_place_order
+
+    await process_trade_group(
+        db=db,
+        interactive_brokers=mock_ib,
+        trade_group_id="TG_BB_EXIT_TEST",
+        notifier=mock_notifier,
+        config=config,
+    )
+
+    # Verifiziere, dass die EXIT-Order NICHT storniert wurde, sondern platziert wurde
+    assert len(placed_trades) == 1
+    exit_contract, exit_order, _ = placed_trades[0]
+    assert exit_contract.secType == "FUT"
+    assert exit_contract.localSymbol == "MNQU6"
+    assert exit_order.action == "SELL"
+    assert exit_order.totalQuantity == 1
+
+    # In DB muss Order jetzt 'Submitted' sein
+    async with db.execute(
+        "SELECT status FROM orders WHERE trade_group_id = 'TG_BB_EXIT_TEST' AND bracket_role = 'EXIT'"
+    ) as cursor:
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row["status"] == "Submitted"
