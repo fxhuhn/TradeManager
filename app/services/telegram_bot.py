@@ -14,7 +14,11 @@ import structlog
 
 from app.core.config import Config
 from app.services.container_manager import DockerContainerManager
-from app.services.notifier import DEFAULT_BOT_KEYBOARD, TelegramNotifier
+from app.services.notifier import (
+    DEFAULT_BOT_KEYBOARD,
+    TelegramNotifier,
+    build_tree_message,
+)
 
 logger = structlog.get_logger()
 
@@ -302,10 +306,16 @@ class TelegramCommandListener:
             remaining_seconds = int(
                 self._restart_debounce_seconds - time_since_last_restart
             )
-            debounce_message = (
-                "⚠️ <b>Neustart bereits in Arbeit</b>\n"
-                f"Ein Neustart wurde vor kurzem ausgelöst. Bitte warte noch "
-                f"<b>{remaining_seconds}s</b> und halte Dein Smartphone für den 2FA-Push bereit."
+            debounce_message = build_tree_message(
+                title="Neustart bereits in Arbeit",
+                emoji="⚠️",
+                rows=[
+                    ("Wartezeit", f"Noch {remaining_seconds}s"),
+                    (
+                        "Hinweis",
+                        "Smartphone für den IBKR 2FA-Push bereithalten.",
+                    ),
+                ],
             )
             await self._notifier.send_message(
                 debounce_message, reply_markup=DEFAULT_BOT_KEYBOARD
@@ -315,10 +325,17 @@ class TelegramCommandListener:
         self._last_restart_timestamp = now
         container_name = self._config.telegram.ibkr_container_name
 
-        initiation_message = (
-            f"⏳ <b>IBKR-Neustart eingeleitet</b>\n"
-            f"Container <code>{container_name}</code> wird neu gestartet...\n\n"
-            f"📲 <i>Bitte halte jetzt Dein Smartphone für den IBKR 2FA-Push bereit!</i>"
+        initiation_message = build_tree_message(
+            title="IBKR-Neustart eingeleitet",
+            emoji="⏳",
+            context=container_name,
+            rows=[
+                ("Status", "Container wird neu gestartet..."),
+                (
+                    "Aktion",
+                    "Bitte halte jetzt Dein Smartphone für den IBKR 2FA-Push bereit!",
+                ),
+            ],
         )
         await self._notifier.send_message(
             initiation_message, reply_markup=DEFAULT_BOT_KEYBOARD
@@ -329,20 +346,31 @@ class TelegramCommandListener:
         )
 
         if not success:
-            failure_message = (
-                f"❌ <b>Fehler beim Neustart von <code>{container_name}</code>:</b>\n"
-                f"{detail_message}"
+            failure_message = build_tree_message(
+                title="Fehler beim Neustart",
+                emoji="❌",
+                context=container_name,
+                rows=[
+                    ("Details", detail_message),
+                ],
             )
             await self._notifier.send_message(
                 failure_message, reply_markup=DEFAULT_BOT_KEYBOARD
             )
             return
 
-        success_message = (
-            f"🔄 <b>Container <code>{container_name}</code> neu gestartet.</b>\n"
-            f"IBC führt den Login durch.\n"
-            f"📲 <b>Sobald der 2FA-Push auf dem Smartphone ankommt, bitte bestätigen!</b>\n\n"
-            f"TradeManager löst nun unmittelbar die Wiederverbindung aus."
+        success_message = build_tree_message(
+            title="Container neu gestartet",
+            emoji="🔄",
+            context=container_name,
+            rows=[
+                ("Status", "IBC führt den Login durch"),
+                ("Aktion", "2FA-Push auf Smartphone bestätigen!"),
+                (
+                    "TradeManager",
+                    "Löst nun unmittelbar die Wiederverbindung aus.",
+                ),
+            ],
         )
         await self._notifier.send_message(
             success_message, reply_markup=DEFAULT_BOT_KEYBOARD
@@ -374,11 +402,20 @@ class TelegramCommandListener:
 
         # Fallback Standard-Status
         is_socket_ok = self._container_manager.is_available()
-        status_message = (
-            "📊 <b>TradeManager Status</b>\n"
-            f"• Docker Socket: {'✅ Verfügbar' if is_socket_ok else '❌ Nicht gemountet'}\n"
-            f"• Ziel-Container: <code>{self._config.telegram.ibkr_container_name}</code>\n"
-            f"• Befehle aktiv: ✅"
+        status_message = build_tree_message(
+            title="TradeManager Status",
+            emoji="📊",
+            rows=[
+                (
+                    "Docker Socket",
+                    "✅ Verfügbar" if is_socket_ok else "❌ Nicht gemountet",
+                ),
+                (
+                    "Ziel-Container",
+                    f"<code>{self._config.telegram.ibkr_container_name}</code>",
+                ),
+                ("Befehle aktiv", "✅"),
+            ],
         )
         await self._notifier.send_message(
             status_message, reply_markup=DEFAULT_BOT_KEYBOARD
@@ -386,11 +423,21 @@ class TelegramCommandListener:
 
     async def _send_help_reply(self) -> None:
         """Sendet Hilfetexte zu verfügbaren Befehlen inklusive Keyboard-Buttons."""
-        help_message = (
-            "🤖 <b>TradeManager Bot-Befehle</b>\n\n"
-            "• <code>/status</code> oder <b>📊 Status</b>: Fragt den aktuellen Systemstatus ab.\n"
-            "• <code>/restart_ibkr</code> oder <b>🔄 IBKR Neustart</b>: Startet den IBKR-Container neu und triggert 2FA & Reconnect.\n"
-            "• <code>/help</code>: Zeigt diese Hilfemeldung an."
+        help_message = build_tree_message(
+            title="Bot-Befehle",
+            system="TradeManager",
+            emoji="🤖",
+            rows=[
+                (
+                    "/status",
+                    "Aktuellen Systemstatus abfragen (oder Button 📊 Status)",
+                ),
+                (
+                    "/restart_ibkr",
+                    "IBKR-Container neu starten & 2FA/Reconnect triggern (oder Button 🔄 IBKR Neustart)",
+                ),
+                ("/help", "Diese Hilfemeldung anzeigen"),
+            ],
         )
         await self._notifier.send_message(
             help_message, reply_markup=DEFAULT_BOT_KEYBOARD

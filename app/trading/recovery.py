@@ -22,7 +22,7 @@ from ib_async import IB, Trade
 from app.core.config import Config
 from app.core.db import transaction
 from app.core.models import OrderRow, order_row_from_db_row, parse_positive_decimal
-from app.services.notifier import TelegramNotifier
+from app.services.notifier import TelegramNotifier, build_tree_message
 from app.trading.order_builder import normalize_symbol
 
 logger = structlog.get_logger()
@@ -389,9 +389,20 @@ async def _cancel_ghost_order(
             "UPDATE orders SET status = 'Cancelled' WHERE order_id = ?",
             (order_id,),
         )
-    await notifier.send_message(
-        f"⚠️ <b>GHOST ORDER RECOVERED</b> | <code>{order.symbol}</code> ({order.bracket_role})"
+    message = build_tree_message(
+        title="GHOST ORDER RECOVERED",
+        context=order.symbol,
+        emoji="⚠️",
+        rows=[
+            ("Order-ID", f"<code>{order_id}</code>"),
+            ("Rolle", f"<code>{order.bracket_role}</code>"),
+            (
+                "Status",
+                "In DB als 'Submitted', nicht in TWS gefunden. Auf 'Cancelled' gesetzt.",
+            ),
+        ],
     )
+    await notifier.send_message(message)
 
 
 async def _recover_created_order(

@@ -26,7 +26,7 @@ from ib_async import IB, CommissionReport, Fill, Trade
 from app.core.config import Config
 from app.core.db import transaction
 from app.core.models import parse_positive_decimal
-from app.services.notifier import TelegramNotifier
+from app.services.notifier import TelegramNotifier, build_tree_message
 from app.trading.error_codes import ErrorClass, classify_error_code
 from app.trading.order_builder import symbols_match
 
@@ -283,10 +283,13 @@ class TwsCallbacksManager:
     async def _send_emergency_alert(self, title: str, details: str) -> None:
         """Sendet einen Notfall-Alarm an Telegram bei unbehandelten Ausnahmen in Callbacks."""
         try:
-            html = (
-                f"<b>{title}</b>\n\n"
-                f"{details}\n\n"
-                f"<i>Zeit: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</i>"
+            html = build_tree_message(
+                title=f"NOTFALL-ALARM: {title.upper()}",
+                emoji="🚨",
+                rows=[
+                    ("Details", f"<i>{details.strip()}</i>"),
+                    ("Zeit", datetime.now().strftime("%d.%m.%Y %H:%M:%S")),
+                ],
             )
             await self.notifier.send_message(html)
         except Exception as alert_error:
@@ -1265,6 +1268,7 @@ class TwsCallbacksManager:
                 self.notifier.send_system_status(
                     title="GEPLANTER NEUSTART (Gateway wird neu gestartet)",
                     emoji="⏳",
+                    system="IBKR Gateway",
                 )
             )
         else:
@@ -1273,6 +1277,7 @@ class TwsCallbacksManager:
                 self.notifier.send_system_status(
                     title="VERBINDUNGSABBRUCH",
                     emoji="🚨",
+                    system="IBKR Gateway",
                 )
             )
         asyncio.create_task(self.run_reconnect_callback())

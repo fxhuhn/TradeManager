@@ -15,7 +15,7 @@ import structlog
 
 from app.core.config import Config
 from app.core.db import transaction
-from app.services.notifier import TelegramNotifier
+from app.services.notifier import TelegramNotifier, build_tree_message
 
 logger = structlog.get_logger()
 
@@ -150,6 +150,17 @@ async def _process_retry_limit_exceeded(
             (order_id,),
         )
 
-    await notifier.send_message(
-        f"🚨 <b>RETRY-LIMIT EXCEEDED</b> | <code>{symbol}</code> ({bracket_role})"
+    message = build_tree_message(
+        title="RETRY-LIMIT EXCEEDED",
+        context=symbol,
+        emoji="🚨",
+        rows=[
+            ("Order-ID", f"<code>{order_id}</code>"),
+            ("Rolle", f"<code>{bracket_role}</code>"),
+            (
+                "Status",
+                f"Maximale Anzahl an Sendeversuchen ({max_retries}) überschritten (Status: Error).",
+            ),
+        ],
     )
+    await notifier.send_message(message)

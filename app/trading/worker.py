@@ -26,7 +26,7 @@ from app.core.logging_setup import (
     TAG_REAUTH_WAIT,
 )
 from app.core.models import OrderRow, order_row_from_db_row
-from app.services.notifier import TelegramNotifier
+from app.services.notifier import TelegramNotifier, build_tree_message
 from app.trading.error_codes import (
     is_market_closed_for_symbol,
     is_reauthorization_error,
@@ -94,11 +94,15 @@ async def execution_worker(
                 tg_id_str = (
                     trade_group_id if trade_group_id is not None else "Unbekannt"
                 )
-                await notifier.send_message(
-                    f"🚨 <b>KRITISCHER FEHLER IM EXECUTION WORKER</b>\n"
-                    f"├─ <b>Trade-Gruppe:</b> <code>{tg_id_str}</code>\n"
-                    f"└─ <b>Details:</b> <i>{exception}</i>"
+                worker_err_msg = build_tree_message(
+                    title="KRITISCHER FEHLER IM EXECUTION WORKER",
+                    emoji="🚨",
+                    rows=[
+                        ("Trade-Gruppe", f"<code>{tg_id_str}</code>"),
+                        ("Details", f"<i>{exception}</i>"),
+                    ],
                 )
+                await notifier.send_message(worker_err_msg)
             except Exception as tg_exception:
                 logger.critical(
                     "Failed to send Telegram error notification",
@@ -224,12 +228,19 @@ async def process_trade_group(
             error=str(unhandled),
         )
         try:
-            await notifier.send_message(
-                f"🚨 <b>KRITISCHER SYSTEMFEHLER BEI ORDER-VERARBEITUNG</b>\n\n"
-                f"├─ <b>Trade-Gruppe:</b> <code>{trade_group_id}</code>\n"
-                f"└─ <b>Fehler:</b> <i>{unhandled}</i>\n\n"
-                f"<i>Die Verarbeitung wurde unterbrochen. Bitte System manuell prüfen!</i>"
+            unhandled_err_msg = build_tree_message(
+                title="KRITISCHER SYSTEMFEHLER BEI ORDER-VERARBEITUNG",
+                context=trade_group_id,
+                emoji="🚨",
+                rows=[
+                    ("Fehler", f"<i>{unhandled}</i>"),
+                    (
+                        "Hinweis",
+                        "Verarbeitung unterbrochen. Bitte System manuell prüfen!",
+                    ),
+                ],
             )
+            await notifier.send_message(unhandled_err_msg)
         except Exception as tg_err:
             logger.critical(
                 "Failed to send emergency Telegram message",

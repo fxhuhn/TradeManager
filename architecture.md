@@ -182,6 +182,7 @@ This section provides a detailed reference of all public classes and functions i
 - `get_next_temp_id` (Function): Queries DB to increment temporary execution sequence.
 
 ### 4.8 Module: `app.services.notifier`
+- `build_tree_message` (Function): Formats standardized Telegram tree messages with box-drawing glyphs, strictly separating structure from content.
 - `AsyncTelegramRateLimiter` (Class): Implements message throttling for the Telegram API.
   - `wait` (Method)
 - `TelegramNotifier` (Class): High-level Telegram notification service.

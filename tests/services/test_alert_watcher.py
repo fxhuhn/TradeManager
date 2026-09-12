@@ -235,9 +235,12 @@ async def test_check_dead_orders_triggers_alert_when_threshold_exceeded(
     await check_dead_orders(temp_db, mock_notifier, state, current_time=trading_time)
 
     # Assert
-    mock_notifier.send_message.assert_called_once_with(
-        "⚠️ <b>DEAD ORDER</b> | <code>AAPL</code>"
-    )
+    mock_notifier.send_message.assert_called_once()
+    called_msg = mock_notifier.send_message.call_args[0][0]
+    assert "⚠️ <b>DEAD ORDER</b> | <code>AAPL</code>" in called_msg
+    assert "├─ <b>Order-ID:</b> <code>1</code>" in called_msg
+    assert "├─ <b>Typ:</b> <code>MKT</code>" in called_msg
+    assert "└─ <b>Status:</b> Keine Ausführung nach Timeout (15 Min)." in called_msg
     assert state.is_order_reported(1)
 
 
@@ -355,9 +358,12 @@ async def test_check_high_slippage_sends_alert(temp_db: aiosqlite.Connection) ->
     )
 
     # Assert
-    mock_notifier.send_message.assert_called_once_with(
-        "📉 <b>HIGH SLIPPAGE</b> | <code>AAPL</code>"
-    )
+    mock_notifier.send_message.assert_called_once()
+    called_msg = mock_notifier.send_message.call_args[0][0]
+    assert "📉 <b>HIGH SLIPPAGE</b> | <code>AAPL</code>" in called_msg
+    assert "├─ <b>Trade-Gruppe:</b> <code>G1</code>" in called_msg
+    assert "├─ <b>Slippage:</b> <code>1.05</code>" in called_msg
+    assert "└─ <b>Limit:</b> <code>1.00</code>" in called_msg
     assert state.is_group_reported("G1")
 
 

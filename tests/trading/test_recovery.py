@@ -172,6 +172,8 @@ async def test_recovery_recovers_filled_entry_with_active_child(
     Prüft, dass eine ENTRY-Order, die in TWS nicht mehr aktiv oder abgeschlossen gelistet ist,
     aber eine aktive Child-Order (z. B. TP) besitzt, korrekt als 'Filled' rekonstruiert wird.
     """
+    await db.execute("DELETE FROM orders")
+    await db.commit()
     await db.execute(
         """
         INSERT INTO orders (
@@ -241,6 +243,7 @@ async def test_recovery_recovers_filled_entry_with_active_child(
 
     mock_notifier = MagicMock()
     mock_notifier.send_order_filled = AsyncMock(return_value=True)
+    mock_notifier.send_message = AsyncMock(return_value=True)
     mock_queue = asyncio.Queue()
     mock_trigger_settlement = AsyncMock()
 

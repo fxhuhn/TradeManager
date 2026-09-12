@@ -19,7 +19,7 @@ import structlog
 from ib_async import IB
 
 from app.core.config import Config
-from app.services.notifier import TelegramNotifier
+from app.services.notifier import TelegramNotifier, build_tree_message
 from app.trading.recovery import run_recovery
 
 logger = structlog.get_logger()
@@ -214,7 +214,16 @@ async def _evaluate_and_alert_single_slippage_row(
         return
 
     symbol = str(row["symbol"])
-    message_content = f"📉 <b>HIGH SLIPPAGE</b> | <code>{symbol}</code>"
+    message_content = build_tree_message(
+        title="HIGH SLIPPAGE",
+        context=symbol,
+        emoji="📉",
+        rows=[
+            ("Trade-Gruppe", f"<code>{trade_group_id}</code>"),
+            ("Slippage", f"<code>{price_diff_slippage:.2f}</code>"),
+            ("Limit", f"<code>{slippage_limit:.2f}</code>"),
+        ],
+    )
     logger.warning(
         "High slippage detected",
         trade_group_id=trade_group_id,
@@ -370,11 +379,18 @@ async def check_hanging_orders(
                     trade_group_id=trade_group_id,
                     symbol=symbol,
                 )
-                message = (
-                    f"⚠️ <b>HÄNGENDE ORDER (Status: Created)</b> | <code>{symbol}</code>\n"
-                    f"├─ <b>Order-ID:</b> <code>{order_id}</code>\n"
-                    f"├─ <b>Trade-Gruppe:</b> <code>{trade_group_id}</code>\n"
-                    f"└─ <b>Hinweis:</b> Order verweilt länger als {threshold_minutes} Minuten in 'Created'."
+                message = build_tree_message(
+                    title="HÄNGENDE ORDER (Status: Created)",
+                    context=symbol,
+                    emoji="⚠️",
+                    rows=[
+                        ("Order-ID", f"<code>{order_id}</code>"),
+                        ("Trade-Gruppe", f"<code>{trade_group_id}</code>"),
+                        (
+                            "Hinweis",
+                            f"Order verweilt länger als {threshold_minutes} Minuten in 'Created'.",
+                        ),
+                    ],
                 )
                 if await notifier.send_message(message):
                     state.mark_hanging_order_reported(order_id)
@@ -447,7 +463,19 @@ async def _process_single_potential_dead_order(
     if alert_state.is_order_reported(order_id):
         return
 
-    message_content = f"⚠️ <b>DEAD ORDER</b> | <code>{symbol}</code>"
+    message_content = build_tree_message(
+        title="DEAD ORDER",
+        context=symbol,
+        emoji="⚠️",
+        rows=[
+            ("Order-ID", f"<code>{order_id}</code>"),
+            ("Typ", f"<code>{order_type}</code>"),
+            (
+                "Status",
+                f"Keine Ausführung nach Timeout ({session.threshold_minutes} Min).",
+            ),
+        ],
+    )
     logger.warning(
         "Dead order detected",
         order_id=order_id,

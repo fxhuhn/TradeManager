@@ -1599,6 +1599,7 @@ async def test_loc_verification_edge_cases_and_on_disconnected(
             mock_notifier.send_system_status.assert_called_with(
                 title="GEPLANTER NEUSTART (Gateway wird neu gestartet)",
                 emoji="⏳",
+                system="IBKR Gateway",
             )
 
             # Unplanned restart on Tuesday at 12:02 (wrong day)
@@ -1609,6 +1610,7 @@ async def test_loc_verification_edge_cases_and_on_disconnected(
             mock_notifier.send_system_status.assert_called_with(
                 title="VERBINDUNGSABBRUCH",
                 emoji="🚨",
+                system="IBKR Gateway",
             )
 
             # Unplanned restart on Sunday at 14:00 (wrong time)
@@ -1619,6 +1621,7 @@ async def test_loc_verification_edge_cases_and_on_disconnected(
             mock_notifier.send_system_status.assert_called_with(
                 title="VERBINDUNGSABBRUCH",
                 emoji="🚨",
+                system="IBKR Gateway",
             )
     finally:
         db.close = original_close

@@ -432,6 +432,7 @@ async def test_callbacks_planned_restart_disconnected(test_config: Config) -> No
     mock_notifier.send_system_status.assert_called_with(
         title="GEPLANTER NEUSTART (Gateway wird neu gestartet)",
         emoji="⏳",
+        system="IBKR Gateway",
     )
 
     # 2. Montag 12:01 Uhr (Wochentag) -> Unerwarteter Verbindungsabbruch
@@ -446,6 +447,7 @@ async def test_callbacks_planned_restart_disconnected(test_config: Config) -> No
     mock_notifier.send_system_status.assert_called_with(
         title="VERBINDUNGSABBRUCH",
         emoji="🚨",
+        system="IBKR Gateway",
     )
 
     # 3. Sonntag 14:00 Uhr (Falsche Uhrzeit) -> Unerwarteter Verbindungsabbruch
@@ -460,6 +462,7 @@ async def test_callbacks_planned_restart_disconnected(test_config: Config) -> No
     mock_notifier.send_system_status.assert_called_with(
         title="VERBINDUNGSABBRUCH",
         emoji="🚨",
+        system="IBKR Gateway",
     )
 
 
@@ -1309,7 +1312,7 @@ async def test_provide_status_report_with_open_orders_success(
     report_text = await orchestrator.provide_status_report()
 
     # Assert
-    assert "• <b>Offene DB-Orders:</b> 3" in report_text
+    assert "├─ <b>Offene DB-Orders:</b> 3" in report_text
     mock_db.close.assert_awaited_once()
 
 
@@ -1335,23 +1338,23 @@ async def test_provide_status_report_dual_socket_and_broker_status(
     orchestrator.callbacks_manager = mock_callbacks
 
     report = await orchestrator.provide_status_report()
-    assert "• <b>TWS/Gateway-Socket:</b> ✅ Verbunden" in report
-    assert "• <b>Broker-Server (WAN):</b> ✅ Verbunden" in report
+    assert "├─ <b>TWS/Gateway-Socket:</b> ✅ Verbunden" in report
+    assert "├─ <b>Broker-Server (WAN):</b> ✅ Verbunden" in report
 
     # Case 2: Gateway socket connected, but broker WAN disconnected (Code 1100)
     mock_callbacks.is_broker_connected = False
     report = await orchestrator.provide_status_report()
-    assert "• <b>TWS/Gateway-Socket:</b> ✅ Verbunden" in report
+    assert "├─ <b>TWS/Gateway-Socket:</b> ✅ Verbunden" in report
     assert (
-        "• <b>Broker-Server (WAN):</b> ❌ Getrennt (IBKR offline / Reconnect nötig)"
+        "├─ <b>Broker-Server (WAN):</b> ❌ Getrennt (IBKR offline / Reconnect nötig)"
         in report
     )
 
     # Case 3: Gateway socket disconnected
     orchestrator.interactive_brokers.isConnected.return_value = False
     report = await orchestrator.provide_status_report()
-    assert "• <b>TWS/Gateway-Socket:</b> ❌ Getrennt" in report
-    assert "• <b>Broker-Server (WAN):</b> ❌ Getrennt (Socket offline)" in report
+    assert "├─ <b>TWS/Gateway-Socket:</b> ❌ Getrennt" in report
+    assert "├─ <b>Broker-Server (WAN):</b> ❌ Getrennt (Socket offline)" in report
 
 
 @pytest.mark.asyncio

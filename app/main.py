@@ -32,7 +32,7 @@ from app.services.container_manager import (
     DockerContainerManager,
 )
 from app.services.importer import csv_directory_watcher
-from app.services.notifier import TelegramNotifier
+from app.services.notifier import TelegramNotifier, build_tree_message
 from app.services.telegram_bot import TelegramCommandListener
 from app.trading.callbacks import TwsCallbacksManager
 from app.trading.recovery import run_recovery
@@ -183,15 +183,21 @@ class TradingSystemOrchestrator:
 
         open_orders_count = await self._query_open_orders_count()
 
-        return (
-            "📊 <b>TradeManager Status</b>\n\n"
-            f"• <b>TWS/Gateway-Socket:</b> {socket_display}\n"
-            f"• <b>Broker-Server (WAN):</b> {broker_display}\n"
-            f"• <b>Queue Tasks:</b> {queue_size}\n"
-            f"• <b>Offene DB-Orders:</b> {open_orders_count}\n"
-            f"• <b>Docker Socket:</b> {docker_socket_display}\n"
-            f"• <b>IBKR Container:</b> <code>{self.config.telegram.ibkr_container_name}</code> [{container_status_display}]\n"
-            f"• <b>Reconnecting:</b> {'Ja' if self.is_reconnecting else 'Nein'}"
+        return build_tree_message(
+            title="TradeManager Status",
+            emoji="📊",
+            rows=[
+                ("TWS/Gateway-Socket", socket_display),
+                ("Broker-Server (WAN)", broker_display),
+                ("Queue Tasks", str(queue_size)),
+                ("Offene DB-Orders", str(open_orders_count)),
+                ("Docker Socket", docker_socket_display),
+                (
+                    "IBKR Container",
+                    f"<code>{self.config.telegram.ibkr_container_name}</code> [{container_status_display}]",
+                ),
+                ("Reconnecting", "Ja" if self.is_reconnecting else "Nein"),
+            ],
         )
 
     async def _query_open_orders_count(self) -> int:
@@ -383,7 +389,7 @@ class TradingSystemOrchestrator:
         logger.info("Beginning shutdown sequence...")
         self.telegram_bot.stop()
         await self.notifier.send_system_status(
-            title="System Shutdown initiiert", emoji="⚠️"
+            title="System Shutdown initiiert", emoji="⚠️", system="TradeManager"
         )
 
         logger.info("Cancelling background tasks...")
@@ -411,7 +417,7 @@ class TradingSystemOrchestrator:
 
         logger.info("Shutdown sequence completed successfully.")
         await self.notifier.send_system_status(
-            title="System geordnet heruntergefahren", emoji="🛑"
+            title="System geordnet heruntergefahren", emoji="🛑", system="TradeManager"
         )
 
     async def _wait_reconnect_interval(self, current_delay: float) -> None:
@@ -470,7 +476,9 @@ class TradingSystemOrchestrator:
     async def _handle_successful_reconnection(self) -> None:
         """Behandelt erfolgreichen Wiederaufbau der Gateway-Verbindung."""
         logger.info("Reconnection successfully established!")
-        await self.notifier.send_system_status(title="WIEDERVERBUNDEN", emoji="✅")
+        await self.notifier.send_system_status(
+            title="WIEDERVERBUNDEN", emoji="✅", system="IBKR Gateway"
+        )
         self.interactive_brokers.reqAutoOpenOrders(True)
         logger.info("Triggering recovery run after reconnection...")
         await self.run_recovery_callback()
@@ -653,9 +661,16 @@ class TradingSystemOrchestrator:
                     health_suffix = (
                         f" (Container-Status: <b>{status_report.health_status}</b>)"
                     )
-            await self.notifier.send_message(
-                f"⚠️ <b>HEARTBEAT TIMEOUT</b> | API reagiert nicht{health_suffix}. Reconnect wird erzwungen."
+            timeout_msg = build_tree_message(
+                title="HEARTBEAT TIMEOUT",
+                context="TWS API",
+                emoji="⚠️",
+                rows=[
+                    ("Status", f"API reagiert nicht{health_suffix}"),
+                    ("Aktion", "Verbindung getrennt, Reconnect wird erzwungen."),
+                ],
             )
+            await self.notifier.send_message(timeout_msg)
             self.interactive_brokers.disconnect()
         except Exception as exception:
             logger.warning("Error during heartbeat ping", error=str(exception))
@@ -671,7 +686,9 @@ async def main() -> None:
 
     # 2. Telegram Notifier initialisieren
     notifier = TelegramNotifier(config)
-    await notifier.send_system_status(title="Trading System startet", emoji="🚀")
+    await notifier.send_system_status(
+        title="Trading System startet", emoji="🚀", system="TradeManager"
+    )
 
     # 3. Datenbank-Integrity Check & Schema-Migrationen
     database_path = await _verify_database_integrity(root_directory_path, notifier)
@@ -855,11 +872,19 @@ async def connect_to_tws(
         f"Connection to TWS impossible after {max_attempts} attempts. Entering background reconnection mode."
     )
     if notifier and not container_alert_sent:
-        await notifier.send_message(
-            f"🚨 <b>INITIALER VERBINDUNGSAUFBAU FEHLGESCHLAGEN</b>\n\n"
-            f"Keine Verbindung zu TWS nach {max_attempts} Versuchen möglich. "
-            f"Host: <code>{config.tws.host}:{config.tws.port}</code>"
+        failed_msg = build_tree_message(
+            title="INITIALER VERBINDUNGSAUFBAU FEHLGESCHLAGEN",
+            emoji="🚨",
+            rows=[
+                ("Host", f"<code>{config.tws.host}:{config.tws.port}</code>"),
+                ("Versuche", str(max_attempts)),
+                (
+                    "Status",
+                    "Keine Verbindung zu TWS. Wechsel in Hintergrund-Wiederverbindung.",
+                ),
+            ],
         )
+        await notifier.send_message(failed_msg)
     return False
 
 
@@ -892,11 +917,17 @@ async def _check_container_on_initial_connect_failure(
             attempt=attempt,
         )
         if notifier:
-            await notifier.send_message(
-                f"🚨 <b>IBKR GATEWAY {status_text.upper()}</b>\n\n"
-                f"Container <code>{config.telegram.ibkr_container_name}</code> ist "
-                f"<b>{status_text}</b>. Bitte Gateway neu starten oder 2FA bestätigen."
+            gateway_msg = build_tree_message(
+                title=f"GATEWAY {status_text.upper()}",
+                system="IBKR",
+                emoji="🚨",
+                context=config.telegram.ibkr_container_name,
+                rows=[
+                    ("Status", f"<code>{status_text}</code>"),
+                    ("Aktion", "Bitte Gateway neu starten oder 2FA bestätigen."),
+                ],
             )
+            await notifier.send_message(gateway_msg)
         return True
 
     return alert_already_sent
@@ -957,8 +988,10 @@ async def _verify_database_integrity(
     if not is_db_ok:
         logger.critical("DB integrity check failed. Terminating for safety.")
         await notifier.send_system_status(
-            title="DB-Integritaetspruefung fehlgeschlagen! Anwendung beendet.",
+            title="DB-INTEGRITÄTSPRÜFUNG FEHLGESCHLAGEN",
             emoji="🚨",
+            system="TradeManager",
+            details="Kritischer Fehler! Anwendung wird zur Sicherheit beendet.",
         )
         sys.exit(1)
     return database_path

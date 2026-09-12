@@ -8,6 +8,7 @@ unter Einhaltung der API-Rate-Limits.
 import asyncio
 import re
 import time
+from collections.abc import Sequence
 from decimal import Decimal
 from typing import Any, Final
 
@@ -17,6 +18,79 @@ import structlog
 from app.core.config import Config
 
 logger = structlog.get_logger()
+
+type TreeRow = tuple[str, Any] | str | None
+
+
+def build_tree_message(
+    title: str,
+    rows: Sequence[TreeRow],
+    *,
+    emoji: str | None = None,
+    context: str | None = None,
+    system: str | None = None,
+) -> str:
+    """Formatiert eine standardisierte Telegram-Baumnachricht mit Glyphen (├─, └─).
+
+    Reine Funktion (Functional Core), die Layout-Struktur von Fachdaten trennt.
+    Filtert None und leere Werte automatisch heraus und setzt deterministisch
+    für alle Zeilen bis zur vorletzten '├─ ' und für die letzte '└─ '.
+
+    Args:
+        title: Titel oder Thema der Meldung.
+        rows: Sequenz aus (Label, Wert)-Tupeln oder vorformatierten Zeilenstrings.
+        emoji: Optionales führendes Emoji für den Header.
+        context: Optionaler Kontext (z. B. Symbol oder Dateiname) nach '| <code>...</code>'.
+        system: Optionales System-Präfix (z. B. 'TradeManager', 'IBKR Gateway').
+
+    Returns:
+        HTML-formatierter String für Telegram.
+    """
+    header_parts: list[str] = []
+    if emoji:
+        header_parts.append(emoji)
+
+    if system:
+        title_part = f"{system}: {title}" if title else system
+    else:
+        title_part = title
+
+    header_parts.append(f"<b>{title_part}</b>")
+    header_line = " ".join(header_parts)
+
+    if context:
+        header_line += f" | <code>{context}</code>"
+
+    valid_rows: list[str] = []
+    for row in rows:
+        if row is None:
+            continue
+        if isinstance(row, tuple):
+            label, value = row
+            if value is None:
+                continue
+            str_value = str(value).strip()
+            if not str_value:
+                continue
+            valid_rows.append(f"<b>{label}:</b> {str_value}")
+        elif isinstance(row, str):
+            clean_str = row.strip()
+            if not clean_str:
+                continue
+            clean_str = re.sub(r"^(?:├─|└─|[•\-])\s*", "", clean_str)
+            valid_rows.append(clean_str)
+
+    if not valid_rows:
+        return header_line
+
+    lines = [header_line]
+    total_rows = len(valid_rows)
+    for index, content in enumerate(valid_rows):
+        prefix = "└─ " if index == total_rows - 1 else "├─ "
+        lines.append(f"{prefix}{content}")
+
+    return "\n".join(lines)
+
 
 DEFAULT_BOT_KEYBOARD: Final[dict[str, Any]] = {
     "keyboard": [[{"text": "📊 Status"}, {"text": "🔄 IBKR Neustart"}]],
@@ -72,7 +146,7 @@ def _format_slippage_line(
     abs_pct = abs(percentage)
 
     return (
-        f"├─ {direction_emoji} <b>Slippage:</b> "
+        f"{direction_emoji} <b>Slippage:</b> "
         f"<code>{abs_diff:.2f}</code> (<code>{abs_pct:.2f}% {label}</code>)"
     )
 
@@ -215,12 +289,16 @@ class TelegramNotifier:
         from datetime import datetime
 
         now_str = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-        message = (
-            f"🚨 <b>IBKR: {title}</b>\n"
-            f"🕒 Time: {now_str}\n\n"
-            f"Der Container <code>{container_name}</code> scheint nicht erreichbar zu sein.\n"
-            f"Sobald Du am Smartphone bereit bist (IBKR Mobile 2FA), klicke unten auf den Button "
-            f"oder sende <code>/restart_ibkr</code>:"
+        message = build_tree_message(
+            title=title,
+            system="IBKR",
+            emoji="🚨",
+            context=container_name,
+            rows=[
+                ("Status", "Container nicht erreichbar"),
+                ("Zeit", now_str),
+                ("Aktion", "Smartphone für 2FA bereitmachen und Button drücken:"),
+            ],
         )
         reply_markup = {
             "inline_keyboard": [[{"text": button_text, "callback_data": callback_data}]]
@@ -263,12 +341,24 @@ class TelegramNotifier:
         title: str,
         emoji: str = "🚀",
         reply_markup: dict[str, Any] | None = None,
+        system: str = "TradeManager",
+        details: str | None = None,
     ) -> bool:
-        """Sendet eine System-Status-Nachricht (Start/Stop)."""
+        """Sendet eine System-Status-Nachricht (Start/Stop/Lifecycle)."""
         from datetime import datetime
 
         now_str = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-        message = f"{emoji} <b>IBKR: {title}</b>\n🕒 Time: {now_str}"
+        rows: list[TreeRow] = []
+        if details:
+            rows.append(("Details", f"<i>{_clean_html_text(details)}</i>"))
+        rows.append(("Zeit", now_str))
+
+        message = build_tree_message(
+            title=title,
+            system=system,
+            emoji=emoji,
+            rows=rows,
+        )
         markup = reply_markup if reply_markup is not None else DEFAULT_BOT_KEYBOARD
         return await self.send_message(message, reply_markup=markup)
 
@@ -287,11 +377,15 @@ class TelegramNotifier:
             title = "VERBINDUNG ZU BROKER-SERVER UNTERBROCHEN (TWS offline)"
 
         clean_details = _clean_html_text(details)
-        message = (
-            f"{emoji} <b>IBKR: {title}</b>\n"
-            f"🕒 Time: {now_str}\n"
-            f"├─ <b>Fehlercode:</b> <code>{error_code}</code>\n"
-            f"└─ <b>Details:</b> <i>{clean_details}</i>"
+        message = build_tree_message(
+            title=title,
+            system="IBKR",
+            emoji=emoji,
+            rows=[
+                ("Zeit", now_str),
+                ("Fehlercode", f"<code>{error_code}</code>"),
+                ("Details", f"<i>{clean_details}</i>"),
+            ],
         )
         return await self.send_message(message)
 
@@ -319,30 +413,37 @@ class TelegramNotifier:
 
         slippage_line = _format_slippage_line(limit_price, execution_price, action)
 
-        lines = [
-            f"🟢 <b>ORDER GEFÜLLT</b> | <code>{symbol}</code>",
-            f"├─ <b>Typ:</b> <code>{bracket_role}</code> ({action})",
+        rows: list[TreeRow] = [
+            ("Typ", f"<code>{bracket_role}</code> ({action})"),
         ]
-
         if limit_price is not None and execution_price is not None:
-            lines.append(
-                f"├─ <b>Limit:</b> <code>{limit_price:.2f}</code> → <b>Fill:</b> <code>{price_string}</code> ({order_type})"
+            rows.append(
+                (
+                    "Limit",
+                    f"<code>{limit_price:.2f}</code> → <b>Fill:</b> <code>{price_string}</code> ({order_type})",
+                )
             )
         else:
-            lines.append(
-                f"├─ <b>Menge:</b> <code>{quantity}</code> @ <code>{price_string}</code> ({order_type})"
+            rows.append(
+                (
+                    "Menge",
+                    f"<code>{quantity}</code> @ <code>{price_string}</code> ({order_type})",
+                )
             )
 
-        lines.append(f"├─ <b>Wert:</b> <code>$ {total_value:,.2f}</code>")
+        rows.append(("Wert", f"<code>$ {total_value:,.2f}</code>"))
 
         if slippage_line:
-            lines.append(slippage_line)
+            rows.append(slippage_line)
 
-        lines.append(
-            f"└─ <b>System:</b> ID: <code>{order_id}</code> • <i>{strategy_name}</i>"
+        rows.append(("System", f"ID: <code>{order_id}</code> • <i>{strategy_name}</i>"))
+
+        message = build_tree_message(
+            title="ORDER GEFÜLLT",
+            context=symbol,
+            emoji="🟢",
+            rows=rows,
         )
-
-        message = "\n".join(lines)
         return await self.send_message(message)
 
     async def send_order_failed(
@@ -359,11 +460,15 @@ class TelegramNotifier:
         title = "ORDER FEHLGESCHLAGEN" if is_fatal else "ORDER CANCELED"
         clean_reason = _clean_html_text(reason)
 
-        message = (
-            f"{emoji} <b>{title}</b> | <code>ID: {order_id}</code>\n"
-            f"├─ <b>Symbol/Typ:</b> <code>{symbol}</code> ({bracket_role})\n"
-            f"├─ <b>TWS-Code:</b> <code>{tws_code}</code>\n"
-            f"└─ <b>Grund:</b> <i>{clean_reason}</i>"
+        message = build_tree_message(
+            title=title,
+            context=f"ID: {order_id}",
+            emoji=emoji,
+            rows=[
+                ("Symbol/Typ", f"<code>{symbol}</code> ({bracket_role})"),
+                ("TWS-Code", f"<code>{tws_code}</code>"),
+                ("Grund", f"<i>{clean_reason}</i>"),
+            ],
         )
         return await self.send_message(message)
 
@@ -378,14 +483,21 @@ class TelegramNotifier:
     ) -> bool:
         """Sendet eine Fehlermeldung für eine LOC-Order, die trotz erreichtem Limitpreis nicht ausgeführt wurde."""
         action_emoji = "🟢 BUY" if action.upper() == "BUY" else "🔴 SELL"
-        message = (
-            f"⚠️ <b>LOC ANOMALIE: NICHT AUSGEFÜHRT</b> | <code>{symbol}</code>\n"
-            f"├─ <b>Order-ID:</b> <code>{order_id}</code>\n"
-            f"├─ <b>Aktion:</b> <code>{action_emoji}</code>\n"
-            f"├─ <b>Menge:</b> <code>{quantity}</code>\n"
-            f"├─ <b>Limit-Preis:</b> <code>$ {limit_price:.2f}</code>\n"
-            f"├─ <b>Schlusskurs:</b> <code>$ {close_price:.2f}</code>\n"
-            f"└─ <b>Status:</b> Limitpreis wurde erreicht, aber Order wurde storniert/verfallen!"
+        message = build_tree_message(
+            title="LOC ANOMALIE: NICHT AUSGEFÜHRT",
+            context=symbol,
+            emoji="⚠️",
+            rows=[
+                ("Order-ID", f"<code>{order_id}</code>"),
+                ("Aktion", f"<code>{action_emoji}</code>"),
+                ("Menge", f"<code>{quantity}</code>"),
+                ("Limit-Preis", f"<code>$ {limit_price:.2f}</code>"),
+                ("Schlusskurs", f"<code>$ {close_price:.2f}</code>"),
+                (
+                    "Status",
+                    "Limitpreis wurde erreicht, aber Order wurde storniert/verfallen!",
+                ),
+            ],
         )
         return await self.send_message(message)
 
@@ -399,10 +511,14 @@ class TelegramNotifier:
     ) -> bool:
         """Sendet eine Info-Meldung über importierte Daten oder Validierungsfehler."""
         clean_details = _clean_html_text(details)
-        message = (
-            f"{emoji} <b>{title}</b> | <code>{file_name}</code>\n"
-            f"├─ <b>Status:</b> <code>{status}</code>\n"
-            f"└─ <b>Details:</b> <i>{clean_details}</i>"
+        message = build_tree_message(
+            title=title,
+            context=file_name,
+            emoji=emoji,
+            rows=[
+                ("Status", f"<code>{status}</code>"),
+                ("Details", f"<i>{clean_details}</i>"),
+            ],
         )
         return await self.send_message(message)
 
@@ -420,25 +536,28 @@ class TelegramNotifier:
         if not orders:
             return False
 
-        if len(orders) == 1:
-            title = "ORDER GESENDET"
-        else:
-            title = "BRACKET ORDER GESENDET"
+        title = "ORDER GESENDET" if len(orders) == 1 else "BRACKET ORDER GESENDET"
 
-        lines = [f"📤 <b>{title}</b> | <code>{symbol}</code>"]
-
+        rows: list[TreeRow] = []
         for order in orders:
             price_string = (
                 f"{Decimal(str(order['price'])):.2f}" if order.get("price") else "MKT"
             )
-            lines.append(
-                f"├─ <b>{order['role']}:</b> <code>{order['action']} {order['quantity']}</code> @ <code>{price_string}</code> ({order['order_type']})"
+            rows.append(
+                (
+                    str(order["role"]),
+                    f"<code>{order['action']} {order['quantity']}</code> @ <code>{price_string}</code> ({order['order_type']})",
+                )
             )
 
-        # Nur Strategie anzeigen – die interne trade_group_id ist für den Empfänger irrelevant
-        lines.append(f"└─ <b>System:</b> <i>{strategy_name}</i>")
+        rows.append(("System", f"<i>{strategy_name}</i>"))
 
-        message = "\n".join(lines)
+        message = build_tree_message(
+            title=title,
+            context=symbol,
+            emoji="📤",
+            rows=rows,
+        )
         return await self.send_message(message)
 
     async def send_margin_limit_exceeded(
@@ -450,13 +569,17 @@ class TelegramNotifier:
         cushion_percentage: Decimal,
     ) -> bool:
         """Sendet eine Meldung bei Überschreitung des Margin-Limits."""
-        message = (
-            f"🚨 <b>MARGIN-LIMIT ÜBERSCHRITTEN</b> | <code>{symbol}</code>\n"
-            f"├─ <b>Konto:</b> <code>{account_id}</code>\n"
-            f"├─ <b>Erforderliche Margin:</b> <code>$ {init_margin_after:,.2f}</code>\n"
-            f"├─ <b>Limit:</b> <code>$ {limit_value:,.2f}</code>\n"
-            f"├─ <b>Konto-Cushion:</b> <code>{cushion_percentage:.1f}%</code>\n"
-            f"└─ <b>Status:</b> Order blockiert (nicht an TWS gesendet)."
+        message = build_tree_message(
+            title="MARGIN-LIMIT ÜBERSCHRITTEN",
+            context=symbol,
+            emoji="🚨",
+            rows=[
+                ("Konto", f"<code>{account_id}</code>"),
+                ("Erforderliche Margin", f"<code>$ {init_margin_after:,.2f}</code>"),
+                ("Limit", f"<code>$ {limit_value:,.2f}</code>"),
+                ("Konto-Cushion", f"<code>{cushion_percentage:.1f}%</code>"),
+                ("Status", "Order blockiert (nicht an TWS gesendet)."),
+            ],
         )
         return await self.send_message(message)
 
@@ -469,12 +592,19 @@ class TelegramNotifier:
         margin_needed: Decimal,
     ) -> bool:
         """Sendet eine Meldung, wenn für einen Kauf Margin (Fremdkapital) genutzt wird."""
-        message = (
-            f"ℹ️ <b>MARGIN-NUTZUNG ERFORDERLICH</b> | <code>{symbol}</code>\n"
-            f"├─ <b>Konto:</b> <code>{account_id}</code>\n"
-            f"├─ <b>Kaufwert:</b> <code>$ {purchase_value:,.2f}</code>\n"
-            f"├─ <b>Verfügbares Cash:</b> <code>$ {total_cash:,.2f}</code>\n"
-            f"└─ <b>Info:</b> Zusätzliche Margin von <code>$ {margin_needed:,.2f}</code> wird beansprucht."
+        message = build_tree_message(
+            title="MARGIN-NUTZUNG ERFORDERLICH",
+            context=symbol,
+            emoji="ℹ️",
+            rows=[
+                ("Konto", f"<code>{account_id}</code>"),
+                ("Kaufwert", f"<code>$ {purchase_value:,.2f}</code>"),
+                ("Verfügbares Cash", f"<code>$ {total_cash:,.2f}</code>"),
+                (
+                    "Info",
+                    f"Zusätzliche Margin von <code>$ {margin_needed:,.2f}</code> wird beansprucht.",
+                ),
+            ],
         )
         return await self.send_message(message)
 
@@ -487,12 +617,16 @@ class TelegramNotifier:
         net_liquidation: Decimal,
     ) -> bool:
         """Sendet eine Warnung bei einer Margin-Auslastung über 50%."""
-        message = (
-            f"⚠️ <b>HOHE MARGIN-AUSLASTUNG (>50%)</b> | <code>{symbol}</code>\n"
-            f"├─ <b>Konto:</b> <code>{account_id}</code>\n"
-            f"├─ <b>Margin-Auslastung:</b> <code>{usage_percentage:.1f}%</code>\n"
-            f"├─ <b>Initial Margin (Neu):</b> <code>$ {init_margin_after:,.2f}</code>\n"
-            f"└─ <b>Netto-Liquidationswert:</b> <code>$ {net_liquidation:,.2f}</code>"
+        message = build_tree_message(
+            title="HOHE MARGIN-AUSLASTUNG (>50%)",
+            context=symbol,
+            emoji="⚠️",
+            rows=[
+                ("Konto", f"<code>{account_id}</code>"),
+                ("Margin-Auslastung", f"<code>{usage_percentage:.1f}%</code>"),
+                ("Initial Margin (Neu)", f"<code>$ {init_margin_after:,.2f}</code>"),
+                ("Netto-Liquidationswert", f"<code>$ {net_liquidation:,.2f}</code>"),
+            ],
         )
         return await self.send_message(message)
 
@@ -504,12 +638,16 @@ class TelegramNotifier:
         account_id: str,
     ) -> bool:
         """Sendet eine Info-Meldung über eine automatisch in DB nacherfasste Unassigned-Position."""
-        message = (
-            f"ℹ️ <b>UNASSIGNED POSITION RECOVERED</b> | <code>{symbol}</code>\n"
-            f"├─ <b>Konto:</b> <code>{account_id}</code>\n"
-            f"├─ <b>Menge:</b> <code>{quantity}</code>\n"
-            f"├─ <b>Durchschnittspreis:</b> <code>$ {avg_cost:.2f}</code>\n"
-            f"└─ <b>Info:</b> Position ohne Strategie in der DB synchronisiert."
+        message = build_tree_message(
+            title="UNASSIGNED POSITION RECOVERED",
+            context=symbol,
+            emoji="ℹ️",
+            rows=[
+                ("Konto", f"<code>{account_id}</code>"),
+                ("Menge", f"<code>{quantity}</code>"),
+                ("Durchschnittspreis", f"<code>$ {avg_cost:.2f}</code>"),
+                ("Info", "Position ohne Strategie in der DB synchronisiert."),
+            ],
         )
         return await self.send_message(message)
 
@@ -518,10 +656,16 @@ class TelegramNotifier:
     ) -> bool:
         """Sendet einen Administrator-Alarm, wenn eine .err-Archivdatei erkannt wurde."""
         clean_details = _clean_html_text(details)
-        message = (
-            f"🚨 <b>ARCHIVIERTE FEHLERDATEI ENTDECKT</b>\n"
-            f"├─ <b>Datei:</b> <code>{file_name}</code>\n"
-            f"└─ <b>Details:</b> <i>{clean_details or 'Datei wurde mit .err archiviert. Manuelle Prüfung erforderlich.'}</i>"
+        message = build_tree_message(
+            title="ARCHIVIERTE FEHLERDATEI ENTDECKT",
+            emoji="🚨",
+            rows=[
+                ("Datei", f"<code>{file_name}</code>"),
+                (
+                    "Details",
+                    f"<i>{clean_details or 'Datei wurde mit .err archiviert. Manuelle Prüfung erforderlich.'}</i>",
+                ),
+            ],
         )
         return await self.send_message(message)
 
@@ -539,18 +683,28 @@ class TelegramNotifier:
     ) -> bool:
         """Sendet einen strukturierten Tagesabschlussbericht (EOD-Summary)."""
         pnl_emoji = "🟢" if net_pnl >= 0 else "🔴"
-        lines = [
-            f"📊 <b>TAGESABSCHLUSS-BERICHT</b> | <code>{date_str}</code>",
-            f"├─ <b>CSV-Status:</b> <code>{file_status}</code>",
-            f"├─ <b>Orders:</b> Gesamt: {total_orders} • Gefüllt: {filled_orders} • Storniert: {cancelled_orders}",
+        rows: list[TreeRow] = [
+            ("CSV-Status", f"<code>{file_status}</code>"),
+            (
+                "Orders",
+                f"Gesamt: {total_orders} • Gefüllt: {filled_orders} • Storniert: {cancelled_orders}",
+            ),
         ]
         if equity is not None:
             cushion_str = (
                 f" • Cushion: {cushion_pct:.1f}%" if cushion_pct is not None else ""
             )
-            lines.append(f"├─ <b>Equity:</b> <code>$ {equity:,.2f}</code>{cushion_str}")
-        lines.append(f"├─ <b>Kommissionen:</b> <code>$ {commissions:.2f}</code>")
-        lines.append(
-            f"└─ <b>Realisierter Net PnL:</b> {pnl_emoji} <code>$ {net_pnl:,.2f}</code>"
+            rows.append(("Equity", f"<code>$ {equity:,.2f}</code>{cushion_str}"))
+
+        rows.append(("Kommissionen", f"<code>$ {commissions:.2f}</code>"))
+        rows.append(
+            ("Realisierter Net PnL", f"{pnl_emoji} <code>$ {net_pnl:,.2f}</code>")
         )
-        return await self.send_message("\n".join(lines))
+
+        message = build_tree_message(
+            title="TAGESABSCHLUSS-BERICHT",
+            context=date_str,
+            emoji="📊",
+            rows=rows,
+        )
+        return await self.send_message(message)

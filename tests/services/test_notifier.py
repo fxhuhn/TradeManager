@@ -8,6 +8,7 @@ from app.services.notifier import (
     AsyncTelegramRateLimiter,
     TelegramNotifier,
     _strip_html,
+    build_tree_message,
 )
 
 
@@ -183,7 +184,7 @@ async def test_send_system_status(mock_config: MagicMock) -> None:
     # Arrange
     notifier = TelegramNotifier(mock_config)
 
-    # Act
+    # Act - Default system
     with patch.object(notifier, "send_message", new_callable=AsyncMock) as mock_send:
         mock_send.return_value = True
         await notifier.send_system_status(title="SYSTEM START", emoji="🚀")
@@ -191,8 +192,100 @@ async def test_send_system_status(mock_config: MagicMock) -> None:
         # Assert
         mock_send.assert_called_once()
         called_text = mock_send.call_args[0][0]
-        assert "🚀 <b>IBKR: SYSTEM START</b>" in called_text
-        assert "Time:" in called_text
+        assert "🚀 <b>TradeManager: SYSTEM START</b>" in called_text
+        assert "└─ <b>Zeit:</b>" in called_text
+
+    # Act - Custom system and details
+    with patch.object(notifier, "send_message", new_callable=AsyncMock) as mock_send:
+        mock_send.return_value = True
+        await notifier.send_system_status(
+            title="VERBINDUNGSABBRUCH",
+            emoji="🚨",
+            system="IBKR Gateway",
+            details="Socket disconnected",
+        )
+
+        mock_send.assert_called_once()
+        called_text2 = mock_send.call_args[0][0]
+        assert "🚨 <b>IBKR Gateway: VERBINDUNGSABBRUCH</b>" in called_text2
+        assert "├─ <b>Details:</b> <i>Socket disconnected</i>" in called_text2
+        assert "└─ <b>Zeit:</b>" in called_text2
+
+
+def test_build_tree_message_single_row() -> None:
+    """Verifies build_tree_message with a single row uses the terminal branch marker."""
+    msg = build_tree_message(
+        title="TEST TITLE",
+        rows=[("Status", "OK")],
+    )
+    expected = "<b>TEST TITLE</b>\n└─ <b>Status:</b> OK"
+    assert msg == expected
+
+
+def test_build_tree_message_multiple_rows() -> None:
+    """Verifies build_tree_message with multiple rows uses intermediate and terminal markers."""
+    msg = build_tree_message(
+        title="ORDER GEFÜLLT",
+        context="AAPL",
+        emoji="🟢",
+        rows=[
+            ("Typ", "EXIT (SELL)"),
+            ("Menge", "9 @ 332.27"),
+            ("System", "ID: 1452"),
+        ],
+    )
+    expected_lines = [
+        "🟢 <b>ORDER GEFÜLLT</b> | <code>AAPL</code>",
+        "├─ <b>Typ:</b> EXIT (SELL)",
+        "├─ <b>Menge:</b> 9 @ 332.27",
+        "└─ <b>System:</b> ID: 1452",
+    ]
+    assert msg == "\n".join(expected_lines)
+
+
+def test_build_tree_message_with_system_header() -> None:
+    """Verifies build_tree_message formats system name in header."""
+    msg = build_tree_message(
+        title="SYSTEM START",
+        emoji="🚀",
+        system="TradeManager",
+        rows=[("Zeit", "12.09.2026 12:00:00")],
+    )
+    assert (
+        msg
+        == "🚀 <b>TradeManager: SYSTEM START</b>\n└─ <b>Zeit:</b> 12.09.2026 12:00:00"
+    )
+
+
+def test_build_tree_message_filters_empty_rows() -> None:
+    """Verifies build_tree_message omits None and empty-value rows properly."""
+    msg = build_tree_message(
+        title="FILTER TEST",
+        rows=[
+            ("Aktiv", "Ja"),
+            ("Leer", ""),
+            ("None-Wert", None),
+            None,
+            ("Abschluss", "Fertig"),
+        ],
+    )
+    expected = "<b>FILTER TEST</b>\n├─ <b>Aktiv:</b> Ja\n└─ <b>Abschluss:</b> Fertig"
+    assert msg == expected
+
+
+def test_build_tree_message_strips_legacy_prefixes() -> None:
+    """Verifies build_tree_message strips legacy bullet and tree markers in raw string rows."""
+    msg = build_tree_message(
+        title="STRIP TEST",
+        rows=[
+            "• Bullet Item",
+            "├─ <b>Existing:</b> Tree Item",
+            "└─ Final Item",
+        ],
+    )
+    assert "├─ Bullet Item" in msg
+    assert "├─ <b>Existing:</b> Tree Item" in msg
+    assert "└─ Final Item" in msg
 
 
 @pytest.mark.asyncio
