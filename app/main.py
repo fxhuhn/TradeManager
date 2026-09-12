@@ -149,8 +149,21 @@ class TradingSystemOrchestrator:
 
     async def provide_status_report(self) -> str:
         """Erstellt eine Statusübersicht für die Telegram-Antwort."""
-        is_connected = self.interactive_brokers.isConnected()
-        connection_display_text = "✅ Verbunden" if is_connected else "❌ Getrennt"
+        is_socket_connected = self.interactive_brokers.isConnected()
+        socket_display = "✅ Verbunden" if is_socket_connected else "❌ Getrennt"
+
+        is_broker_connected = (
+            self.callbacks_manager.is_broker_connected
+            if self.callbacks_manager is not None
+            else is_socket_connected
+        )
+        if not is_socket_connected:
+            broker_display = "❌ Getrennt (Socket offline)"
+        elif is_broker_connected:
+            broker_display = "✅ Verbunden"
+        else:
+            broker_display = "❌ Getrennt (Code 1100: Keine Broker-Verbindung)"
+
         docker_socket_display = (
             "✅ Verfügbar"
             if self.container_manager.is_available()
@@ -172,7 +185,8 @@ class TradingSystemOrchestrator:
 
         return (
             "📊 <b>TradeManager Status</b>\n\n"
-            f"• <b>TWS/Gateway:</b> {connection_display_text}\n"
+            f"• <b>TWS/Gateway-Socket:</b> {socket_display}\n"
+            f"• <b>Broker-Server (WAN):</b> {broker_display}\n"
             f"• <b>Queue Tasks:</b> {queue_size}\n"
             f"• <b>Offene DB-Orders:</b> {open_orders_count}\n"
             f"• <b>Docker Socket:</b> {docker_socket_display}\n"

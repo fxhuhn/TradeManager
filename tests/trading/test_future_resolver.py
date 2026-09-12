@@ -178,8 +178,58 @@ async def test_resolve_active_future_contract_none_contract_raises_error() -> No
 
     sneaky = SneakyDetails()
     mock_ib.reqContractDetailsAsync = AsyncMock(return_value=[sneaky])
-
     with pytest.raises(
         ValueError, match="Candidate contract for 'MNQ' is unexpectedly None"
     ):
         await resolve_active_future_contract(mock_ib, symbol="MNQ", exchange="CME")
+
+
+@pytest.mark.asyncio
+async def test_resolve_active_future_contract_timeout_raises_timeout_error() -> None:
+    """Prüft, dass ein TimeoutError geworfen wird, wenn reqContractDetailsAsync das Timeout überschreitet."""
+    mock_ib = MagicMock()
+    mock_ib.reqContractDetailsAsync = AsyncMock(
+        side_effect=TimeoutError("Connection timed out")
+    )
+
+    with pytest.raises(
+        TimeoutError,
+        match="Timeout .* resolving contract details for future symbol 'MNQ'",
+    ):
+        await resolve_active_future_contract(
+            mock_ib, symbol="MNQ", exchange="CME", timeout_seconds=0.05
+        )
+
+
+@pytest.mark.asyncio
+async def test_resolve_active_future_contract_tickers_timeout_falls_back() -> None:
+    """Prüft, dass bei Timeout beim Abruf der Tickers auf den ersten Kandidaten (Front-Month) zurückgegriffen wird."""
+    mock_ib = MagicMock()
+
+    contract_u6 = Future(
+        conId=1001,
+        symbol="MNQ",
+        lastTradeDateOrContractMonth="20990918",
+        exchange="CME",
+        currency="USD",
+        localSymbol="MNQU99",
+    )
+    contract_z6 = Future(
+        conId=1002,
+        symbol="MNQ",
+        lastTradeDateOrContractMonth="20991218",
+        exchange="CME",
+        currency="USD",
+        localSymbol="MNQZ99",
+    )
+
+    cd1 = ContractDetails(contract=contract_u6)
+    cd2 = ContractDetails(contract=contract_z6)
+    mock_ib.reqContractDetailsAsync = AsyncMock(return_value=[cd1, cd2])
+    mock_ib.reqTickersAsync = AsyncMock(side_effect=TimeoutError("Tickers timed out"))
+
+    selected = await resolve_active_future_contract(
+        mock_ib, symbol="MNQ", exchange="CME", timeout_seconds=0.05
+    )
+    # Front-month contract should be selected as fallback
+    assert selected.localSymbol == "MNQU99"

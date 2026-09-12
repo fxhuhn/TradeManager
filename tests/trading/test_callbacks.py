@@ -1021,6 +1021,85 @@ async def test_fail_order_in_db_updates_status_and_notifies(
 
 
 @pytest.mark.asyncio
+async def test_fail_and_cancel_order_in_db_ignores_broadcast_request_id(
+    mock_config: Config,
+) -> None:
+    """Verifies _fail_order_in_db, _cancel_order_in_db, and _process_error ignore request_id <= 0."""
+    mock_db_factory = AsyncMock()
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+    mock_notifier.send_order_cancelled = AsyncMock()
+
+    manager = TwsCallbacksManager(
+        db_factory=mock_db_factory,
+        interactive_brokers=MagicMock(),
+        notifier=mock_notifier,
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    # 1. Direct _fail_order_in_db with request_id <= 0
+    await manager._fail_order_in_db(-1, 2157, "Sec-def connection broken")
+    await manager._fail_order_in_db(0, 9999, "Unknown fatal error")
+    mock_db_factory.assert_not_called()
+    mock_notifier.send_order_failed.assert_not_called()
+
+    # 2. Direct _cancel_order_in_db with request_id <= 0
+    await manager._cancel_order_in_db(-1, 202, "Order cancelled")
+    await manager._cancel_order_in_db(0, 202, "Order cancelled")
+    mock_db_factory.assert_not_called()
+    mock_notifier.send_order_cancelled.assert_not_called()
+
+    # 3. _process_error with FATAL and CANCEL for request_id <= 0
+    await manager._process_error(-1, 9999, "Fatal error on broadcast", ErrorClass.FATAL)
+    await manager._process_error(
+        -1, 202, "Cancel error on broadcast", ErrorClass.CANCEL
+    )
+    mock_db_factory.assert_not_called()
+    mock_notifier.send_order_failed.assert_not_called()
+    mock_notifier.send_order_cancelled.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_is_broker_connected_property(mock_config: Config) -> None:
+    """Verifies is_broker_connected reflects WAN broker connection status."""
+    mock_notifier = MagicMock()
+    mock_notifier.send_broker_connection_status = AsyncMock()
+    mock_notifier.send_system_status = AsyncMock()
+
+    manager = TwsCallbacksManager(
+        db_factory=AsyncMock(),
+        interactive_brokers=MagicMock(),
+        notifier=mock_notifier,
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    # Initial state
+    assert manager.is_broker_connected is True
+
+    # 1100 received -> WAN disconnected
+    await manager._process_error(-1, 1100, "Connectivity lost", ErrorClass.RETRIABLE)
+    assert manager.is_broker_connected is False
+
+    # 1102 received -> WAN restored
+    await manager._process_error(
+        -1, 1102, "Connectivity restored", ErrorClass.RECONNECT
+    )
+    assert manager.is_broker_connected is True
+
+    # on_disconnected -> False
+    manager.on_disconnected()
+    assert manager.is_broker_connected is False
+
+
+@pytest.mark.asyncio
 async def test_on_disconnected_triggers_reconnect(mock_config: Config) -> None:
     """Verifies on_disconnected triggers reconnect callback and sends status notification."""
     mock_reconnect = AsyncMock()

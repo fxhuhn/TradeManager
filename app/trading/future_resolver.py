@@ -6,6 +6,7 @@ den Kontrakt mit dem aktuell höchsten Handelsvolumen (Front-Month bzw. Roll-Kon
 
 from __future__ import annotations
 
+import asyncio
 import math
 from datetime import datetime
 from typing import Final, cast
@@ -17,6 +18,7 @@ logger = structlog.get_logger()
 
 # Standardmäßiger Marktdatentyp: 3 = Verzögerte Marktdaten (Delayed), 1 = Live
 DEFAULT_MARKET_DATA_TYPE: Final[int] = 3
+DEFAULT_CONTRACT_TIMEOUT_SECONDS: Final[float] = 15.0
 
 
 async def resolve_active_future_contract(
@@ -24,6 +26,7 @@ async def resolve_active_future_contract(
     symbol: str = "MNQ",
     exchange: str = "CME",
     currency: str = "USD",
+    timeout_seconds: float = DEFAULT_CONTRACT_TIMEOUT_SECONDS,
 ) -> Future:
     """Ermittelt den liquidesten, aktiven Future-Kontrakt mit dem höchsten Handelsvolumen.
 
@@ -36,11 +39,13 @@ async def resolve_active_future_contract(
         symbol: Das Basis-Ticker-Symbol (z. B. 'MNQ' oder 'MES').
         exchange: Zielbörse des Futures (Standard: 'CME').
         currency: Währung des Kontrakts (Standard: 'USD').
+        timeout_seconds: Maximales Timeout für API-Anfragen an den Broker (Standard: 15.0s).
 
     Returns:
         Ein vollständig qualifiziertes ib_async Future-Objekt.
 
     Raises:
+        TimeoutError: Falls die Broker-Abfrage das Timeout überschreitet.
         ValueError: Falls keine aktiven Kontrakte für das Symbol gefunden werden.
     """
     logger.info(
@@ -50,9 +55,15 @@ async def resolve_active_future_contract(
     )
 
     search_contract = Future(symbol=symbol, exchange=exchange, currency=currency)
-    contract_details_list: list[
-        ContractDetails
-    ] = await interactive_brokers.reqContractDetailsAsync(search_contract)
+    try:
+        contract_details_list: list[ContractDetails] = await asyncio.wait_for(
+            interactive_brokers.reqContractDetailsAsync(search_contract),
+            timeout=timeout_seconds,
+        )
+    except TimeoutError as err:
+        error_message = f"Timeout ({timeout_seconds}s) resolving contract details for future symbol '{symbol}'."
+        logger.error(error_message, symbol=symbol, exchange=exchange)
+        raise TimeoutError(error_message) from err
 
     if not contract_details_list:
         error_message = f"No contract details found for future symbol '{symbol}' on exchange '{exchange}'."
@@ -104,7 +115,18 @@ async def resolve_active_future_contract(
         for candidate in candidate_subset
         if candidate.contract is not None
     ]
-    tickers = await interactive_brokers.reqTickersAsync(*contracts_to_query)
+    try:
+        tickers = await asyncio.wait_for(
+            interactive_brokers.reqTickersAsync(*contracts_to_query),
+            timeout=timeout_seconds,
+        )
+    except TimeoutError:
+        logger.warning(
+            "Timeout fetching market data tickers for future candidates, falling back to front-month",
+            symbol=symbol,
+            timeout_seconds=timeout_seconds,
+        )
+        tickers = []
 
     best_candidate = candidate_subset[0]
     highest_volume = -1.0

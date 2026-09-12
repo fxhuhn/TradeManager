@@ -35,6 +35,7 @@ def classify_error_code(code: int) -> ErrorClass:
         2108,
         2109,
         2119,
+        2157,
         2158,
         2182,
         321,

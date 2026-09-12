@@ -166,6 +166,11 @@ class TwsCallbacksManager:
         self.interactive_brokers.disconnectedEvent.connect(self.on_disconnected)
         logger.info("All async TWS callbacks successfully registered")
 
+    @property
+    def is_broker_connected(self) -> bool:
+        """Gibt an, ob die WAN-Verbindung zum Broker-Server aktiv ist."""
+        return self._broker_connected
+
     def _get_order_lock(self, order_id: int) -> asyncio.Lock:
         """Gibt das Lock für eine spezifische Order ID zurück (erstellt es bei Bedarf)."""
         if order_id not in self._order_locks:
@@ -863,11 +868,27 @@ class TwsCallbacksManager:
                 return
 
             if error_class == ErrorClass.CANCEL:
-                await self._cancel_order_in_db(request_id, error_code, error_string)
+                if request_id > 0:
+                    await self._cancel_order_in_db(request_id, error_code, error_string)
+                else:
+                    logger.info(
+                        "Broadcast cancel message ignored for system-level request_id",
+                        request_id=request_id,
+                        code=error_code,
+                        message=error_string,
+                    )
                 return
 
             if error_class == ErrorClass.FATAL:
-                await self._fail_order_in_db(request_id, error_code, error_string)
+                if request_id > 0:
+                    await self._fail_order_in_db(request_id, error_code, error_string)
+                else:
+                    logger.warning(
+                        "Broadcast fatal error received without associated order (request_id <= 0)",
+                        request_id=request_id,
+                        code=error_code,
+                        message=error_string,
+                    )
                 return
         except Exception as unhandled:
             logger.exception(
@@ -888,6 +909,8 @@ class TwsCallbacksManager:
         self, request_id: int, error_code: int, error_string: str
     ) -> None:
         """Kennzeichnet Order in DB als storniert und benachrichtigt via Telegram."""
+        if request_id <= 0:
+            return
         if request_id in self._notified_cancelled_order_ids:
             return
 
@@ -1168,6 +1191,9 @@ class TwsCallbacksManager:
         self, request_id: int, error_code: int, error_string: str
     ) -> None:
         """Kennzeichnet Order in DB als fehlerhaft und benachrichtigt via Telegram."""
+        if request_id <= 0:
+            return
+
         db = await self.db_factory()
         order_row = None
         try:

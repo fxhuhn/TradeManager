@@ -1314,6 +1314,47 @@ async def test_provide_status_report_with_open_orders_success(
 
 
 @pytest.mark.asyncio
+async def test_provide_status_report_dual_socket_and_broker_status(
+    test_config: Config, tmp_path: Path
+) -> None:
+    """Verifies that socket and broker WAN status are reported distinctly in Telegram status."""
+    orchestrator = TradingSystemOrchestrator(
+        root_directory_path=tmp_path,
+        database_path=tmp_path / "trading.db",
+        config=test_config,
+        notifier=MagicMock(),
+        interactive_brokers=MagicMock(),
+        queue=asyncio.Queue(),
+    )
+    orchestrator._query_open_orders_count = AsyncMock(return_value=0)
+
+    # Case 1: Both socket and broker WAN connected
+    orchestrator.interactive_brokers.isConnected.return_value = True
+    mock_callbacks = MagicMock()
+    mock_callbacks.is_broker_connected = True
+    orchestrator.callbacks_manager = mock_callbacks
+
+    report = await orchestrator.provide_status_report()
+    assert "• <b>TWS/Gateway-Socket:</b> ✅ Verbunden" in report
+    assert "• <b>Broker-Server (WAN):</b> ✅ Verbunden" in report
+
+    # Case 2: Gateway socket connected, but broker WAN disconnected (Code 1100)
+    mock_callbacks.is_broker_connected = False
+    report = await orchestrator.provide_status_report()
+    assert "• <b>TWS/Gateway-Socket:</b> ✅ Verbunden" in report
+    assert (
+        "• <b>Broker-Server (WAN):</b> ❌ Getrennt (Code 1100: Keine Broker-Verbindung)"
+        in report
+    )
+
+    # Case 3: Gateway socket disconnected
+    orchestrator.interactive_brokers.isConnected.return_value = False
+    report = await orchestrator.provide_status_report()
+    assert "• <b>TWS/Gateway-Socket:</b> ❌ Getrennt" in report
+    assert "• <b>Broker-Server (WAN):</b> ❌ Getrennt (Socket offline)" in report
+
+
+@pytest.mark.asyncio
 async def test_update_account_metrics_callback_skips_when_account_unresolved(
     test_config: Config, tmp_path: Path
 ) -> None:

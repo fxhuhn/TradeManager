@@ -218,6 +218,7 @@ This section provides a detailed reference of all public classes and functions i
 
 ### 4.11 Module: `app.trading.callbacks`
 - `register_all` (Function/Method): Binds TwsCallbacksManager event handlers to TWS.
+- `is_broker_connected` (Property): Indicates whether the WAN connection between TWS/Gateway and IBKR broker servers is active.
 - `on_order_status` (Function/Method): Callback invoked when order states transition.
 - `on_exec_details` (Function/Method): Callback for trade execution details.
 - `on_commission_report` (Function/Method): Callback handling trade commission details.
