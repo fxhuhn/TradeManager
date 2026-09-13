@@ -1557,6 +1557,7 @@ async def test_manual_reconnect_resets_loop_attempt_counter_and_interval(
         interactive_brokers=mock_ib,
         queue=asyncio.Queue(),
     )
+    orchestrator.is_reconnecting = True
 
     attempt_history: list[int] = []
 
@@ -1597,6 +1598,7 @@ async def test_manual_reconnect_while_waiting_resets_high_attempt_to_one(
         interactive_brokers=mock_ib,
         queue=asyncio.Queue(),
     )
+    orchestrator.is_reconnecting = True
 
     attempts_seen: list[int] = []
 
