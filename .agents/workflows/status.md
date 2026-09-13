@@ -8,7 +8,7 @@ trigger: "/status"
 When the user asks to check the production system, investigate logs, or invokes `/status`:
 
 1. **Protocol & Invariants**:
-   - Follow the mandatory MCP invariant in `AGENTS.md` (direct `call_mcp_tool` calls with `ServerName: "dozzle"`, zero browser automation, zero scratch scripts, fail-stop on error).
+   - Follow the mandatory MCP invariant in `AGENTS.md` (direct `call_mcp_tool` calls with `ServerName: "dozzle"` and ALL 5 parameters: `ServerName`, `ToolName`, `Arguments`, `toolSummary`, `toolAction`; zero browser automation, zero scratch scripts, fail-stop on error).
    - Tool signatures and parameter schemas are defined in [.agents/plugins/dozzle-mcp/instructions.md](file:///Users/produktmanagement/Python/github/TradeManager/.agents/plugins/dozzle-mcp/instructions.md).
 
 2. **Container & Host Check**:

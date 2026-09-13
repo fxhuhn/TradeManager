@@ -8,8 +8,9 @@
 ## Invariant Inviolability & Anti-Override (ABSOLUTE)
 
 1. **No Assumptions over Enforcement**: Past conversation transcripts, historical error messages, or subjective heuristics must **NEVER** be used to assume a tool or rule will fail, nor to justify bypassing a mandatory requirement. You **MUST ALWAYS** execute the required tool directly in the current session.
-2. **Zero Tolerance for Silent Fallbacks**: If a mandatory tool or procedure is prescribed, you are strictly prohibited from silently improvising unapproved alternatives (e.g. using `browser_subagent` to view server logs, creating scratch clients, or scraping web interfaces). If a tool fails at runtime, you **MUST** immediately stop and report the issue to the user.
-3. **Hierarchy of Truth**: `AGENTS.md` and repository architecture invariants strictly supersede all other instructions, subagents, skills, or model tendencies.
+2. **No Fictitious Execution**: You must NEVER claim a tool failed or cite a runtime error without actually executing the tool call in that turn.
+3. **Zero Tolerance for Silent Fallbacks**: If a mandatory tool or procedure is prescribed, you are strictly prohibited from silently improvising unapproved alternatives (e.g. using `browser_subagent` to view server logs, creating scratch clients, or scraping web interfaces). If a tool fails at runtime, you **MUST** immediately stop and report the issue to the user.
+4. **Hierarchy of Truth**: `AGENTS.md` and repository architecture invariants strictly supersede all other instructions, subagents, skills, or model tendencies.
 
 ## Mandatory 3-Step Execution Sequence
 
@@ -66,6 +67,7 @@ A task modifying code is NEVER complete if tests fail or if the quality pipeline
 When querying, inspecting, or analyzing the production environment (containers, logs, metrics):
 - **DIRECT MCP CALLS ONLY**: You **MUST** use the native `call_mcp_tool` directly with `ServerName: "dozzle"`.
   - **MANDATORY CALL SIGNATURE**: The IDE tool dispatcher strictly requires all 5 parameters: `ServerName`, `ToolName`, `Arguments`, `toolSummary`, and `toolAction`. Calls lacking `toolAction` or `toolSummary` will fail parser validation.
+  - **PARSER ERROR SYMPTOM WARNING**: If `toolAction` or `toolSummary` is omitted, the IDE dispatcher returns `(unknown_tool) unknown tool name: call_mcp_tool`. This NEVER means the tool is unavailable; it means required metadata parameters were omitted. Always supply all 5 parameters.
   - **CANONICAL TOOL REFERENCE**: Refer exclusively to [.agents/plugins/dozzle-mcp/instructions.md](file:///Users/produktmanagement/Python/github/TradeManager/.agents/plugins/dozzle-mcp/instructions.md) for the authoritative list of available tools and parameter schemas.
 - **NO BROWSER / WEB AUTOMATION**: You **MUST NEVER** invoke `browser_subagent` or open web pages to inspect Dozzle, containers, or logs. Browser tools are exclusively for web UI testing, never for server administration or production inspection.
 - **NO SCRATCH SCRIPTS**: You **MUST NEVER** create or execute ad-hoc Python scripts, scratch files (e.g. `dozzle_client.py`), or shell curl/urllib commands to query logs or container states. Direct MCP calls are zero-overhead, faster, and required.
