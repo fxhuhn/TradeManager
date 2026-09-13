@@ -118,6 +118,7 @@ class TradingSystemOrchestrator:
         self.interactive_brokers: IB = interactive_brokers
         self.queue: asyncio.Queue[str] = queue
         self.is_reconnecting: bool = False
+        self._reset_reconnect_requested: bool = False
         self.tasks: tuple[asyncio.Task[object], ...] = ()
         self.shutdown_event: asyncio.Event = asyncio.Event()
         self.callbacks_manager: TwsCallbacksManager | None = None
@@ -141,8 +142,15 @@ class TradingSystemOrchestrator:
         )
 
     async def manual_reconnect_trigger(self) -> None:
-        """Triggert eine sofortige Wiederverbindung (z. B. nach manuellem Container-Neustart)."""
-        logger.info("Manual reconnect triggered via Telegram bot")
+        """Triggert eine sofortige Wiederverbindung (z. B. nach manuellem Container-Neustart).
+
+        Setzt den Reconnect-Status zurück, sodass die Wiederverbindungsversuche
+        erneut bei Versuch 1 mit kurzen Intervallen beginnen.
+        """
+        logger.info(
+            "Manual reconnect triggered (resetting reconnect loop to attempt 1)"
+        )
+        self._reset_reconnect_requested = True
         self.reconnect_event.set()
         if not self.is_reconnecting:
             asyncio.create_task(self.run_reconnect_callback())
@@ -321,6 +329,7 @@ class TradingSystemOrchestrator:
             await self._execute_reconnect_loop()
         finally:
             self.is_reconnecting = False
+            self._reset_reconnect_requested = False
 
     def start_background_tasks(self) -> None:
         """Startet alle asynchronen Hintergrunddienste und speichert deren Tasks."""
@@ -439,6 +448,14 @@ class TradingSystemOrchestrator:
         unhealthy_alert_sent = False
 
         while True:
+            if self._reset_reconnect_requested:
+                logger.info(
+                    "Resetting reconnect loop state to attempt 1 after restart trigger"
+                )
+                attempt = 1
+                unhealthy_alert_sent = False
+                self._reset_reconnect_requested = False
+
             current_delay = self._resolve_reconnect_delay(attempt, max_attempts)
             logger.info(
                 "Waiting before reconnection attempt",
@@ -446,6 +463,14 @@ class TradingSystemOrchestrator:
                 delay_seconds=current_delay,
             )
             await self._wait_reconnect_interval(current_delay)
+
+            if self._reset_reconnect_requested:
+                logger.info(
+                    "Resetting reconnect loop state to attempt 1 after restart trigger"
+                )
+                attempt = 1
+                unhealthy_alert_sent = False
+                self._reset_reconnect_requested = False
 
             if self.interactive_brokers.isConnected():
                 logger.info("Already connected. Ending reconnect loop.")

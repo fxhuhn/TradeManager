@@ -1514,6 +1514,7 @@ async def test_manual_reconnect_trigger_does_not_spawn_task_if_already_reconnect
 
     # Assert
     assert orchestrator.reconnect_event.is_set()
+    assert orchestrator._reset_reconnect_requested is True
     mock_create_task.assert_not_called()
 
 
@@ -1538,6 +1539,84 @@ async def test_wait_reconnect_interval_handles_external_event_awakening(
 
     # Assert
     assert not orchestrator.reconnect_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_manual_reconnect_resets_loop_attempt_counter_and_interval(
+    test_config: Config, tmp_path: Path
+) -> None:
+    """Verifies that manual_reconnect_trigger resets attempt counter to 1 in _execute_reconnect_loop."""
+    mock_ib = MagicMock()
+    mock_ib.isConnected.return_value = False
+    mock_notifier = MagicMock()
+    orchestrator = TradingSystemOrchestrator(
+        root_directory_path=tmp_path,
+        database_path=tmp_path / "trading.db",
+        config=test_config,
+        notifier=mock_notifier,
+        interactive_brokers=mock_ib,
+        queue=asyncio.Queue(),
+    )
+
+    attempt_history: list[int] = []
+
+    async def mock_attempt(attempt: int) -> bool:
+        attempt_history.append(attempt)
+        if len(attempt_history) == 1:
+            return False
+        return True
+
+    orchestrator._attempt_single_reconnect = mock_attempt  # type: ignore[assignment]
+    orchestrator._handle_successful_reconnection = AsyncMock()  # type: ignore[assignment]
+
+    await orchestrator.manual_reconnect_trigger()
+    assert orchestrator._reset_reconnect_requested is True
+
+    # Fast-forward wait interval
+    with patch.object(orchestrator, "_wait_reconnect_interval", AsyncMock()):
+        await orchestrator._execute_reconnect_loop()
+
+    assert attempt_history == [1, 2]
+    assert orchestrator._handle_successful_reconnection.called
+    assert orchestrator._reset_reconnect_requested is False
+
+
+@pytest.mark.asyncio
+async def test_manual_reconnect_while_waiting_resets_high_attempt_to_one(
+    test_config: Config, tmp_path: Path
+) -> None:
+    """Verifies that triggering manual reconnect while waiting at attempt 15 resets to attempt 1."""
+    mock_ib = MagicMock()
+    mock_ib.isConnected.return_value = False
+    mock_notifier = MagicMock()
+    orchestrator = TradingSystemOrchestrator(
+        root_directory_path=tmp_path,
+        database_path=tmp_path / "trading.db",
+        config=test_config,
+        notifier=mock_notifier,
+        interactive_brokers=mock_ib,
+        queue=asyncio.Queue(),
+    )
+
+    attempts_seen: list[int] = []
+
+    async def mock_attempt(attempt: int) -> bool:
+        attempts_seen.append(attempt)
+        return True
+
+    orchestrator._attempt_single_reconnect = mock_attempt  # type: ignore[assignment]
+    orchestrator._handle_successful_reconnection = AsyncMock()  # type: ignore[assignment]
+
+    # Simulate that manual reconnect occurred while waiting
+    async def fake_wait(current_delay: float) -> None:
+        await orchestrator.manual_reconnect_trigger()
+
+    with patch.object(orchestrator, "_wait_reconnect_interval", side_effect=fake_wait):
+        await orchestrator._execute_reconnect_loop()
+
+    # The loop should have reset and executed attempt 1
+    assert attempts_seen == [1]
+    assert orchestrator._handle_successful_reconnection.called
 
 
 @pytest.mark.asyncio

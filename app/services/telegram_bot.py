@@ -131,6 +131,10 @@ class TelegramCommandListener:
                     "description": "🔄 IBKR Gateway Container neu starten",
                 },
                 {
+                    "command": "reconnect",
+                    "description": "🔄 Wiederverbindung zu IBKR neu anstoßen",
+                },
+                {
                     "command": "help",
                     "description": "ℹ️ Hilfe und Befehle anzeigen",
                 },
@@ -289,10 +293,39 @@ class TelegramCommandListener:
             "🔄 ibkr neu starten",
         ):
             await self._execute_ibkr_restart_flow()
+        elif clean_text in (
+            "/reconnect",
+            "reconnect",
+            "wiederverbinden",
+            "🔄 reconnect",
+            "🔄 wiederverbinden",
+        ):
+            await self._execute_reconnect_flow()
         elif clean_text in ("/status", "status", "📊 status"):
             await self._send_status_reply()
         elif clean_text in ("/help", "/start", "help", "hilfe", "start"):
             await self._send_help_reply()
+
+    async def _execute_reconnect_flow(self) -> None:
+        """Löst eine sofortige Wiederverbindung aus und startet die Reconnect-Überprüfung neu."""
+        reconnect_message = build_tree_message(
+            title="Wiederverbindung initiiert",
+            emoji="🔄",
+            rows=[
+                ("Status", "Reconnect-Überprüfung gestartet"),
+                ("Hinweis", "Wiederverbindungsversuche beginnen bei Versuch 1."),
+            ],
+        )
+        await self._notifier.send_message(
+            reconnect_message, reply_markup=DEFAULT_BOT_KEYBOARD
+        )
+        try:
+            await self._trigger_reconnect_callback()
+        except Exception as exception:
+            logger.error(
+                "Error triggering reconnect callback",
+                error=str(exception),
+            )
 
     async def _execute_ibkr_restart_flow(self) -> None:
         """Führt den geschützten Container-Neustart und Reconnect-Flow aus."""
@@ -435,6 +468,10 @@ class TelegramCommandListener:
                 (
                     "/restart_ibkr",
                     "IBKR-Container neu starten & 2FA/Reconnect triggern (oder Button 🔄 IBKR Neustart)",
+                ),
+                (
+                    "/reconnect",
+                    "Wiederverbindung neu starten (ohne Container-Neustart)",
                 ),
                 ("/help", "Diese Hilfemeldung anzeigen"),
             ],

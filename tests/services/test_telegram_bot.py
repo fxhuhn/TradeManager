@@ -415,3 +415,50 @@ async def test_register_bot_commands_success_and_failure(
         mock_response.status = 400
         failure = await listener._register_bot_commands()
         assert failure is False
+
+
+@pytest.mark.asyncio
+async def test_handle_reconnect_command(mock_config: MagicMock) -> None:
+    """Verifiziert die Ausführung des /reconnect Textbefehls."""
+    notifier = MagicMock()
+    notifier.send_message = AsyncMock(return_value=True)
+    container_manager = MagicMock()
+    reconnect_cb = AsyncMock()
+
+    listener = TelegramCommandListener(
+        config=mock_config,
+        notifier=notifier,
+        container_manager=container_manager,
+        trigger_reconnect_callback=reconnect_cb,
+    )
+
+    message = {"chat": {"id": 987654321}, "text": "/reconnect"}
+    await listener._handle_text_message(message)
+
+    notifier.send_message.assert_awaited_once()
+    last_sent = notifier.send_message.call_args[0][0]
+    assert "Wiederverbindung initiiert" in last_sent
+    reconnect_cb.assert_awaited_once()
+    container_manager.restart_container.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_execute_reconnect_flow_handles_callback_exception(
+    mock_config: MagicMock,
+) -> None:
+    """Verifiziert Fehlerbehandlung bei Exception im Reconnect-Callback."""
+    notifier = MagicMock()
+    notifier.send_message = AsyncMock(return_value=True)
+    failing_cb = AsyncMock(side_effect=RuntimeError("Callback failure"))
+
+    listener = TelegramCommandListener(
+        config=mock_config,
+        notifier=notifier,
+        container_manager=MagicMock(),
+        trigger_reconnect_callback=failing_cb,
+    )
+
+    # Sollte Exception abfangen und loggen, nicht abstürzen
+    await listener._execute_reconnect_flow()
+    notifier.send_message.assert_awaited_once()
+    failing_cb.assert_awaited_once()
