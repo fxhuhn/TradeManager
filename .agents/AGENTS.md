@@ -66,12 +66,16 @@ A task modifying code is NEVER complete if tests fail or if the quality pipeline
 
 When querying, inspecting, or analyzing the production environment (containers, logs, metrics):
 - **DIRECT MCP CALLS ONLY**: You **MUST** use the native `call_mcp_tool` directly with `ServerName: "dozzle"`.
-  - **MANDATORY CALL SIGNATURE**: The IDE tool dispatcher strictly requires all 5 parameters: `ServerName`, `ToolName`, `Arguments`, `toolSummary`, and `toolAction`. Calls lacking `toolAction` or `toolSummary` will fail parser validation.
-  - **PARSER ERROR SYMPTOM WARNING**: If `toolAction` or `toolSummary` is omitted, the IDE dispatcher returns `(unknown_tool) unknown tool name: call_mcp_tool`. This NEVER means the tool is unavailable; it means required metadata parameters were omitted. Always supply all 5 parameters.
+  - **MANDATORY CALL SIGNATURE**: The IDE tool dispatcher strictly requires all 5 parameters: `ServerName`, `ToolName`, `Arguments`, `toolSummary`, and `toolAction`.
+    - `Arguments`: MUST ALWAYS be a JSON object/dict (e.g. `{}` or `{"key": "val"}`). NEVER pass a stringified JSON string (`"{}"`) and NEVER escape quotes.
+    - `ServerName`, `ToolName`, `toolSummary`, `toolAction`: MUST be clean plain strings.
+  - **PARSER ERROR SYMPTOM WARNING (ABSOLUTE)**: The IDE tool dispatcher masks ANY parameter or schema validation failure (e.g. `Arguments` passed as string instead of dict, omitted `toolSummary`/`toolAction`, or escaped quotes) with the generic error:
+    `(unknown_tool) unknown tool name: call_mcp_tool`.
+    This NEVER means the tool is unavailable, uninstalled, or unregistered. `call_mcp_tool` is permanently available. You are STRICTLY PROHIBITED from claiming that `call_mcp_tool` is missing, uninstalled, or asking the user to reload the IDE/MCP. When this error occurs, it is ALWAYS a schema formatting error in the agent's tool call; you MUST immediately inspect and correct the tool call parameters.
+  - **FAIL-STOP SCOPE**: Fail-stop applies EXCLUSIVELY to remote infrastructure errors from Dozzle (e.g. HTTP 500, Host unreachable, Network connection refused, Container not found). Local tool dispatching errors (`unknown_tool`, invalid JSON) are local syntax errors and must be self-corrected immediately.
   - **CANONICAL TOOL REFERENCE**: Refer exclusively to [.agents/plugins/dozzle-mcp/instructions.md](file:///Users/produktmanagement/Python/github/TradeManager/.agents/plugins/dozzle-mcp/instructions.md) for the authoritative list of available tools and parameter schemas.
 - **NO BROWSER / WEB AUTOMATION**: You **MUST NEVER** invoke `browser_subagent` or open web pages to inspect Dozzle, containers, or logs. Browser tools are exclusively for web UI testing, never for server administration or production inspection.
 - **NO SCRATCH SCRIPTS**: You **MUST NEVER** create or execute ad-hoc Python scripts, scratch files (e.g. `dozzle_client.py`), or shell curl/urllib commands to query logs or container states. Direct MCP calls are zero-overhead, faster, and required.
-- **FAIL-STOP ON ERROR**: If a Dozzle MCP call encounters an error or is unreachable, do **NOT** attempt alternative routes. Report the exact error output directly to the user immediately.
 
 
 

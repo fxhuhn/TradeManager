@@ -501,6 +501,8 @@ class TradingSystemOrchestrator:
     async def _handle_successful_reconnection(self) -> None:
         """Behandelt erfolgreichen Wiederaufbau der Gateway-Verbindung."""
         logger.info("Reconnection successfully established!")
+        if self.callbacks_manager is not None:
+            self.callbacks_manager.on_connected()
         await self.notifier.send_system_status(
             title="WIEDERVERBUNDEN", emoji="✅", system="IBKR Gateway"
         )

@@ -157,6 +157,7 @@ class TwsCallbacksManager:
 
     def register_all(self) -> None:
         """Verknüpft die Event-Methoden mit den ib_async Signalen."""
+        self.interactive_brokers.connectedEvent.connect(self.on_connected)
         self.interactive_brokers.orderStatusEvent.connect(self.on_order_status)
         self.interactive_brokers.execDetailsEvent.connect(self.on_exec_details)
         self.interactive_brokers.commissionReportEvent.connect(
@@ -165,6 +166,13 @@ class TwsCallbacksManager:
         self.interactive_brokers.errorEvent.connect(self.on_error)
         self.interactive_brokers.disconnectedEvent.connect(self.on_disconnected)
         logger.info("All async TWS callbacks successfully registered")
+
+    def on_connected(self) -> None:
+        """Setzt den Broker-Verbindungsstatus bei erfolgreichem Socket-Aufbau auf aktiv."""
+        self._broker_connected = True
+        logger.info(
+            "TWS/Gateway connection established: broker status marked connected"
+        )
 
     @property
     def is_broker_connected(self) -> bool:

@@ -680,6 +680,7 @@ def test_register_all_connects_all_events(mock_config: Config) -> None:
     )
     manager.register_all()
 
+    mock_ib.connectedEvent.connect.assert_called_once_with(manager.on_connected)
     mock_ib.orderStatusEvent.connect.assert_called_once_with(manager.on_order_status)
     mock_ib.execDetailsEvent.connect.assert_called_once_with(manager.on_exec_details)
     mock_ib.commissionReportEvent.connect.assert_called_once_with(
@@ -1097,6 +1098,10 @@ async def test_is_broker_connected_property(mock_config: Config) -> None:
     # on_disconnected -> False
     manager.on_disconnected()
     assert manager.is_broker_connected is False
+
+    # on_connected -> True
+    manager.on_connected()
+    assert manager.is_broker_connected is True
 
 
 @pytest.mark.asyncio
