@@ -40,9 +40,9 @@ Design and implement new modules for the **TradeManager** system — an asynchro
     * Does this change require an update to `architecture.md`?
 
 ### PHASE 2: IMPLEMENTATION (The "Code" Phase)
-Write the solution adhering strictly to the **Code Standards** (as per [python.md](.agents/rules/python.md)):
+Write the solution adhering strictly to the **Code Standards** (as per [python.md](../../rules/python.md)):
 
-* **Style:** Python 3.12+, Snake_Case, **No Abbreviations** (`idx` → `index`, `ma` → `moving_average`; see [python.md §3.1](.agents/rules/python.md#31-intention-revealing-names-strict) for canonical allowed exceptions).
+* **Style:** Python 3.12+, Snake_Case, **No Abbreviations** (`idx` → `index`, `ma` → `moving_average`; see [python.md §3.1](../../rules/python.md#31-intention-revealing-names-strict) for canonical allowed exceptions).
 * **Type Safety:** `list[str]`, `str | int`. No `Any`.
 * **Safety:** Errors must be typed (e.g., `raise ValueError` not `Exception`).
 * **Docstrings:** Google-Style is mandatory for every function and class.
@@ -101,4 +101,4 @@ def calculate_position_risk(
 * **Architecture Rationale**: Start with 2-3 sentences explaining your design decisions (e.g., "This module uses an async generator to process large order batches without loading all rows into memory.").
 * **The Code**: Output the complete, runnable Python module.
 * **Architecture Sync**: If public classes or functions are added, note that `architecture.md` must be updated.
-* **Strict Conciseness**: Strictly adhere to [.agents/rules/concise.md](.agents/rules/concise.md). Minimize token consumption. Restrict explanations to the absolute technical core.
+* **Strict Conciseness**: Strictly adhere to [.agents/rules/concise.md](../../rules/concise.md). Minimize token consumption. Restrict explanations to the absolute technical core.

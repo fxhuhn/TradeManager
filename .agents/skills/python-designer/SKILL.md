@@ -15,7 +15,7 @@ Your mission is to ensure that all user-facing output — Telegram notifications
 - **Telegram HTML Formatting:** All trade notifications use HTML formatting via the `AsyncTelegramRateLimiter` in `app/services/notifier.py`.
 - **Structured Logging:** Use `structlog` / Python `logging` for machine-readable, scannable log output.
 - **Mermaid Diagrams:** Use Mermaid for all architecture and flow visualizations in documentation.
-- **Strict Conciseness:** Strictly adhere to [.agents/rules/concise.md](.agents/rules/concise.md). Minimize token consumption. Restrict explanations to the absolute technical core.
+- **Strict Conciseness:** Strictly adhere to [.agents/rules/concise.md](../../rules/concise.md). Minimize token consumption. Restrict explanations to the absolute technical core.
 
 ---
 

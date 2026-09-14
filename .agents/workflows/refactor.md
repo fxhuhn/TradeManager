@@ -9,8 +9,8 @@ Dieses Dokument definiert den verbindlichen Standardablauf für die sichere, sch
 
 > [!IMPORTANT]
 > **Voraussetzung für die Ausführung:**
-> Vor jeder Code-Analyse oder -Modifikation MÜSSEN die obligatorischen Schritte aus [.agents/AGENTS.md](.agents/AGENTS.md) eingehalten werden:
-> 1. **Step 1:** Architektur-Inspektion von [architecture.md](architecture.md) & [references/architecture.md](references/architecture.md).
+> Vor jeder Code-Analyse oder -Modifikation MÜSSEN die obligatorischen Schritte aus [.agents/AGENTS.md](../AGENTS.md) eingehalten werden:
+> 1. **Step 1:** Architektur-Inspektion von [architecture.md](../../architecture.md) & [references/architecture.md](../../references/architecture.md).
 > 2. **Step 2:** Skill-Aktivierung gemäß der betroffenen Phasen.
 
 ---
@@ -47,7 +47,7 @@ Dieses Dokument definiert den verbindlichen Standardablauf für die sichere, sch
 ---
 
 ## Phase 1: Baseline Verification (Status Quo sichern)
-**Verantwortlicher Skill:** `python-tester` ([.agents/skills/python-tester/SKILL.md](.agents/skills/python-tester/SKILL.md))
+**Verantwortlicher Skill:** `python-tester` ([.agents/skills/python-tester/SKILL.md](../skills/python-tester/SKILL.md))
 
 1. **Bestehende Test-Suite ausführen:**
    - Ausführung von `pytest tests/` für das Zielmodul und direkt gekoppelte Subsysteme.
@@ -65,7 +65,7 @@ Dieses Dokument definiert den verbindlichen Standardablauf für die sichere, sch
 ---
 
 ## Phase 2: Static Analysis, Security & Blast-Radius Audit (Diagnose)
-**Verantwortliche Skills:** `python-auditor` ([.agents/skills/python-auditor/SKILL.md](.agents/skills/python-auditor/SKILL.md)) & `python-security` ([.agents/skills/python-security/SKILL.md](.agents/skills/python-security/SKILL.md))
+**Verantwortliche Skills:** `python-auditor` ([.agents/skills/python-auditor/SKILL.md](../skills/python-auditor/SKILL.md)) & `python-security` ([.agents/skills/python-security/SKILL.md](../skills/python-security/SKILL.md))
 
 1. **Blast-Radius & Aufrufer-Analyse:**
    - Ermittlung aller externen Aufrufer und Konsumenten der öffentlichen Funktionen/Klassen via `grep_search`.
@@ -79,7 +79,7 @@ Dieses Dokument definiert den verbindlichen Standardablauf für die sichere, sch
      * Verschachtelungstiefe > 3 Ebenen
      * Mehr als 5 funktionale Parameter (Refactoring zu `@dataclass(frozen=True)` oder `TypedDict`)
      * `print()` statt `logger`
-     * Fehlende Docstrings oder unklare Bezeichner (Verstoß gegen [.agents/rules/python.md §3](.agents/rules/python.md))
+     * Fehlende Docstrings oder unklare Bezeichner (Verstoß gegen [.agents/rules/python.md §3](../rules/python.md))
 3. **Sicherheits- & Präzisions-Scan (`python-security`):**
    - **Zero-Float Invariante:** Auditierung auf Verwendung von binären `float`-Werten für Geld, Preise, PnL oder Slippage $\rightarrow$ strikte Umstellung auf `decimal.Decimal`.
    - **SQL-Injektion & WAL-Integrität:** Sicherstellen parametrisierter Queries (`?`), keine String-Interpolation, korrekte Foreign-Key-Cascades (`ON UPDATE CASCADE`).
@@ -90,7 +90,7 @@ Dieses Dokument definiert den verbindlichen Standardablauf für die sichere, sch
 ---
 
 ## Phase 3: Iterative Transformation (Refactoring)
-**Verantwortlicher Skill:** `python-craftsman` ([.agents/skills/python-craftsman/SKILL.md](.agents/skills/python-craftsman/SKILL.md))
+**Verantwortlicher Skill:** `python-craftsman` ([.agents/skills/python-craftsman/SKILL.md](../skills/python-craftsman/SKILL.md))
 
 1. **Abarbeitung des Audit-Protokolls in Micro-Schritten:**
    - Schrittweise Behebung der im Protokoll definierten Punkte.
@@ -132,12 +132,12 @@ Dieses Dokument definiert den verbindlichen Standardablauf für die sichere, sch
 ---
 
 ## Phase 5: Documentation & Architecture Sync
-**Verantwortliche Skills:** `python-craftsman` & `architect-design` ([.agents/skills/architect-design/SKILL.md](.agents/skills/architect-design/SKILL.md))
+**Verantwortliche Skills:** `python-craftsman` & `architect-design` ([.agents/skills/architect-design/SKILL.md](../skills/architect-design/SKILL.md))
 
 1. **Diff-Inspektion (`git diff`):**
    - Strikte Prüfung gegen Scope Leaks oder unbeabsichtigte Formatierungsänderungen außerhalb des Refactorings.
 2. **Architecture Sync & Dokumentation:**
-   - Wurden öffentliche Funktionen oder Klassen umbenannt, verschoben oder hinzugefügt, MUSS [architecture.md §4](architecture.md) aktualisiert werden.
+   - Wurden öffentliche Funktionen oder Klassen umbenannt, verschoben oder hinzugefügt, MUSS [architecture.md §4](../../architecture.md) aktualisiert werden.
    - Validierung durch:
      ```bash
      python .agents/skills/architecture-sync/scripts/check_sync.py

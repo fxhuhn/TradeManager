@@ -7,7 +7,7 @@ trigger: "/dry-run"
 
 When the user invokes `/dry-run` or requests to run a test, simulation, or verification of daily orders, you must execute the following 3-step diagnostic pipeline:
 
-1. **Activate Skills**: Load and execute instructions in [.agents/skills/python-tester/SKILL.md](.agents/skills/python-tester/SKILL.md) and [.agents/skills/ibkr-agent/SKILL.md](.agents/skills/ibkr-agent/SKILL.md).
+1. **Activate Skills**: Load and execute instructions in [.agents/skills/python-tester/SKILL.md](../skills/python-tester/SKILL.md) and [.agents/skills/ibkr-agent/SKILL.md](../skills/ibkr-agent/SKILL.md).
 2. **Execute Diagnostic Pipeline**:
    - **Step 1 — TWS Connectivity**: Run `python scripts/check_tws.py` to verify Gateway/TWS socket connection and account access.
    - **Step 2 — Order & CSV Validation**: Run `python scripts/dry_run_validation.py` to audit daily `orders_YYYY_MM_DD.csv` formatting, bracket leg consistency, and capital downscaling math.

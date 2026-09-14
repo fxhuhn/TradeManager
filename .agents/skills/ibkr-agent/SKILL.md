@@ -88,4 +88,4 @@ for pos in positions:
 3. **No Pydantic**: Use `@dataclass(frozen=True)` or `TypedDict` for data structures.
 4. **Functional Core / Imperative Shell**: Keep calculations (like sizing, allocation, risk calculations) pure, and confine TWS API interactions and DB operations to the Imperative Shell.
 5. **No Hardcoded Credentials**: Load connection parameters (host, port, clientId) from configuration or environment.
-6. **Strict Conciseness**: Strictly adhere to [.agents/rules/concise.md](.agents/rules/concise.md). Minimize token consumption. Restrict explanations to the absolute technical core.
+6. **Strict Conciseness**: Strictly adhere to [.agents/rules/concise.md](../../rules/concise.md). Minimize token consumption. Restrict explanations to the absolute technical core.

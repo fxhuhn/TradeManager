@@ -19,10 +19,10 @@ This skill is triggered whenever any of the following code modifications occur i
 * Creating or deleting source code modules or database schemas.
 
 ### 2. Constraints
-* Before declaring any implementation task complete, you **must** verify that any newly added public Class or Function is documented in the project-root [architecture.md](architecture.md) file.
+* Before declaring any implementation task complete, you **must** verify that any newly added public Class or Function is documented in the project-root [architecture.md](../../../architecture.md) file.
 * This documentation check is case-sensitive and scans for the exact class/function name within the documentation text.
-* The sync validation script verifies public classes and functions against the root [architecture.md](architecture.md) file; technical contracts and schemas continue to be maintained in [references/architecture.md](references/architecture.md) per the 2-Layer Abstraction Rule.
-* Strictly adhere to [.agents/rules/concise.md](.agents/rules/concise.md). Minimize token consumption. Restrict explanations to the absolute technical core.
+* The sync validation script verifies public classes and functions against the root [architecture.md](../../../architecture.md) file; technical contracts and schemas continue to be maintained in [references/architecture.md](../../../references/architecture.md) per the 2-Layer Abstraction Rule.
+* Strictly adhere to [.agents/rules/concise.md](../../rules/concise.md). Minimize token consumption. Restrict explanations to the absolute technical core.
 
 ### 3. Pre-Commit Validation Hook
 Every commit runs a local validation script to audit synchronization. To run this check manually:

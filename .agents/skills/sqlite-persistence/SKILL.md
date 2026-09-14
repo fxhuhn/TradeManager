@@ -8,7 +8,7 @@ description: "Expert SQLite Persistence & Database Invariants skill for TradeMan
 
 # SQLite Persistence & Database Invariants Skill
 
-This skill enforces database architecture invariants for TradeManager's local relational store (`data/trading.db`), as specified in [architecture.md](architecture.md) and [references/architecture.md](references/architecture.md).
+This skill enforces database architecture invariants for TradeManager's local relational store (`data/trading.db`), as specified in [architecture.md](../../../architecture.md) and [references/architecture.md](../../../references/architecture.md).
 
 ## Core Database Invariants
 
@@ -70,5 +70,5 @@ async def save_order_intent(orders: list[OrderRow]) -> None:
 - **Integrity Validation**: Use `verify_db_integrity()` (`PRAGMA integrity_check`) before initializing system loops.
 
 ### 5. Rules Compliance
-- **Strict Conciseness**: Strictly adhere to [.agents/rules/concise.md](.agents/rules/concise.md).
+- **Strict Conciseness**: Strictly adhere to [.agents/rules/concise.md](../../rules/concise.md).
 - **Architecture Sync**: Any modification to database schemas or helper functions in `app.core.db` must be updated in `architecture.md` and `references/architecture.md`.
