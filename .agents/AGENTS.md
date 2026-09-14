@@ -65,17 +65,23 @@ A task modifying code is NEVER complete if tests fail or if the quality pipeline
 ## Production Inspection & Log Analysis Invariant (MANDATORY)
 
 When querying, inspecting, or analyzing the production environment (containers, logs, metrics):
-- **DIRECT MCP CALLS ONLY**: You **MUST** use the native `call_mcp_tool` directly with `ServerName: "dozzle"`.
-  - **MANDATORY CALL SIGNATURE**: The IDE tool dispatcher strictly requires all 5 parameters: `ServerName`, `ToolName`, `Arguments`, `toolSummary`, and `toolAction`.
-    - `Arguments`: MUST ALWAYS be a JSON object/dict (e.g. `{}` or `{"key": "val"}`). NEVER pass a stringified JSON string (`"{}"`) and NEVER escape quotes.
-    - `ServerName`, `ToolName`, `toolSummary`, `toolAction`: MUST be clean plain strings.
-  - **PARSER ERROR SYMPTOM WARNING (ABSOLUTE)**: The IDE tool dispatcher masks ANY parameter or schema validation failure (e.g. `Arguments` passed as string instead of dict, omitted `toolSummary`/`toolAction`, or escaped quotes) with the generic error:
-    `(unknown_tool) unknown tool name: call_mcp_tool`.
-    This NEVER means the tool is unavailable, uninstalled, or unregistered. `call_mcp_tool` is permanently available. You are STRICTLY PROHIBITED from claiming that `call_mcp_tool` is missing, uninstalled, or asking the user to reload the IDE/MCP. When this error occurs, it is ALWAYS a schema formatting error in the agent's tool call; you MUST immediately inspect and correct the tool call parameters.
-  - **FAIL-STOP SCOPE**: Fail-stop applies EXCLUSIVELY to remote infrastructure errors from Dozzle (e.g. HTTP 500, Host unreachable, Network connection refused, Container not found). Local tool dispatching errors (`unknown_tool`, invalid JSON) are local syntax errors and must be self-corrected immediately.
-  - **CANONICAL TOOL REFERENCE**: Refer exclusively to [.agents/plugins/dozzle-mcp/instructions.md](file:///Users/produktmanagement/Python/github/TradeManager/.agents/plugins/dozzle-mcp/instructions.md) for the authoritative list of available tools and parameter schemas.
+- **EXECUTION PATHS (STRICT PRIORITY)**:
+  1. **PRIMARY PATH (DETERMINISTIC & MANDATORY DEFAULT)**: Always execute the permanent plugin CLI directly via shell:
+     ```bash
+     python3 .agents/plugins/dozzle-mcp/scripts/dozzle_cli.py status
+     python3 .agents/plugins/dozzle-mcp/scripts/dozzle_cli.py list
+     python3 .agents/plugins/dozzle-mcp/scripts/dozzle_cli.py logs trading-app --since 60 --tail 100
+     python3 .agents/plugins/dozzle-mcp/scripts/dozzle_cli.py search trading-app error --since 180
+     python3 .agents/plugins/dozzle-mcp/scripts/dozzle_cli.py stats trading-app
+     ```
+     *Rationale*: This CLI uses zero external dependencies (pure Python standard library), handles MCP SSE handshakes, resolves human-readable container names (`trading-app`, `ibkr`) to hex IDs, strips ANSI sequences, and is 100% immune to IDE tool dispatcher argument-formatting failures.
+  2. **SECONDARY ALTERNATIVE (Native IDE MCP Dispatcher)**: If and only if the native dispatcher is explicitly preferred, you may invoke `call_mcp_tool` with `ServerName: "dozzle"` and all 5 mandatory parameters:
+     - `Arguments`: MUST ALWAYS be a JSON object/dict (`{}` or `{"key": "val"}`), never a string.
+     - `ServerName`, `ToolName`, `toolSummary`, `toolAction`: plain strings.
+  - **PARSER ERROR SYMPTOM WARNING (ABSOLUTE)**: The IDE tool dispatcher masks ANY parameter or schema validation failure with the generic error: `(unknown_tool) unknown tool name: call_mcp_tool`. If this error occurs, switch immediately to the primary CLI `dozzle_cli.py`.
+  - **CANONICAL TOOL REFERENCE**: Refer exclusively to [.agents/plugins/dozzle-mcp/instructions.md](file:///Users/produktmanagement/Python/github/TradeManager/.agents/plugins/dozzle-mcp/instructions.md) for tool schemas and CLI usage.
 - **NO BROWSER / WEB AUTOMATION**: You **MUST NEVER** invoke `browser_subagent` or open web pages to inspect Dozzle, containers, or logs. Browser tools are exclusively for web UI testing, never for server administration or production inspection.
-- **NO SCRATCH SCRIPTS**: You **MUST NEVER** create or execute ad-hoc Python scripts, scratch files (e.g. `dozzle_client.py`), or shell curl/urllib commands to query logs or container states. Direct MCP calls are zero-overhead, faster, and required.
+- **NO AD-HOC SCRATCH SCRIPTS**: You **MUST NEVER** create temporary one-off scratch scripts in `/tmp` or the workspace. Always use the official CLI `.agents/plugins/dozzle-mcp/scripts/dozzle_cli.py`.
 
 
 
