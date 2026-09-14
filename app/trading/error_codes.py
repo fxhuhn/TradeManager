@@ -6,8 +6,10 @@ Ordnet TWS-Fehlermeldungen und Informationscodes in strukturierte Klassen ein
 """
 
 import re
+from collections.abc import Sequence
 from datetime import datetime
 from enum import Enum, auto
+from typing import Any
 from zoneinfo import ZoneInfo
 
 
@@ -97,6 +99,61 @@ def is_reauthorization_error(error_code: int, error_message: str) -> bool:
         return True
 
     return False
+
+
+def is_pre_market_hold_notice(
+    error_code: int = 0,
+    message: str = "",
+    why_held: str = "",
+) -> bool:
+    """Prüft, ob ein Fehlercode, ein Statushinweis oder whyHeld auf eine vorbörsliche Order-Zurückhaltung hinweist.
+
+    Erkennt TWS-Hinweise wie:
+    - Fehlercode 399 oder 2109
+    - 'will not be placed at the exchange until'
+    - 'will not be routed to the exchange until'
+    - 'will not be routed until next regular trading'
+    - 'outside regular trading hours'
+    - 'order will not be placed'
+    """
+    if error_code in (399, 2109):
+        return True
+
+    text_to_check = f"{message} {why_held}".lower()
+    patterns = (
+        "will not be placed at the exchange until",
+        "will not be routed to the exchange until",
+        "will not be routed until next regular trading",
+        "outside regular trading hours",
+        "order will not be placed",
+    )
+    return any(p in text_to_check for p in patterns)
+
+
+def is_trade_pre_market_held(
+    trade: Any, trade_log: Sequence[Any] | None = None
+) -> bool:
+    """Prüft, ob ein Trade-Objekt durch vorbörsliche Zurückhaltung (399/2109) gehalten wird und keine fatalen Fehler vorliegen."""
+    has_hold_indication = False
+    has_fatal_error = False
+
+    # 1. whyHeld prüfen
+    why_held = getattr(getattr(trade, "orderStatus", None), "whyHeld", "") or ""
+    if is_pre_market_hold_notice(why_held=str(why_held)):
+        has_hold_indication = True
+
+    # 2. trade.log prüfen
+    entries = trade_log if trade_log is not None else getattr(trade, "log", [])
+    for entry in entries:
+        code = getattr(entry, "errorCode", 0)
+        msg = getattr(entry, "message", "") or ""
+
+        if is_pre_market_hold_notice(error_code=code, message=str(msg)):
+            has_hold_indication = True
+        elif code != 0 and code not in (399, 2109):
+            has_fatal_error = True
+
+    return has_hold_indication and not has_fatal_error
 
 
 def is_market_closed_for_symbol(

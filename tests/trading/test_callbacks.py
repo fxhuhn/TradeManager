@@ -2010,3 +2010,112 @@ async def test_callbacks_filled_triggers_account_metrics_update(
         mock_metrics_callback.assert_called_once_with("U777")
     finally:
         db.close = original_close
+
+
+@pytest.mark.asyncio
+async def test_on_order_status_validation_error_with_warning_399_suppresses_alert(
+    db, mock_config: Config
+) -> None:
+    """Verifies that ValidationError paired with warning 399 maps to PreSubmitted and sends no alert."""
+    # Arrange: Order starts in 'Created' state
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, status
+        ) VALUES (888, 0, NULL, 'G888', 'ACC1', 'ENTRY', 'NVDA', 'STK', 'SMART', 'BUY', 10, 'LMT', 120.0, 'Created')
+        """
+    )
+    await db.commit()
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=MagicMock(),
+        notifier=mock_notifier,
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    try:
+        # Case 1: ValidationError with warning 399
+        trade = MagicMock()
+        trade.order.orderId = 888
+        trade.orderStatus.status = "ValidationError"
+        trade.orderStatus.permId = 555888
+        trade.orderStatus.avgFillPrice = 0.0
+        trade.contract.symbol = "NVDA"
+        trade.contract.secType = "STK"
+        trade.orderStatus.whyHeld = (
+            "Your order will not be placed at the exchange until 09:30 US/Eastern"
+        )
+
+        log_399 = MagicMock()
+        log_399.errorCode = 399
+        log_399.message = (
+            "Your order will not be placed at the exchange until 09:30 US/Eastern"
+        )
+        trade.log = [log_399]
+
+        manager.on_order_status(trade)
+        await asyncio.sleep(0.05)
+
+        # Assert no error notification sent!
+        mock_notifier.send_order_failed.assert_not_called()
+
+        # Assert DB status is PreSubmitted
+        async with db.execute(
+            "SELECT status, perm_id FROM orders WHERE order_id = 888"
+        ) as cursor:
+            row = await cursor.fetchone()
+            assert row["status"] == "PreSubmitted"
+            assert row["perm_id"] == 555888
+
+        # Case 2: Real ValidationError without 399 (e.g. order 889)
+        await db.execute(
+            """
+            INSERT INTO orders (
+                order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role,
+                symbol, sec_type, exchange, action, quantity, order_type, target_price, status
+            ) VALUES (889, 0, NULL, 'G889', 'ACC1', 'ENTRY', 'NVDA', 'STK', 'SMART', 'BUY', 10, 'LMT', 120.0, 'Created')
+            """
+        )
+        await db.commit()
+
+        bad_trade = MagicMock()
+        bad_trade.order.orderId = 889
+        bad_trade.orderStatus.status = "ValidationError"
+        bad_trade.orderStatus.permId = 555889
+        bad_trade.orderStatus.avgFillPrice = 0.0
+        bad_trade.contract.symbol = "NVDA"
+        bad_trade.contract.secType = "STK"
+        bad_trade.orderStatus.whyHeld = ""
+        bad_trade.log = []
+
+        manager.on_order_status(bad_trade)
+        await asyncio.sleep(0.05)
+
+        # Assert real error notification IS sent!
+        mock_notifier.send_order_failed.assert_called_once()
+        assert mock_notifier.send_order_failed.call_args[1]["order_id"] == 889
+        assert mock_notifier.send_order_failed.call_args[1]["is_fatal"] is True
+
+        async with db.execute(
+            "SELECT status FROM orders WHERE order_id = 889"
+        ) as cursor:
+            row = await cursor.fetchone()
+            assert row["status"] == "Error"
+
+    finally:
+        db.close = original_close

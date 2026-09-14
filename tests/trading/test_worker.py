@@ -442,6 +442,80 @@ async def test_place_and_verify_order_warning_399(db) -> None:
 
 
 @pytest.mark.asyncio
+async def test_place_and_verify_order_warning_399_separate_log_entries(db) -> None:
+    """Prüft, dass _place_and_verify_order bei separaten Logeinträgen für ValidationError und Code 399 Erfolg (True) liefert."""
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, status
+        ) VALUES (4242, NULL, 'G42', 'A1', 'ENTRY', 'MSFT', 'STK', 'SMART', 'BUY', 50, 'LMT', 400.0, 'Submitted')
+        """
+    )
+    await db.commit()
+
+    order_row = OrderRow(
+        order_id=4242,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="G42",
+        account_id="A1",
+        bracket_role="ENTRY",
+        symbol="MSFT",
+        sec_type="STK",
+        exchange="SMART",
+        action="BUY",
+        quantity=50,
+        order_type="LMT",
+        target_price=Decimal("400.0"),
+        tif="GTC",
+        strategy_name="DipBuyer",
+        status="Submitted",
+    )
+
+    log_validation_error = MagicMock()
+    log_validation_error.errorCode = 0
+    log_validation_error.status = "ValidationError"
+    log_validation_error.message = ""
+
+    log_warning_399 = MagicMock()
+    log_warning_399.errorCode = 399
+    log_warning_399.status = ""
+    log_warning_399.message = (
+        "Your order will not be placed at the exchange until 09:30 US/Eastern"
+    )
+
+    mock_trade = MagicMock()
+    mock_trade.orderStatus.status = "ValidationError"
+    mock_trade.orderStatus.whyHeld = (
+        "Your order will not be placed at the exchange until 09:30 US/Eastern"
+    )
+    mock_trade.log = [log_validation_error, log_warning_399]
+
+    mock_ib = MagicMock()
+    mock_ib.placeOrder.return_value = mock_trade
+
+    mock_notifier = AsyncMock()
+    mock_notifier.send_order_failed = AsyncMock()
+
+    result = await _place_and_verify_order(
+        db=db,
+        interactive_brokers=mock_ib,
+        contract=MagicMock(),
+        ib_order=MagicMock(),
+        order_row=order_row,
+        tws_order_id=4242,
+        notifier=mock_notifier,
+    )
+
+    assert result is True
+    mock_notifier.send_order_failed.assert_not_called()
+    async with db.execute("SELECT status FROM orders WHERE order_id = 4242") as cursor:
+        row = await cursor.fetchone()
+        assert row["status"] == "Submitted"
+
+
+@pytest.mark.asyncio
 async def test_place_and_verify_order_real_error(db) -> None:
     """Prüft, dass _place_and_verify_order bei einem echten Fehler False zurückgibt und DB-Status auf Error setzt."""
     await db.execute(

@@ -12,7 +12,7 @@ import dataclasses
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from decimal import Decimal, InvalidOperation
-from typing import Final
+from typing import Any, Final
 
 import aiosqlite
 import structlog
@@ -29,7 +29,9 @@ from app.core.models import OrderRow, order_row_from_db_row
 from app.services.notifier import TelegramNotifier, build_tree_message
 from app.trading.error_codes import (
     is_market_closed_for_symbol,
+    is_pre_market_hold_notice,
     is_reauthorization_error,
+    is_trade_pre_market_held,
 )
 from app.trading.order_builder import (
     build_order,
@@ -955,6 +957,15 @@ async def _place_and_verify_order(
 
     await _wait_for_order_submission(trade)
 
+    if is_trade_pre_market_held(trade):
+        logger.info(
+            "Order accepted with pre-market hold (warning 399 / held until open)",
+            order_id=tws_order_id,
+            symbol=order_row.symbol,
+            status=trade.orderStatus.status,
+        )
+        return True
+
     if trade.orderStatus.status in (
         "Inactive",
         "Cancelled",
@@ -965,7 +976,10 @@ async def _place_and_verify_order(
         has_parent = isinstance(parent_id_val, int) and parent_id_val > 0
         has_actual_error = any(
             (getattr(entry, "errorCode", 0) not in (0, 399, 2109))
-            or getattr(entry, "status", "") in ("ValidationError", "Error")
+            or (
+                getattr(entry, "status", "") in ("ValidationError", "Error")
+                and not is_trade_pre_market_held(trade)
+            )
             for entry in getattr(trade, "log", [])
         )
         is_waiting_child = (
@@ -1010,21 +1024,34 @@ async def _handle_order_rejection(
     error_msg = "Unknown error"
     tws_code = 0
 
+    current_trade_log: list[Any] = []
+
     # Bis zu 1 Sekunde auf asynchrones errorEvent von IBKR warten
     for _ in range(10):
         # Falls sich der Status zwischenzeitlich auf Submitted/PreSubmitted geändert hat, ist die Order aktiv
         if trade.orderStatus.status in ("Submitted", "PreSubmitted"):
             return True
 
+        current_trade_log = trade.log
+        if is_trade_pre_market_held(trade, current_trade_log):
+            logger.info(
+                "Ignoring pre-market hold warning (399/2109) during order placement",
+                order_id=tws_order_id,
+                symbol=order_row.symbol,
+            )
+            return True
+
         log_errors = [
             entry
-            for entry in trade.log
+            for entry in current_trade_log
             if entry.errorCode != 0 or entry.status in ("ValidationError", "Error")
         ]
 
         # Prüfe, ob ein echter Fehler (nicht 399/2109) vorliegt
         for entry in log_errors:
-            if entry.errorCode not in (399, 2109):
+            if entry.errorCode not in (399, 2109) and not is_pre_market_hold_notice(
+                error_code=entry.errorCode, message=entry.message
+            ):
                 error_msg = entry.message
                 tws_code = entry.errorCode
                 break
@@ -1035,14 +1062,29 @@ async def _handle_order_rejection(
 
         await asyncio.sleep(0.1)
 
+    if is_trade_pre_market_held(trade, current_trade_log):
+        logger.info(
+            "Ignoring pre-market hold warning (399/2109) during order placement",
+            order_id=tws_order_id,
+            symbol=order_row.symbol,
+        )
+        return True
+
     # Wenn nach der Wartezeit kein echter Fehler eingetroffen ist und nur harmlose Warnungen (399/2109) vorliegen:
     log_errors = [
         entry
-        for entry in trade.log
+        for entry in current_trade_log
         if entry.errorCode != 0 or entry.status in ("ValidationError", "Error")
     ]
     is_only_benign_warnings: bool = len(log_errors) > 0 and all(
-        entry.errorCode in (399, 2109) for entry in log_errors
+        entry.errorCode in (399, 2109)
+        or is_pre_market_hold_notice(error_code=entry.errorCode, message=entry.message)
+        or (
+            entry.status in ("ValidationError", "Error")
+            and entry.errorCode == 0
+            and is_trade_pre_market_held(trade, current_trade_log)
+        )
+        for entry in log_errors
     )
     if is_only_benign_warnings and error_msg == "Unknown error":
         logger.info(

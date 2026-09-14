@@ -27,7 +27,12 @@ from app.core.config import Config
 from app.core.db import transaction
 from app.core.models import parse_positive_decimal
 from app.services.notifier import TelegramNotifier, build_tree_message
-from app.trading.error_codes import ErrorClass, classify_error_code
+from app.trading.error_codes import (
+    ErrorClass,
+    classify_error_code,
+    is_pre_market_hold_notice,
+    is_trade_pre_market_held,
+)
 from app.trading.order_builder import symbols_match
 
 logger = structlog.get_logger()
@@ -154,6 +159,7 @@ class TwsCallbacksManager:
         self._order_locks: dict[int, asyncio.Lock] = {}
         self._broker_connected: bool = True
         self._notified_cancelled_order_ids: set[int] = set()
+        self._orders_with_warning_399: set[int] = set()
 
     def register_all(self) -> None:
         """Verknüpft die Event-Methoden mit den ib_async Signalen."""
@@ -245,12 +251,15 @@ class TwsCallbacksManager:
                     return False
 
                 # Ein Fehler-Status darf einen aktiven Zustand nicht überschreiben
-                if status == "Error" and current_status in (
-                    "PreSubmitted",
-                    "Submitted",
+                if status == "Error" and (
+                    current_status in ("PreSubmitted", "Submitted")
+                    or (
+                        order_id in self._orders_with_warning_399
+                        and current_status == "Created"
+                    )
                 ):
                     logger.info(
-                        "Ignoring error status update for active order (likely warning/ValidationError)",
+                        "Ignoring error status update for active/pre-market order (likely warning/ValidationError)",
                         order_id=order_id,
                         current_status=current_status,
                     )
@@ -318,6 +327,13 @@ class TwsCallbacksManager:
             status = trade.orderStatus.status
             permanent_id = trade.orderStatus.permId
 
+            is_pre_market = (
+                order_id in self._orders_with_warning_399
+                or is_trade_pre_market_held(trade)
+            )
+            if is_pre_market:
+                self._orders_with_warning_399.add(order_id)
+
             mapped_status = status
             if status in ("PreSubmitted", "Submitted"):
                 mapped_status = status
@@ -325,6 +341,12 @@ class TwsCallbacksManager:
                 mapped_status = "Filled"
             elif status in ("Cancelled", "Inactive"):
                 mapped_status = "Cancelled"
+            elif status == "ValidationError" and is_pre_market:
+                mapped_status = "PreSubmitted"
+                logger.info(
+                    "Mapping ValidationError to PreSubmitted due to pre-market hold notice (399)",
+                    order_id=order_id,
+                )
             else:
                 mapped_status = "Error"
 
@@ -502,6 +524,16 @@ class TwsCallbacksManager:
         reason: str = "",
     ) -> None:
         """Behandelt Statusänderung auf Cancelled/Inactive mit Two-Factor EOD-Filterung."""
+        if order_id in self._orders_with_warning_399 or is_pre_market_hold_notice(
+            message=reason
+        ):
+            logger.info(
+                "Order cancelled notification suppressed for pre-market hold (warning 399)",
+                order_id=order_id,
+                reason=reason,
+            )
+            return
+
         if order_id in self._notified_cancelled_order_ids:
             return
 
@@ -567,6 +599,16 @@ class TwsCallbacksManager:
         reason: str = "",
     ) -> None:
         """Behandelt Statusänderung auf Error mit Alarmierung."""
+        if order_id in self._orders_with_warning_399 or is_pre_market_hold_notice(
+            message=reason
+        ):
+            logger.info(
+                "Order failed notification suppressed for pre-market hold (warning 399)",
+                order_id=order_id,
+                reason=reason,
+            )
+            return
+
         if order_id in self._notified_cancelled_order_ids:
             return
         self._notified_cancelled_order_ids.add(order_id)
@@ -801,6 +843,15 @@ class TwsCallbacksManager:
         Triggert Retries, Warnungen, Verbindungsaufbau oder fatale Fehleralarme.
         """
         try:
+            if request_id > 0 and is_pre_market_hold_notice(error_code, error_string):
+                self._orders_with_warning_399.add(request_id)
+                logger.info(
+                    "Pre-market hold notice registered for order (warning 399/2109)",
+                    order_id=request_id,
+                    code=error_code,
+                    message=error_string,
+                )
+
             if request_id == -1 and error_code in (2104, 2106, 2158, 2100):
                 logger.debug(
                     "TWS system info received", code=error_code, message=error_string

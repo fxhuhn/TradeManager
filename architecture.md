@@ -167,6 +167,8 @@ This section provides a detailed reference of all public classes and functions i
   - `mark_file_reported` (Method)
   - `is_hanging_order_reported` (Method)
   - `mark_hanging_order_reported` (Method)
+  - `get_or_set_hanging_first_seen` (Method)
+  - `prune_hanging_orders` (Method)
 
 ### 4.6 Module: `app.services.csv_reader`
 - `validate_group` (Function): Asserts bracket consistency and validity of leg rows.
@@ -234,6 +236,8 @@ This section provides a detailed reference of all public classes and functions i
 - `ErrorClass` (Class): Enumeration classifying IBKR error severity.
 - `classify_error_code` (Function): Categorizes error codes into actionable retry/fail classes.
 - `is_reauthorization_error` (Function): Evaluates whether a TWS error code or message indicates a 2FA/token reauthorization requirement in the Client Portal.
+- `is_pre_market_hold_notice` (Function): Checks whether an error code, message or whyHeld indicates a pre-market order hold notice (399/2109).
+- `is_trade_pre_market_held` (Function): Evaluates whether an ib_async Trade is held pre-market without real fatal errors.
 - `is_market_closed_for_symbol` (Function): Checks if regular trading hours have ended for a given symbol (e.g., 17:30 Berlin for Xetra or 16:00 New York for US equities).
 
 ### 4.13 Module: `app.trading.order_builder`

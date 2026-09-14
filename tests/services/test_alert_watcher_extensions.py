@@ -1,5 +1,6 @@
 """Unit-Tests für die erweiterten AlertWatcher- und Notifier-Funktionen."""
 
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -91,24 +92,71 @@ async def test_check_hanging_orders_triggers_alert(
         mock_notifier = MagicMock(spec=TelegramNotifier)
         mock_notifier.send_message = AsyncMock(return_value=True)
 
-        # Act
-        await check_hanging_orders(
-            db=connection, notifier=mock_notifier, state=state, threshold_minutes=10
-        )
+        t0 = datetime(2026, 9, 14, 6, 0, 0, tzinfo=UTC)
 
-        # Assert
+        # Act 1: Neuer Aufruf zum Zeitpunkt t0 (0 Minuten Verweildauer) -> Kein Alarm!
+        await check_hanging_orders(
+            db=connection,
+            notifier=mock_notifier,
+            state=state,
+            threshold_minutes=10,
+            current_time=t0,
+        )
+        mock_notifier.send_message.assert_not_called()
+        assert not state.is_hanging_order_reported(101)
+
+        # Act 2: Aufruf nach 5 Minuten -> Schwellenwert noch nicht erreicht -> Kein Alarm!
+        t_5m = t0 + timedelta(minutes=5)
+        await check_hanging_orders(
+            db=connection,
+            notifier=mock_notifier,
+            state=state,
+            threshold_minutes=10,
+            current_time=t_5m,
+        )
+        mock_notifier.send_message.assert_not_called()
+
+        # Act 3: Aufruf nach 11 Minuten -> Schwellenwert überschritten -> Alarm wird gesendet!
+        t_11m = t0 + timedelta(minutes=11)
+        await check_hanging_orders(
+            db=connection,
+            notifier=mock_notifier,
+            state=state,
+            threshold_minutes=10,
+            current_time=t_11m,
+        )
         mock_notifier.send_message.assert_called_once()
         sent_message = mock_notifier.send_message.call_args[0][0]
         assert "HÄNGENDE ORDER" in sent_message
         assert "AAPL" in sent_message
         assert state.is_hanging_order_reported(101)
 
-        # Zweiter Durchlauf darf nicht noch einmal senden
+        # Act 4: Zweiter Durchlauf nach 12 Minuten darf nicht noch einmal senden (Deduplizierung)
         mock_notifier.send_message.reset_mock()
+        t_12m = t0 + timedelta(minutes=12)
         await check_hanging_orders(
-            db=connection, notifier=mock_notifier, state=state, threshold_minutes=10
+            db=connection,
+            notifier=mock_notifier,
+            state=state,
+            threshold_minutes=10,
+            current_time=t_12m,
         )
         mock_notifier.send_message.assert_not_called()
+
+        # Act 5: Order wechselt auf PreSubmitted -> Pruning entfernt sie aus dem State
+        await connection.execute(
+            "UPDATE orders SET status = 'PreSubmitted' WHERE order_id = 101"
+        )
+        await connection.commit()
+        await check_hanging_orders(
+            db=connection,
+            notifier=mock_notifier,
+            state=state,
+            threshold_minutes=10,
+            current_time=t_12m,
+        )
+        assert 101 not in state.hanging_orders_first_seen
+        assert 101 not in state.reported_hanging_order_ids
 
 
 @pytest.mark.asyncio

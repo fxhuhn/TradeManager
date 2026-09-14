@@ -274,6 +274,7 @@ class AlertState:
         self.reported_trade_groups: set[str] = set()
         self.reported_error_files: set[str] = set()
         self.reported_hanging_order_ids: set[int] = set()
+        self.hanging_orders_first_seen: dict[int, datetime] = {}
 
     def is_order_reported(self, order_id: int) -> bool:
         """Gibt an, ob die Order bereits gemeldet wurde."""
@@ -306,6 +307,27 @@ class AlertState:
     def mark_hanging_order_reported(self, order_id: int) -> None:
         """Markiert die hängende Order als gemeldet."""
         self.reported_hanging_order_ids.add(order_id)
+
+    def get_or_set_hanging_first_seen(
+        self, order_id: int, seen_time: datetime
+    ) -> datetime:
+        """Gibt den Zeitpunkt des ersten Sichtens zurück oder registriert ihn."""
+        if order_id not in self.hanging_orders_first_seen:
+            self.hanging_orders_first_seen[order_id] = seen_time
+        return self.hanging_orders_first_seen[order_id]
+
+    def prune_hanging_orders(self, active_created_order_ids: set[int]) -> None:
+        """Entfernt Orders, die nicht mehr im Status 'Created' verweilen."""
+        self.hanging_orders_first_seen = {
+            oid: dt
+            for oid, dt in self.hanging_orders_first_seen.items()
+            if oid in active_created_order_ids
+        }
+        self.reported_hanging_order_ids = {
+            oid
+            for oid in self.reported_hanging_order_ids
+            if oid in active_created_order_ids
+        }
 
 
 async def check_archived_error_files(
@@ -358,42 +380,60 @@ async def check_hanging_orders(
         threshold_minutes: Schwellenwert in Minuten, ab wann eine Order als hängend gilt.
         current_time: Optionaler Referenzzeitpunkt für Tests.
     """
+    if current_time is None:
+        now = datetime.now(UTC)
+    elif current_time.tzinfo is None:
+        now = current_time.replace(tzinfo=UTC)
+    else:
+        now = current_time.astimezone(UTC)
+
     query = """
         SELECT order_id, trade_group_id, symbol
         FROM orders
         WHERE status = 'Created'
     """
     try:
+        active_created_order_ids: set[int] = set()
+        orders_to_alert: list[tuple[int, str, str]] = []
+
         async with db.execute(query) as cursor:
             async for row in cursor:
                 order_id = int(row["order_id"])
                 symbol = str(row["symbol"])
                 trade_group_id = str(row["trade_group_id"])
+                active_created_order_ids.add(order_id)
 
-                if state.is_hanging_order_reported(order_id):
-                    continue
+                first_seen = state.get_or_set_hanging_first_seen(order_id, now)
+                duration_minutes = (now - first_seen).total_seconds() / 60.0
 
-                logger.warning(
-                    "Hanging created order detected",
-                    order_id=order_id,
-                    trade_group_id=trade_group_id,
-                    symbol=symbol,
-                )
-                message = build_tree_message(
-                    title="HÄNGENDE ORDER (Status: Created)",
-                    context=symbol,
-                    emoji="⚠️",
-                    rows=[
-                        ("Order-ID", f"<code>{order_id}</code>"),
-                        ("Trade-Gruppe", f"<code>{trade_group_id}</code>"),
-                        (
-                            "Hinweis",
-                            f"Order verweilt länger als {threshold_minutes} Minuten in 'Created'.",
-                        ),
-                    ],
-                )
-                if await notifier.send_message(message):
-                    state.mark_hanging_order_reported(order_id)
+                if duration_minutes >= threshold_minutes:
+                    if not state.is_hanging_order_reported(order_id):
+                        orders_to_alert.append((order_id, trade_group_id, symbol))
+
+        state.prune_hanging_orders(active_created_order_ids)
+
+        for order_id, trade_group_id, symbol in orders_to_alert:
+            logger.warning(
+                "Hanging created order detected",
+                order_id=order_id,
+                trade_group_id=trade_group_id,
+                symbol=symbol,
+            )
+            message = build_tree_message(
+                title="HÄNGENDE ORDER (Status: Created)",
+                context=symbol,
+                emoji="⚠️",
+                rows=[
+                    ("Order-ID", f"<code>{order_id}</code>"),
+                    ("Trade-Gruppe", f"<code>{trade_group_id}</code>"),
+                    (
+                        "Hinweis",
+                        f"Order verweilt länger als {threshold_minutes} Minuten in 'Created'.",
+                    ),
+                ],
+            )
+            if await notifier.send_message(message):
+                state.mark_hanging_order_reported(order_id)
     except Exception as exception:
         logger.error("Error during hanging orders check", error=str(exception))
 
