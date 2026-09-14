@@ -69,6 +69,7 @@ def test_config() -> Config:
         chat_id="test_chat",
         rate_limit_delay_s=0.0,
         request_timeout_s=10.0,
+        docker_socket_path="/nonexistent/docker.sock",
     )
     return Config(
         tws=tws, app=app, account=account, telegram=telegram, strategy_limits={}
@@ -325,6 +326,12 @@ async def test_heartbeat_ping_timeout_disconnects(test_config: Config) -> None:
     mock_notifier = MagicMock()
     mock_notifier.send_message = AsyncMock(return_value=True)
 
+    disconnect_event = asyncio.Event()
+    mock_ib.disconnect.side_effect = disconnect_event.set
+
+    mock_container_mgr = MagicMock()
+    mock_container_mgr.is_available.return_value = False
+
     orchestrator = TradingSystemOrchestrator(
         root_directory_path=MagicMock(),
         database_path=MagicMock(),
@@ -332,10 +339,11 @@ async def test_heartbeat_ping_timeout_disconnects(test_config: Config) -> None:
         notifier=mock_notifier,
         interactive_brokers=mock_ib,
         queue=asyncio.Queue(),
+        container_manager=mock_container_mgr,
     )
 
     heartbeat_task = asyncio.create_task(orchestrator.heartbeat_loop())
-    await asyncio.sleep(0.15)
+    await asyncio.wait_for(disconnect_event.wait(), timeout=2.0)
     heartbeat_task.cancel()
 
     try:

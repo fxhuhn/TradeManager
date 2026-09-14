@@ -85,6 +85,7 @@ def test_config() -> Config:
         chat_id="test_chat",
         rate_limit_delay_s=0.0,
         request_timeout_s=10.0,
+        docker_socket_path="/nonexistent/docker.sock",
     )
     futures = FuturesConfig(
         asset_mapping={"QQQ": "MNQ", "SPY": "MES", "IWM": "M2K", "DIA": "MYM"},

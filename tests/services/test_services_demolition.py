@@ -74,7 +74,7 @@ async def test_account_metrics_save_and_retrieve_financial_precision(
 async def test_get_latest_account_metrics_returns_none_on_database_exception() -> None:
     """Verifies that database execution errors are caught and return None gracefully."""
     # Arrange
-    mock_db = MagicMock(spec=aiosqlite.Connection)
+    mock_db = MagicMock()
     mock_db.execute.side_effect = RuntimeError("SQLite disk I/O failure")
 
     # Act

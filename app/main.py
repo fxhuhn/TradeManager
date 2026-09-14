@@ -679,14 +679,21 @@ class TradingSystemOrchestrator:
                 "Heartbeat timeout. API connection stalled. Triggering disconnect.",
                 timeout_seconds=self.config.tws.heartbeat_timeout_s,
             )
+            self.interactive_brokers.disconnect()
             health_suffix = ""
             if self.container_manager.is_available():
-                status_report = await self.container_manager.get_container_status(
-                    self.config.telegram.ibkr_container_name
-                )
-                if status_report.exists and status_report.health_status:
-                    health_suffix = (
-                        f" (Container-Status: <b>{status_report.health_status}</b>)"
+                try:
+                    status_report = await self.container_manager.get_container_status(
+                        self.config.telegram.ibkr_container_name
+                    )
+                    if status_report.exists and status_report.health_status:
+                        health_suffix = (
+                            f" (Container-Status: <b>{status_report.health_status}</b>)"
+                        )
+                except Exception as container_error:
+                    logger.warning(
+                        "Failed to inspect container status during heartbeat timeout",
+                        error=str(container_error),
                     )
             timeout_msg = build_tree_message(
                 title="HEARTBEAT TIMEOUT",
@@ -697,8 +704,13 @@ class TradingSystemOrchestrator:
                     ("Aktion", "Verbindung getrennt, Reconnect wird erzwungen."),
                 ],
             )
-            await self.notifier.send_message(timeout_msg)
-            self.interactive_brokers.disconnect()
+            try:
+                await self.notifier.send_message(timeout_msg)
+            except Exception as notify_error:
+                logger.warning(
+                    "Failed to send heartbeat timeout message",
+                    error=str(notify_error),
+                )
         except Exception as exception:
             logger.warning("Error during heartbeat ping", error=str(exception))
 
