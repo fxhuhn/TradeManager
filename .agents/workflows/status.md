@@ -30,5 +30,3 @@ When the user asks to check the production system, investigate logs, or invokes 
      * Order pipeline breakdown (e.g. `PreSubmitted`, `Submitted`, `Filled`, `Cancelled`, `Error`).
      * Real unhandled errors vs. filtered benign notices (Code 399 pre-market holds, data farm info, regular reconnects).
      * Account equity, margin cushion, and available funds.
-
-

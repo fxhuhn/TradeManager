@@ -78,12 +78,7 @@ When querying, inspecting, or analyzing the production environment (containers, 
   2. **SECONDARY ALTERNATIVE (Native IDE MCP Dispatcher)**: If and only if the native dispatcher is explicitly preferred, you may invoke `call_mcp_tool` with `ServerName: "dozzle"` and all 5 mandatory parameters:
      - `Arguments`: MUST ALWAYS be a JSON object/dict (`{}` or `{"key": "val"}`), never a string.
      - `ServerName`, `ToolName`, `toolSummary`, `toolAction`: plain strings.
-  - **PARSER ERROR SYMPTOM WARNING (ABSOLUTE)**: The IDE tool dispatcher masks ANY parameter or schema validation failure with the generic error: `(unknown_tool) unknown tool name: call_mcp_tool`. If this error occurs, switch immediately to the primary CLI `dozzle_cli.py`.
-  - **CANONICAL TOOL REFERENCE**: Refer exclusively to [.agents/plugins/dozzle-mcp/instructions.md](file:///Users/produktmanagement/Python/github/TradeManager/.agents/plugins/dozzle-mcp/instructions.md) for tool schemas and CLI usage.
+     - *Parser Warning*: The IDE tool dispatcher masks ANY parameter or schema validation failure with `(unknown_tool) unknown tool name: call_mcp_tool`. If this error occurs, switch immediately to the primary CLI `dozzle_cli.py`.
+- **CANONICAL TOOL REFERENCE**: Refer exclusively to [.agents/plugins/dozzle-mcp/instructions.md](file:///Users/produktmanagement/Python/github/TradeManager/.agents/plugins/dozzle-mcp/instructions.md) for tool schemas and CLI usage.
 - **NO BROWSER / WEB AUTOMATION**: You **MUST NEVER** invoke `browser_subagent` or open web pages to inspect Dozzle, containers, or logs. Browser tools are exclusively for web UI testing, never for server administration or production inspection.
 - **NO AD-HOC SCRATCH SCRIPTS**: You **MUST NEVER** create temporary one-off scratch scripts in `/tmp` or the workspace. Always use the official CLI `.agents/plugins/dozzle-mcp/scripts/dozzle_cli.py`.
-
-
-
-
-
