@@ -176,7 +176,7 @@ The lifecycle status changes of a trade group's order are stateful and governed 
 | Source State | Destination State | Trigger Rule / Conditions |
 | :--- | :--- | :--- |
 | — | `Created` | Order record is parsed, downscaled successfully, and written to database. |
-| `Created` | `Submitted` | Queue worker transmits parent/child legs to IBKR socket (first parent exit, then parent entry). |
+| `Created` | `Submitted` | Queue worker transmits parent/child legs to IBKR socket (first parent exit, then parent entry), or TWS reports `PendingSubmit`. |
 | `Created` | `Cancelled` | Reauthorization/token wait loop reaches regular trading hours close without user approval in Client Portal. Remaining group orders expire. |
 | `Submitted` | `PreSubmitted` | Gateway returns receipt acknowledgment event. |
 | `Submitted` | `Error` | What-If simulation fails, connection is severed, or API submission returns immediate error. |
@@ -185,6 +185,12 @@ The lifecycle status changes of a trade group's order are stateful and governed 
 | `PreSubmitted`| `Error` | Connection disconnect limits exceeded, or Gateway reports failed transmission error. |
 | `Submitted` | `Cancelled` | Brokerage cancels the order context before Gateway processing. |
 | — | `Filled` | Automatic position reconciliation (`reconcile_broker_positions`) detects an unassigned broker position discrepancy and creates a synthetic `ENTRY` order (`strategy_name = NULL`, `trade_group_id = UNASSIGNED_*`) and matching execution ticket. |
+
+* **Transient States & Invariants**:
+  * **`PendingSubmit`**: Mapped dynamically to `Submitted`. Does not regress orders already in `PreSubmitted`.
+  * **`PendingCancel`**: Ephemeral in-flight transition state. Acknowledged and logged; `perm_id` updated if missing. Does not overwrite persistent SQLite `status` (preserving CHECK constraint) and does not fire failure alerts.
+  * **Status Monotonicity**: Once an order reaches `PreSubmitted`, subsequent delayed `Submitted` or `PendingSubmit` callbacks are ignored and will not regress the order state.
+  * **EOD & GTD Cancellation Suppression**: Cancellations occurring within 15 minutes of market close (from 15:45 US/Eastern or 17:15 Europe/Berlin) or after GTD cutoff (`is_past_loc_gtd_cutoff`) are recognized as regular expiration events; error alerts to Telegram are suppressed.
 
 
 ---

@@ -2119,3 +2119,288 @@ async def test_on_order_status_validation_error_with_warning_399_suppresses_aler
 
     finally:
         db.close = original_close
+
+
+@pytest.mark.asyncio
+async def test_on_order_status_pending_submit_maps_to_submitted(
+    db: aiosqlite.Connection, mock_config: Config
+) -> None:
+    """Verifiziert, dass PendingSubmit sauber auf Submitted gemappt wird und keinen Fehler auslöst."""
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, status
+        ) VALUES (901, 0, NULL, 'G901', 'ACC1', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 10, 'LMT', 150.0, 'Created')
+        """
+    )
+    await db.commit()
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=MagicMock(),
+        notifier=mock_notifier,
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    try:
+        trade = MagicMock()
+        trade.order.orderId = 901
+        trade.orderStatus.status = "PendingSubmit"
+        trade.orderStatus.permId = 777901
+        trade.orderStatus.avgFillPrice = 0.0
+        trade.contract.symbol = "AAPL"
+        trade.contract.secType = "STK"
+        trade.orderStatus.whyHeld = ""
+        trade.log = []
+
+        manager.on_order_status(trade)
+        await asyncio.sleep(0.05)
+
+        mock_notifier.send_order_failed.assert_not_called()
+
+        async with db.execute(
+            "SELECT status, perm_id FROM orders WHERE order_id = 901"
+        ) as cursor:
+            row = await cursor.fetchone()
+            assert row["status"] == "Submitted"
+            assert row["perm_id"] == 777901
+    finally:
+        db.close = original_close
+
+
+@pytest.mark.asyncio
+async def test_on_order_status_pending_cancel_preserves_active_status(
+    db: aiosqlite.Connection, mock_config: Config
+) -> None:
+    """Verifiziert, dass PendingCancel als transienter Status anerkannt wird, keine Alarme sendet und den DB-Status nicht beschädigt."""
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, status
+        ) VALUES (902, 111902, NULL, 'G902', 'ACC1', 'EXIT', 'AAPL', 'STK', 'SMART', 'SELL', 10, 'LMT', 155.0, 'Submitted')
+        """
+    )
+    await db.commit()
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=MagicMock(),
+        notifier=mock_notifier,
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    try:
+        # 1. PendingCancel Event
+        trade = MagicMock()
+        trade.order.orderId = 902
+        trade.orderStatus.status = "PendingCancel"
+        trade.orderStatus.permId = 111902
+        trade.orderStatus.avgFillPrice = 0.0
+        trade.contract.symbol = "AAPL"
+        trade.contract.secType = "STK"
+        trade.orderStatus.whyHeld = ""
+        trade.log = []
+
+        manager.on_order_status(trade)
+        await asyncio.sleep(0.05)
+
+        # Keine Alarme, Status bleibt Submitted (Schutz des CHECK-Constraints)
+        mock_notifier.send_order_failed.assert_not_called()
+
+        async with db.execute(
+            "SELECT status, perm_id FROM orders WHERE order_id = 902"
+        ) as cursor:
+            row = await cursor.fetchone()
+            assert row["status"] == "Submitted"
+            assert row["perm_id"] == 111902
+
+        # 2. Nachfolgendes Cancelled Event
+        trade_cancel = MagicMock()
+        trade_cancel.order.orderId = 902
+        trade_cancel.orderStatus.status = "Cancelled"
+        trade_cancel.orderStatus.permId = 111902
+        trade_cancel.orderStatus.avgFillPrice = 0.0
+        trade_cancel.contract.symbol = "AAPL"
+        trade_cancel.contract.secType = "STK"
+        trade_cancel.orderStatus.whyHeld = "Expired"
+        trade_cancel.log = []
+
+        manager.on_order_status(trade_cancel)
+        await asyncio.sleep(0.05)
+
+        async with db.execute(
+            "SELECT status FROM orders WHERE order_id = 902"
+        ) as cursor:
+            row = await cursor.fetchone()
+            assert row["status"] == "Cancelled"
+    finally:
+        db.close = original_close
+
+
+@pytest.mark.asyncio
+async def test_presubmitted_does_not_regress_to_submitted(
+    db: aiosqlite.Connection, mock_config: Config
+) -> None:
+    """Verifiziert die Status-Monotonie: PreSubmitted darf durch nachfolgendes Submitted/PendingSubmit nicht überschrieben werden."""
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, status
+        ) VALUES (903, 222903, NULL, 'G903', 'ACC1', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 10, 'LMT', 150.0, 'PreSubmitted')
+        """
+    )
+    await db.commit()
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=MagicMock(),
+        notifier=mock_notifier,
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    try:
+        # Verspätetes 'Submitted'-Event
+        trade = MagicMock()
+        trade.order.orderId = 903
+        trade.orderStatus.status = "Submitted"
+        trade.orderStatus.permId = 222903
+        trade.orderStatus.avgFillPrice = 0.0
+        trade.contract.symbol = "AAPL"
+        trade.contract.secType = "STK"
+        trade.orderStatus.whyHeld = ""
+        trade.log = []
+
+        manager.on_order_status(trade)
+        await asyncio.sleep(0.05)
+
+        async with db.execute(
+            "SELECT status, perm_id FROM orders WHERE order_id = 903"
+        ) as cursor:
+            row = await cursor.fetchone()
+            assert row["status"] == "PreSubmitted"
+
+        # Verspätetes 'PendingSubmit'-Event
+        trade.orderStatus.status = "PendingSubmit"
+        manager.on_order_status(trade)
+        await asyncio.sleep(0.05)
+
+        async with db.execute(
+            "SELECT status FROM orders WHERE order_id = 903"
+        ) as cursor:
+            row = await cursor.fetchone()
+            assert row["status"] == "PreSubmitted"
+    finally:
+        db.close = original_close
+
+
+@pytest.mark.asyncio
+async def test_gtd_cancellation_at_15_48_suppresses_alert(
+    db: aiosqlite.Connection, mock_config: Config
+) -> None:
+    """Verifiziert, dass bei Stornierung um 15:48 US/Eastern (GTD-Cutoff) mit leerem TWS-Grund kein Alarm gesendet wird."""
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, status
+        ) VALUES (904, 333904, NULL, 'G904', 'ACC1', 'EXIT', 'NBIS', 'STK', 'SMART', 'SELL', 28, 'LMT', 219.33, 'Submitted')
+        """
+    )
+    await db.commit()
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=MagicMock(),
+        notifier=mock_notifier,
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    try:
+        with patch.object(manager, "_is_near_or_after_market_close", return_value=True):
+            # 1. Error 202 empfangen: 'Order Canceled - reason:'
+            manager.on_error(
+                request_id=904,
+                error_code=202,
+                error_string="Order Canceled - reason:",
+            )
+            await asyncio.sleep(0.05)
+
+            # 2. orderStatus Cancelled empfangen
+            trade = MagicMock()
+            trade.order.orderId = 904
+            trade.orderStatus.status = "Cancelled"
+            trade.orderStatus.permId = 333904
+            trade.orderStatus.avgFillPrice = 0.0
+            trade.contract.symbol = "NBIS"
+            trade.contract.secType = "STK"
+            trade.orderStatus.whyHeld = ""
+            trade.log = []
+
+            manager.on_order_status(trade)
+            await asyncio.sleep(0.05)
+
+        # Alarmierung MUSS unterdrückt worden sein!
+        mock_notifier.send_order_failed.assert_not_called()
+
+        async with db.execute(
+            "SELECT status FROM orders WHERE order_id = 904"
+        ) as cursor:
+            row = await cursor.fetchone()
+            assert row["status"] == "Cancelled"
+    finally:
+        db.close = original_close

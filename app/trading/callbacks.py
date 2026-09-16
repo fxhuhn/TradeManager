@@ -33,7 +33,7 @@ from app.trading.error_codes import (
     is_pre_market_hold_notice,
     is_trade_pre_market_held,
 )
-from app.trading.order_builder import symbols_match
+from app.trading.order_builder import is_past_loc_gtd_cutoff, symbols_match
 
 logger = structlog.get_logger()
 
@@ -250,6 +250,38 @@ class TwsCallbacksManager:
                     )
                     return False
 
+                # PendingCancel ist ein flüchtiger Übergangszustand vor der finalen Stornierungsbestätigung
+                if status == "PendingCancel":
+                    logger.debug(
+                        "Order status PendingCancel acknowledged, keeping current status until confirmed",
+                        order_id=order_id,
+                        current_status=current_status,
+                    )
+                    if permanent_id:
+                        await db.execute(
+                            "UPDATE orders SET perm_id = ? WHERE order_id = ?",
+                            (permanent_id, order_id),
+                        )
+                    return False
+
+                # Ein Zustand darf nicht von PreSubmitted zurück auf Submitted fallen
+                if current_status == "PreSubmitted" and status in (
+                    "Submitted",
+                    "PendingSubmit",
+                ):
+                    logger.debug(
+                        "Ignoring status regression from PreSubmitted to Submitted",
+                        order_id=order_id,
+                        current_status=current_status,
+                        new_status=status,
+                    )
+                    if permanent_id:
+                        await db.execute(
+                            "UPDATE orders SET perm_id = ? WHERE order_id = ?",
+                            (permanent_id, order_id),
+                        )
+                    return False
+
                 # Ein Fehler-Status darf einen aktiven Zustand nicht überschreiben
                 if status == "Error" and (
                     current_status in ("PreSubmitted", "Submitted")
@@ -337,6 +369,10 @@ class TwsCallbacksManager:
             mapped_status = status
             if status in ("PreSubmitted", "Submitted"):
                 mapped_status = status
+            elif status == "PendingSubmit":
+                mapped_status = "Submitted"
+            elif status == "PendingCancel":
+                mapped_status = "PendingCancel"
             elif status == "Filled":
                 mapped_status = "Filled"
             elif status in ("Cancelled", "Inactive"):
@@ -564,16 +600,18 @@ class TwsCallbacksManager:
         bracket_role = order_row["bracket_role"] if order_row else "-"
 
         is_near_close = self._is_near_or_after_market_close(symbol)
+        is_gtd_expired = is_past_loc_gtd_cutoff(symbol) if symbol else False
         is_eod_oca = self._is_eod_or_oca_reason(reason)
 
         self._notified_cancelled_order_ids.add(order_id)
 
-        if is_near_close or is_eod_oca:
+        if is_near_close or is_gtd_expired or is_eod_oca:
             logger.info(
                 "Order status Cancelled/Inactive notification suppressed (EOD or OCA reason)",
                 order_id=order_id,
                 symbol=symbol,
                 is_near_close=is_near_close,
+                is_gtd_expired=is_gtd_expired,
                 is_eod_oca=is_eod_oca,
                 reason=reason,
             )
@@ -1010,16 +1048,18 @@ class TwsCallbacksManager:
         ).strip()
 
         is_near_close = self._is_near_or_after_market_close(symbol)
+        is_gtd_expired = is_past_loc_gtd_cutoff(symbol) if symbol else False
         is_eod_oca = self._is_eod_or_oca_reason(clean_error_string)
 
         self._notified_cancelled_order_ids.add(request_id)
 
-        if is_near_close or is_eod_oca:
+        if is_near_close or is_gtd_expired or is_eod_oca:
             logger.info(
                 "Order cancellation notification suppressed (EOD or OCA reason)",
                 order_id=request_id,
                 symbol=symbol,
                 is_near_close=is_near_close,
+                is_gtd_expired=is_gtd_expired,
                 is_eod_oca=is_eod_oca,
                 reason=clean_error_string,
             )
@@ -1191,7 +1231,7 @@ class TwsCallbacksManager:
                     else datetime.now(ny_tz)
                 )
             )
-            market_close = now_ny.replace(hour=15, minute=55, second=0, microsecond=0)
+            market_close = now_ny.replace(hour=15, minute=45, second=0, microsecond=0)
             return now_ny >= market_close
 
         symbol_upper = symbol.upper()
@@ -1208,7 +1248,7 @@ class TwsCallbacksManager:
                 )
             )
             market_close = now_berlin.replace(
-                hour=17, minute=25, second=0, microsecond=0
+                hour=17, minute=15, second=0, microsecond=0
             )
             return now_berlin >= market_close
         else:
@@ -1223,7 +1263,7 @@ class TwsCallbacksManager:
                     else datetime.now(ny_tz)
                 )
             )
-            market_close = now_ny.replace(hour=15, minute=55, second=0, microsecond=0)
+            market_close = now_ny.replace(hour=15, minute=45, second=0, microsecond=0)
             return now_ny >= market_close
 
     def _is_bar_from_today(self, bar_date: object, symbol: str) -> bool:

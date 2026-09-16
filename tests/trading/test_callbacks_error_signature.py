@@ -240,11 +240,11 @@ async def test_process_error_unhandled_exception_sends_emergency_alert(
 def test_is_near_or_after_market_close_us_equities(
     callbacks_manager: TwsCallbacksManager,
 ) -> None:
-    """Prüft die Zeitschwelle für US-Aktien (Cutoff 15:55 New York)."""
+    """Prüft die Zeitschwelle für US-Aktien (Cutoff 15:45 New York)."""
     # Arrange
     ny_tz = ZoneInfo("America/New_York")
-    time_before = datetime(2026, 9, 11, 15, 54, 0, tzinfo=ny_tz)
-    time_exact = datetime(2026, 9, 11, 15, 55, 0, tzinfo=ny_tz)
+    time_before = datetime(2026, 9, 11, 15, 44, 0, tzinfo=ny_tz)
+    time_exact = datetime(2026, 9, 11, 15, 45, 0, tzinfo=ny_tz)
     time_after = datetime(2026, 9, 11, 16, 5, 0, tzinfo=ny_tz)
 
     # Act & Assert
@@ -256,11 +256,11 @@ def test_is_near_or_after_market_close_us_equities(
 def test_is_near_or_after_market_close_german_equities(
     callbacks_manager: TwsCallbacksManager,
 ) -> None:
-    """Prüft die Zeitschwelle für deutsche Aktien (.DE, Cutoff 17:25 Berlin)."""
+    """Prüft die Zeitschwelle für deutsche Aktien (.DE, Cutoff 17:15 Berlin)."""
     # Arrange
     berlin_tz = ZoneInfo("Europe/Berlin")
-    time_before = datetime(2026, 9, 11, 17, 24, 0, tzinfo=berlin_tz)
-    time_exact = datetime(2026, 9, 11, 17, 25, 0, tzinfo=berlin_tz)
+    time_before = datetime(2026, 9, 11, 17, 14, 0, tzinfo=berlin_tz)
+    time_exact = datetime(2026, 9, 11, 17, 15, 0, tzinfo=berlin_tz)
     time_after = datetime(2026, 9, 11, 17, 35, 0, tzinfo=berlin_tz)
 
     # Act & Assert
@@ -587,12 +587,12 @@ def test_is_near_or_after_market_close_all_branches(
     ny_tz = ZoneInfo("America/New_York")
 
     # 1. symbol is None
-    # Vor Cutoff (15:54 NY)
-    t_before_ny = datetime(2026, 9, 11, 15, 54, 0, tzinfo=ny_tz)
+    # Vor Cutoff (15:44 NY)
+    t_before_ny = datetime(2026, 9, 11, 15, 44, 0, tzinfo=ny_tz)
     assert callbacks_manager._is_near_or_after_market_close(None, t_before_ny) is False
 
-    # Nach Cutoff (15:55 NY)
-    t_after_ny = datetime(2026, 9, 11, 15, 55, 0, tzinfo=ny_tz)
+    # Nach Cutoff (15:45 NY)
+    t_after_ny = datetime(2026, 9, 11, 15, 45, 0, tzinfo=ny_tz)
     assert callbacks_manager._is_near_or_after_market_close(None, t_after_ny) is True
 
     # Naive Zeit ohne tzinfo für symbol=None
@@ -609,12 +609,12 @@ def test_is_near_or_after_market_close_all_branches(
     assert isinstance(res_de, bool)
 
     # Naive Zeit für .DE
-    t_naive_de_before = datetime(2026, 9, 11, 17, 24, 0)
+    t_naive_de_before = datetime(2026, 9, 11, 17, 14, 0)
     assert (
         callbacks_manager._is_near_or_after_market_close("SAP.DE", t_naive_de_before)
         is False
     )
-    t_naive_de_after = datetime(2026, 9, 11, 17, 26, 0)
+    t_naive_de_after = datetime(2026, 9, 11, 17, 16, 0)
     assert (
         callbacks_manager._is_near_or_after_market_close("SAP.DE", t_naive_de_after)
         is True
@@ -626,12 +626,12 @@ def test_is_near_or_after_market_close_all_branches(
     assert isinstance(res_us, bool)
 
     # Naive Zeit für US
-    t_naive_us_before = datetime(2026, 9, 11, 15, 54, 0)
+    t_naive_us_before = datetime(2026, 9, 11, 15, 44, 0)
     assert (
         callbacks_manager._is_near_or_after_market_close("AAPL", t_naive_us_before)
         is False
     )
-    t_naive_us_after = datetime(2026, 9, 11, 15, 56, 0)
+    t_naive_us_after = datetime(2026, 9, 11, 15, 46, 0)
     assert (
         callbacks_manager._is_near_or_after_market_close("AAPL", t_naive_us_after)
         is True
