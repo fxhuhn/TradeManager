@@ -173,7 +173,9 @@ async def test_generic_future_transformation_spy_to_mes(
         assert row["quantity"] == 1
         assert Decimal(str(row["target_price"])) == Decimal("550.00")
 
-    mock_resolve.assert_called_once_with(mock_ib, symbol="MES", exchange="CME")
+    mock_resolve.assert_called_once_with(
+        mock_ib, symbol="MES", exchange="CME", min_days_to_expiration=10
+    )
 
 
 @pytest.mark.asyncio

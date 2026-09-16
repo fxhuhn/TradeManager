@@ -82,6 +82,7 @@ class FuturesConfig:
 
     asset_mapping: dict[str, str] = field(default_factory=dict)
     enabled_strategies: tuple[str, ...] = field(default_factory=tuple)
+    min_days_to_expiration: int = 10
 
 
 @dataclass(frozen=True)
@@ -276,9 +277,17 @@ def _parse_futures_config(toml_data: dict[str, object]) -> FuturesConfig:
                 str(item).strip().lower() for item in raw_enabled if str(item).strip()
             ]
 
+    raw_futures = toml_data.get("futures")
+    min_days = 10
+    if isinstance(raw_futures, dict) and "min_days_to_expiration" in raw_futures:
+        min_days = _to_int(raw_futures.get("min_days_to_expiration"), 10)
+    elif "min_days_to_expiration" in toml_data:
+        min_days = _to_int(toml_data.get("min_days_to_expiration"), 10)
+
     return FuturesConfig(
         asset_mapping=asset_mapping,
         enabled_strategies=tuple(enabled_strategies),
+        min_days_to_expiration=min_days,
     )
 
 

@@ -255,7 +255,8 @@ This section provides a detailed reference of all public classes and functions i
 - `is_past_loc_gtd_cutoff` (Function): Checks if the current time has reached or passed the GTD cutoff window for a symbol.
 
 ### 4.14 Module: `app.trading.future_resolver`
-- `resolve_active_future_contract` (Function): Dynamically resolves the active CME future contract with highest volume.
+- `calculate_days_to_expiration` (Function): Calculates calendar days remaining until future contract expiration date.
+- `resolve_active_future_contract` (Function): Dynamically resolves the active CME future contract with highest volume, strictly filtering out contracts with less than the configured minimum days to expiration.
 
 ### 4.15 Module: `app.trading.recovery`
 - `run_recovery` (Function): Restores system database matching gateway states.

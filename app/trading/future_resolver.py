@@ -19,6 +19,34 @@ logger = structlog.get_logger()
 # Standardmäßiger Marktdatentyp: 3 = Verzögerte Marktdaten (Delayed), 1 = Live
 DEFAULT_MARKET_DATA_TYPE: Final[int] = 3
 DEFAULT_CONTRACT_TIMEOUT_SECONDS: Final[float] = 15.0
+DEFAULT_MIN_DAYS_TO_EXPIRATION: Final[int] = 10
+
+
+def calculate_days_to_expiration(
+    expiry_string: str,
+    reference_date: datetime | None = None,
+) -> int:
+    """Berechnet die verbleibenden Kalendertage bis zum Verfallstag eines Kontrakts.
+
+    Args:
+        expiry_string: Verfallsdatums-String von IBKR (z. B. '20260918' oder '20260918 16:00:00').
+        reference_date: Optionales Referenzdatum für Tests (Standard: datetime.now()).
+
+    Returns:
+        Anzahl der vollen Kalendertage bis zum Verfallsdatum.
+        Negative Werte bedeuten, dass der Kontrakt bereits in der Vergangenheit liegt.
+
+    Raises:
+        ValueError: Falls der Datums-String nicht mindestens 8 Ziffern im Format YYYYMMDD enthält.
+    """
+    clean_date_str = expiry_string.strip()[:8]
+    if len(clean_date_str) < 8 or not clean_date_str.isdigit():
+        raise ValueError(
+            f"Invalid expiry date string format: '{expiry_string}', expected 'YYYYMMDD'"
+        )
+    expiry_date = datetime.strptime(clean_date_str, "%Y%m%d").date()
+    current_date = (reference_date or datetime.now()).date()
+    return (expiry_date - current_date).days
 
 
 async def resolve_active_future_contract(
@@ -27,6 +55,7 @@ async def resolve_active_future_contract(
     exchange: str = "CME",
     currency: str = "USD",
     timeout_seconds: float = DEFAULT_CONTRACT_TIMEOUT_SECONDS,
+    min_days_to_expiration: int = DEFAULT_MIN_DAYS_TO_EXPIRATION,
 ) -> Future:
     """Ermittelt den liquidesten, aktiven Future-Kontrakt mit dem höchsten Handelsvolumen.
 
@@ -40,6 +69,7 @@ async def resolve_active_future_contract(
         exchange: Zielbörse des Futures (Standard: 'CME').
         currency: Währung des Kontrakts (Standard: 'USD').
         timeout_seconds: Maximales Timeout für API-Anfragen an den Broker (Standard: 15.0s).
+        min_days_to_expiration: Mindestrestlaufzeit in Kalendertagen vor Rollover (Standard: 10).
 
     Returns:
         Ein vollständig qualifiziertes ib_async Future-Objekt.
@@ -52,6 +82,7 @@ async def resolve_active_future_contract(
         "Resolving active future contract with highest volume",
         symbol=symbol,
         exchange=exchange,
+        min_days_to_expiration=min_days_to_expiration,
     )
 
     search_contract = Future(symbol=symbol, exchange=exchange, currency=currency)
@@ -70,20 +101,46 @@ async def resolve_active_future_contract(
         logger.error(error_message)
         raise ValueError(error_message)
 
-    today_string = datetime.now().strftime("%Y%m%d")
-    active_candidates: list[ContractDetails] = [
-        details
-        for details in contract_details_list
-        if details.contract is not None
-        and details.contract.lastTradeDateOrContractMonth is not None
-        and details.contract.lastTradeDateOrContractMonth >= today_string
-    ]
+    active_candidates: list[ContractDetails] = []
+    for details in contract_details_list:
+        if (
+            details.contract is not None
+            and details.contract.lastTradeDateOrContractMonth is not None
+        ):
+            expiry_str = details.contract.lastTradeDateOrContractMonth
+            try:
+                dte = calculate_days_to_expiration(expiry_str)
+            except ValueError:
+                logger.warning(
+                    "Skipping future contract with unparseable expiry date",
+                    symbol=symbol,
+                    expiry=expiry_str,
+                )
+                continue
+
+            if dte < min_days_to_expiration:
+                logger.info(
+                    "Filtered out future contract due to short expiry",
+                    symbol=symbol,
+                    local_symbol=details.contract.localSymbol,
+                    expiry=expiry_str,
+                    days_to_expiration=dte,
+                    min_days=min_days_to_expiration,
+                )
+                continue
+
+            active_candidates.append(details)
 
     if not active_candidates:
         error_message = (
-            f"No non-expired active contracts found for future symbol '{symbol}'."
+            f"No active contracts with >= {min_days_to_expiration} days to expiration "
+            f"found for future symbol '{symbol}'."
         )
-        logger.error(error_message)
+        logger.error(
+            error_message,
+            symbol=symbol,
+            min_days=min_days_to_expiration,
+        )
         raise ValueError(error_message)
 
     # Sortiere chronologisch nach Verfallsdatum (nächste Fälligkeit zuerst)

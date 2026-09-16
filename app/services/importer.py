@@ -500,7 +500,10 @@ async def _process_and_upsert_group(
         assert target_future_symbol is not None
         try:
             active_contract = await resolve_active_future_contract(
-                interactive_brokers, symbol=target_future_symbol, exchange="CME"
+                interactive_brokers,
+                symbol=target_future_symbol,
+                exchange="CME",
+                min_days_to_expiration=config.futures.min_days_to_expiration,
             )
             future_symbol = active_contract.localSymbol
             if not future_symbol:

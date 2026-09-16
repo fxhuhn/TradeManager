@@ -227,6 +227,35 @@ def test_config_parsing_futures_sections(tmp_path: Path) -> None:
 
         assert config.futures.asset_mapping == {"QQQ": "MNQ", "SPY": "MES"}
         assert config.futures.enabled_strategies == ("bouncebandit", "spxtrend")
+        assert config.futures.min_days_to_expiration == 10
+
+
+def test_config_parsing_futures_min_days_to_expiration(tmp_path: Path) -> None:
+    """Verifies that [futures] min_days_to_expiration is parsed correctly."""
+    config_content = """
+    [tws]
+    host = "10.0.0.1"
+    port = 9999
+    client_id = 42
+
+    [app]
+    max_retries = 3
+
+    [account]
+    default_limit_pct = 0.05
+
+    [futures]
+    min_days_to_expiration = 15
+    """
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(config_content, encoding="utf-8")
+
+    with patch.dict(os.environ, {}, clear=False):
+        for key in ["TWS_HOST", "TWS_PORT", "TWS_CLIENT_ID"]:
+            os.environ.pop(key, None)
+
+        config = load_config(tmp_path)
+        assert config.futures.min_days_to_expiration == 15
 
 
 def test_config_parsing_whatif_timeout_toml_and_env_overrides(tmp_path: Path) -> None:
