@@ -477,13 +477,15 @@ async def _process_and_upsert_group(
         temp_account = first_leg.account_id
         temp_account = resolve_account_id(interactive_brokers, temp_account)
         async with db.execute(
-            "SELECT order_id FROM orders WHERE account_id = ? AND trade_group_id = ? AND bracket_role = 'ENTRY'",
+            "SELECT order_id, status FROM orders WHERE account_id = ? AND trade_group_id = ? AND bracket_role = 'ENTRY'",
             (temp_account, trade_group_id),
         ) as cursor:
-            if not await cursor.fetchone():
+            row = await cursor.fetchone()
+            if not row or row["status"] in ("Error", "Cancelled"):
                 logger.info(
-                    "Skipping DipBuyer exits because no ENTRY exists in DB and today is not Mon/Tue.",
+                    "Skipping DipBuyer exits because no active ENTRY exists in DB and today is not Mon/Tue.",
                     trade_group_id=trade_group_id,
+                    entry_status=row["status"] if row else "None",
                 )
                 return False
     # ----------------------------------------
@@ -659,33 +661,53 @@ async def _process_and_upsert_group(
                 title="SIZING-FEHLER",
             )
             return False
-    else:
-        # Standalone exit: Align exit quantity with the actual quantity of the existing ENTRY order in the DB
+    elif not entry_leg:
+        # Standalone exit: Validate that an ENTRY order exists in DB and is not in Error/Cancelled status
         async with db.execute(
-            "SELECT quantity FROM orders WHERE account_id = ? AND trade_group_id = ? AND bracket_role = 'ENTRY'",
+            "SELECT order_id, status, quantity FROM orders WHERE account_id = ? AND trade_group_id = ? AND bracket_role = 'ENTRY'",
             (account_id, trade_group_id),
         ) as cursor:
-            row = await cursor.fetchone()
-            if row:
-                db_entry_quantity = row["quantity"]
-                if db_entry_quantity != target_quantity:
-                    logger.info(
-                        "Aligning exit quantity with database ENTRY order quantity",
-                        trade_group_id=trade_group_id,
-                        csv_exit_qty=target_quantity,
-                        db_entry_qty=db_entry_quantity,
-                    )
-                    await notifier.send_importer_info(
-                        file_name=trade_group_id,
-                        status="Exit-Menge Angepasst",
-                        details=(
-                            f"Die Menge der Exit-Order wurde an die tatsächliche ENTRY-Menge in der Datenbank angepasst "
-                            f"(Reduziert von {target_quantity} auf {db_entry_quantity} Stück)."
-                        ),
-                        emoji="⚖️",
-                        title="EXIT-SIZING",
-                    )
-                    target_quantity = db_entry_quantity
+            entry_row = await cursor.fetchone()
+
+        if not entry_row or entry_row["status"] in ("Error", "Cancelled"):
+            entry_status = entry_row["status"] if entry_row else "None"
+            logger.warning(
+                "Skipping standalone exit order: matching ENTRY order does not exist or is in Error/Cancelled status.",
+                trade_group_id=trade_group_id,
+                entry_status=entry_status,
+            )
+            await notifier.send_importer_info(
+                file_name=trade_group_id,
+                status="Übersprungen",
+                details=(
+                    f"Exit-Order übersprungen: Zugehöriger Entry für {trade_group_id} "
+                    f"{'existiert nicht in DB' if not entry_row else f'befindet sich im Status {entry_status}'}."
+                ),
+                emoji="⚠️",
+                title="STANDALONE-EXIT ÜBERSPRUNGEN",
+            )
+            return False
+
+        # Align exit quantity with the actual quantity of the existing active ENTRY order in the DB
+        db_entry_quantity = entry_row["quantity"]
+        if db_entry_quantity != target_quantity:
+            logger.info(
+                "Aligning exit quantity with database ENTRY order quantity",
+                trade_group_id=trade_group_id,
+                csv_exit_qty=target_quantity,
+                db_entry_qty=db_entry_quantity,
+            )
+            await notifier.send_importer_info(
+                file_name=trade_group_id,
+                status="Exit-Menge Angepasst",
+                details=(
+                    f"Die Menge der Exit-Order wurde an die tatsächliche ENTRY-Menge in der Datenbank angepasst "
+                    f"(Reduziert von {target_quantity} auf {db_entry_quantity} Stück)."
+                ),
+                emoji="⚖️",
+                title="EXIT-SIZING",
+            )
+            target_quantity = db_entry_quantity
 
     legs = [dataclasses.replace(leg, quantity=target_quantity) for leg in raw_legs]
 
@@ -697,8 +719,8 @@ async def _process_and_upsert_group(
         return True
     except ValueError as exception:
         if "Standalone exit order imported" in str(exception):
-            logger.error(
-                "Skipped standalone exit order because no matching ENTRY order exists in the database.",
+            logger.warning(
+                "Skipped standalone exit order because matching ENTRY order does not exist or has invalid status in DB.",
                 trade_group_id=trade_group_id,
                 error=str(exception),
             )
@@ -776,6 +798,10 @@ async def _upsert_trade_group_legs(
                                 entry_leg.strategy_name,
                                 entry_order_id,
                             ),
+                        )
+                    else:
+                        raise ValueError(
+                            f"Standalone exit order imported, but matching ENTRY order in DB is in invalid status '{existing_status}'"
                         )
                 else:
                     logger.info(

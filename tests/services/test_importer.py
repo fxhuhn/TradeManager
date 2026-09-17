@@ -465,11 +465,11 @@ async def test_run_csv_import_handles_standalone_exit_gracefully(
             config=mock_config,
         )
 
-    # Verifizieren, dass der Notifier über das fehlgeschlagene Standalone Exit informiert wurde
+    # Verifizieren, dass der Notifier über das übersprungene Standalone Exit informiert wurde
     mock_notifier.send_importer_info.assert_called_once()
     kwargs = mock_notifier.send_importer_info.call_args[1]
-    assert kwargs["status"] == "Fehlgeschlagen"
-    assert "Standalone exit order" in kwargs["details"]
+    assert kwargs["status"] == "Übersprungen"
+    assert "Exit-Order übersprungen" in kwargs["details"]
 
 
 @pytest.mark.asyncio
@@ -1156,6 +1156,226 @@ async def test_upsert_trade_group_legs_standalone_exit_error_handling(db) -> Non
         await _upsert_trade_group_legs(
             db, "standalone", "U12345", None, [exit_leg], 10, mock_notifier
         )
+
+
+@pytest.mark.asyncio
+async def test_upsert_trade_group_legs_standalone_exit_with_error_entry_raises(
+    db,
+) -> None:
+    """Verifies that _upsert_trade_group_legs raises ValueError if ENTRY in DB is in Error status."""
+    from app.services.csv_reader import LegRow
+    from app.services.importer import _upsert_trade_group_legs
+
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, trade_group_id, account_id, bracket_role, symbol, sec_type,
+            exchange, action, quantity, order_type, target_price, tif, strategy_name, status
+        ) VALUES (
+            -101, 'tg_err_entry', 'U12345', 'ENTRY', 'AAPL', 'STK',
+            'SMART', 'BUY', 10, 'MKT', 150.0, 'DAY', 'Test', 'Error'
+        )
+        """
+    )
+    await db.commit()
+
+    exit_leg = LegRow(
+        "tg_err_entry",
+        "EXIT",
+        "AAPL",
+        "STK",
+        "SMART",
+        "U12345",
+        "SELL",
+        10,
+        "LMT",
+        Decimal("160.00"),
+        "DAY",
+        "Test",
+    )
+    mock_notifier = MagicMock()
+    mock_notifier.send_importer_info = AsyncMock()
+
+    with pytest.raises(
+        ValueError, match="matching ENTRY order in DB is in invalid status 'Error'"
+    ):
+        await _upsert_trade_group_legs(
+            db, "tg_err_entry", "U12345", None, [exit_leg], 10, mock_notifier
+        )
+
+
+@pytest.mark.asyncio
+async def test_process_and_upsert_group_skips_standalone_exit_when_entry_error(
+    mock_config: Config, db
+) -> None:
+    """Verifies that _process_and_upsert_group gracefully skips standalone exits when ENTRY is in Error status."""
+    from app.services.csv_reader import LegRow
+    from app.services.importer import _process_and_upsert_group
+
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, trade_group_id, account_id, bracket_role, symbol, sec_type,
+            exchange, action, quantity, order_type, target_price, tif, strategy_name, status
+        ) VALUES (
+            -201, 'tg_skip_error', 'U12345', 'ENTRY', 'AAPL', 'STK',
+            'SMART', 'BUY', 10, 'MKT', 150.0, 'DAY', 'Test', 'Error'
+        )
+        """
+    )
+    await db.commit()
+
+    exit_leg = LegRow(
+        "tg_skip_error",
+        "EXIT",
+        "AAPL",
+        "STK",
+        "SMART",
+        "U12345",
+        "SELL",
+        10,
+        "LMT",
+        Decimal("160.00"),
+        "DAY",
+        "Test",
+    )
+
+    mock_ib = MagicMock()
+    mock_ib.managedAccounts.return_value = ["U12345"]
+    mock_notifier = MagicMock()
+    mock_notifier.send_importer_info = AsyncMock()
+    queue = asyncio.Queue()
+
+    result = await _process_and_upsert_group(
+        db=db,
+        interactive_brokers=mock_ib,
+        trade_group_id="tg_skip_error",
+        raw_legs=[exit_leg],
+        queue=queue,
+        notifier=mock_notifier,
+        config=mock_config,
+    )
+
+    assert result is False
+    assert queue.qsize() == 0
+    mock_notifier.send_importer_info.assert_called_once()
+    kwargs = mock_notifier.send_importer_info.call_args[1]
+    assert kwargs["status"] == "Übersprungen"
+    assert "Error" in kwargs["details"]
+
+    # Verify no child order was inserted
+    async with db.execute(
+        "SELECT COUNT(*) as cnt FROM orders WHERE trade_group_id = 'tg_skip_error' AND bracket_role = 'EXIT'"
+    ) as cursor:
+        row = await cursor.fetchone()
+        assert row["cnt"] == 0
+
+
+@pytest.mark.asyncio
+async def test_process_and_upsert_group_skips_standalone_exit_when_entry_cancelled(
+    mock_config: Config, db
+) -> None:
+    """Verifies that _process_and_upsert_group gracefully skips standalone exits when ENTRY is in Cancelled status."""
+    from app.services.csv_reader import LegRow
+    from app.services.importer import _process_and_upsert_group
+
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, trade_group_id, account_id, bracket_role, symbol, sec_type,
+            exchange, action, quantity, order_type, target_price, tif, strategy_name, status
+        ) VALUES (
+            -202, 'tg_skip_cancelled', 'U12345', 'ENTRY', 'AAPL', 'STK',
+            'SMART', 'BUY', 10, 'MKT', 150.0, 'DAY', 'Test', 'Cancelled'
+        )
+        """
+    )
+    await db.commit()
+
+    exit_leg = LegRow(
+        "tg_skip_cancelled",
+        "EXIT",
+        "AAPL",
+        "STK",
+        "SMART",
+        "U12345",
+        "SELL",
+        10,
+        "LMT",
+        Decimal("160.00"),
+        "DAY",
+        "Test",
+    )
+
+    mock_ib = MagicMock()
+    mock_ib.managedAccounts.return_value = ["U12345"]
+    mock_notifier = MagicMock()
+    mock_notifier.send_importer_info = AsyncMock()
+    queue = asyncio.Queue()
+
+    result = await _process_and_upsert_group(
+        db=db,
+        interactive_brokers=mock_ib,
+        trade_group_id="tg_skip_cancelled",
+        raw_legs=[exit_leg],
+        queue=queue,
+        notifier=mock_notifier,
+        config=mock_config,
+    )
+
+    assert result is False
+    assert queue.qsize() == 0
+    mock_notifier.send_importer_info.assert_called_once()
+    kwargs = mock_notifier.send_importer_info.call_args[1]
+    assert kwargs["status"] == "Übersprungen"
+    assert "Cancelled" in kwargs["details"]
+
+
+@pytest.mark.asyncio
+async def test_process_and_upsert_group_skips_standalone_exit_when_entry_missing(
+    mock_config: Config, db
+) -> None:
+    """Verifies that _process_and_upsert_group gracefully skips standalone exits when ENTRY does not exist in DB."""
+    from app.services.csv_reader import LegRow
+    from app.services.importer import _process_and_upsert_group
+
+    exit_leg = LegRow(
+        "tg_skip_missing",
+        "EXIT",
+        "AAPL",
+        "STK",
+        "SMART",
+        "U12345",
+        "SELL",
+        10,
+        "LMT",
+        Decimal("160.00"),
+        "DAY",
+        "Test",
+    )
+
+    mock_ib = MagicMock()
+    mock_ib.managedAccounts.return_value = ["U12345"]
+    mock_notifier = MagicMock()
+    mock_notifier.send_importer_info = AsyncMock()
+    queue = asyncio.Queue()
+
+    result = await _process_and_upsert_group(
+        db=db,
+        interactive_brokers=mock_ib,
+        trade_group_id="tg_skip_missing",
+        raw_legs=[exit_leg],
+        queue=queue,
+        notifier=mock_notifier,
+        config=mock_config,
+    )
+
+    assert result is False
+    assert queue.qsize() == 0
+    mock_notifier.send_importer_info.assert_called_once()
+    kwargs = mock_notifier.send_importer_info.call_args[1]
+    assert kwargs["status"] == "Übersprungen"
+    assert "existiert nicht in DB" in kwargs["details"]
 
 
 @pytest.mark.asyncio
