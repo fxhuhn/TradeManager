@@ -363,31 +363,20 @@ class TelegramNotifier:
         return await self.send_message(message, reply_markup=markup)
 
     async def send_broker_connection_status(
-        self, is_connected: bool, error_code: int, details: str
+        self,
+        is_connected: bool,
+        error_code: int | None = None,
+        details: str | None = None,
     ) -> bool:
-        """Sendet Statusmeldung über Verbindungsverlust oder -wiederherstellung zum Broker-Backend."""
-        from datetime import datetime
-
-        now_str = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-        if is_connected:
-            emoji = "✅"
-            title = "VERBINDUNG ZU BROKER-SERVER WIEDERHERGESTELLT"
-        else:
-            emoji = "🚨"
-            title = "VERBINDUNG ZU BROKER-SERVER UNTERBROCHEN (TWS offline)"
-
-        clean_details = _clean_html_text(details)
-        message = build_tree_message(
+        """Sendet Statusmeldung über Verbindungsverlust oder -wiederherstellung zum Broker-Backend im kompakten Format."""
+        _ = (error_code, details)
+        title = "WIEDERVERBUNDEN" if is_connected else "VERBINDUNGSABBRUCH"
+        emoji = "✅" if is_connected else "🚨"
+        return await self.send_system_status(
             title=title,
-            system="IBKR",
             emoji=emoji,
-            rows=[
-                ("Zeit", now_str),
-                ("Fehlercode", f"<code>{error_code}</code>"),
-                ("Details", f"<i>{clean_details}</i>"),
-            ],
+            system="IBKR Gateway",
         )
-        return await self.send_message(message)
 
     async def send_order_filled(
         self,

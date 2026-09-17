@@ -644,24 +644,22 @@ async def test_send_broker_connection_status_disconnected_and_connected(
     notifier.send_message.assert_called_once()
     msg_disconnect = notifier.send_message.call_args[0][0]
     assert "🚨" in msg_disconnect
-    assert "VERBINDUNG ZU BROKER-SERVER UNTERBROCHEN" in msg_disconnect
-    assert "1100" in msg_disconnect
-    assert "Connectivity between CapTrader and TWS has been lost." in msg_disconnect
+    assert "IBKR Gateway: VERBINDUNGSABBRUCH" in msg_disconnect
+    assert "Zeit:" in msg_disconnect
 
     # 2. Connected
     notifier.send_message.reset_mock()
     result_connected = await notifier.send_broker_connection_status(
         is_connected=True,
-        error_code=1101,
+        error_code=1102,
         details="Connectivity between CapTrader and TWS has been restored.",
     )
     assert result_connected is True
     notifier.send_message.assert_called_once()
     msg_connect = notifier.send_message.call_args[0][0]
     assert "✅" in msg_connect
-    assert "VERBINDUNG ZU BROKER-SERVER WIEDERHERGESTELLT" in msg_connect
-    assert "1101" in msg_connect
-    assert "Connectivity between CapTrader and TWS has been restored." in msg_connect
+    assert "IBKR Gateway: WIEDERVERBUNDEN" in msg_connect
+    assert "Zeit:" in msg_connect
 
 
 def test_clean_html_text_removes_br_tags() -> None:
