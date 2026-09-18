@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 
 import aiosqlite
 import structlog
-from ib_async import IB, CommissionReport, Fill, Trade
+from ib_async import IB, BarData, CommissionReport, Fill, Trade
 
 from app.core.config import Config
 from app.core.db import transaction
@@ -33,7 +33,11 @@ from app.trading.error_codes import (
     is_pre_market_hold_notice,
     is_trade_pre_market_held,
 )
-from app.trading.order_builder import is_past_loc_gtd_cutoff, symbols_match
+from app.trading.order_builder import (
+    is_past_loc_gtd_cutoff,
+    make_stock_contract,
+    symbols_match,
+)
 
 logger = structlog.get_logger()
 
@@ -191,6 +195,86 @@ class TwsCallbacksManager:
             self._order_locks[order_id] = asyncio.Lock()
         return self._order_locks[order_id]
 
+    def _validate_status_transition(
+        self,
+        order_id: int,
+        current_status: str,
+        new_status: str,
+    ) -> tuple[bool, bool]:
+        """Prüft, ob ein Statusübergang zulässig ist.
+
+        Gibt ein Tupel (is_valid, should_update_perm_id_only) zurück.
+        """
+        # Terminale Zustände dürfen nicht überschrieben werden
+        if current_status in ("Filled", "Cancelled"):
+            logger.debug(
+                "Ignoring status update for order in terminal state",
+                order_id=order_id,
+                current_status=current_status,
+                new_status=new_status,
+            )
+            return False, False
+
+        # PendingCancel ist ein flüchtiger Übergangszustand vor der finalen Stornierungsbestätigung
+        if new_status == "PendingCancel":
+            logger.debug(
+                "Order status PendingCancel acknowledged, keeping current status until confirmed",
+                order_id=order_id,
+                current_status=current_status,
+            )
+            return False, True
+
+        # Ein Zustand darf nicht von PreSubmitted zurück auf Submitted fallen
+        if current_status == "PreSubmitted" and new_status in (
+            "Submitted",
+            "PendingSubmit",
+        ):
+            logger.debug(
+                "Ignoring status regression from PreSubmitted to Submitted",
+                order_id=order_id,
+                current_status=current_status,
+                new_status=new_status,
+            )
+            return False, True
+
+        # Ein Fehler-Status darf einen aktiven Zustand nicht überschreiben
+        if new_status == "Error" and (
+            current_status in ("PreSubmitted", "Submitted")
+            or (
+                order_id in self._orders_with_warning_399
+                and current_status == "Created"
+            )
+        ):
+            logger.info(
+                "Ignoring error status update for active/pre-market order (likely warning/ValidationError)",
+                order_id=order_id,
+                current_status=current_status,
+            )
+            return False, True
+
+        return True, False
+
+    @staticmethod
+    def _is_event_symbol_mismatch(
+        event_symbol: str | None,
+        db_symbol: str,
+        event_sec_type: str | None,
+        db_sec_type: str,
+        order_id: int,
+    ) -> bool:
+        """Prüft auf Symbol-Mismatch zwischen TWS-Event und lokalem Datenbank-Record."""
+        if event_symbol is not None and not symbols_match(event_symbol, db_symbol):
+            logger.warning(
+                "Ignoring order status update due to symbol mismatch (ID collision)",
+                order_id=order_id,
+                event_symbol=event_symbol,
+                db_symbol=db_symbol,
+                event_sec_type=event_sec_type,
+                db_sec_type=db_sec_type,
+            )
+            return True
+        return False
+
     async def _update_order_status_db(
         self,
         order_id: int,
@@ -207,7 +291,6 @@ class TwsCallbacksManager:
         db = await self.db_factory()
         try:
             async with transaction(db):
-                # Aktuellen Status und Vertragsmetadaten abfragen
                 async with db.execute(
                     "SELECT status, symbol, sec_type FROM orders WHERE order_id = ?",
                     (order_id,),
@@ -222,80 +305,20 @@ class TwsCallbacksManager:
                     )
                     return False
 
-                current_status = row["status"]
-                db_symbol = row["symbol"]
-                db_sec_type = row["sec_type"]
-
-                # Plausibilitätsprüfung: Symbol-Mismatch verhindert ID-Kollisionen aus fremden TWS-Sessions/Clients
-                if event_symbol is not None and not symbols_match(
-                    event_symbol, db_symbol
+                if self._is_event_symbol_mismatch(
+                    event_symbol=event_symbol,
+                    db_symbol=row["symbol"],
+                    event_sec_type=event_sec_type,
+                    db_sec_type=row["sec_type"],
+                    order_id=order_id,
                 ):
-                    logger.warning(
-                        "Ignoring order status update due to symbol mismatch (ID collision)",
-                        order_id=order_id,
-                        event_symbol=event_symbol,
-                        db_symbol=db_symbol,
-                        event_sec_type=event_sec_type,
-                        db_sec_type=db_sec_type,
-                    )
                     return False
 
-                # Terminale Zustände dürfen nicht überschrieben werden
-                if current_status in ("Filled", "Cancelled"):
-                    logger.debug(
-                        "Ignoring status update for order in terminal state",
-                        order_id=order_id,
-                        current_status=current_status,
-                        new_status=status,
-                    )
-                    return False
-
-                # PendingCancel ist ein flüchtiger Übergangszustand vor der finalen Stornierungsbestätigung
-                if status == "PendingCancel":
-                    logger.debug(
-                        "Order status PendingCancel acknowledged, keeping current status until confirmed",
-                        order_id=order_id,
-                        current_status=current_status,
-                    )
-                    if permanent_id:
-                        await db.execute(
-                            "UPDATE orders SET perm_id = ? WHERE order_id = ?",
-                            (permanent_id, order_id),
-                        )
-                    return False
-
-                # Ein Zustand darf nicht von PreSubmitted zurück auf Submitted fallen
-                if current_status == "PreSubmitted" and status in (
-                    "Submitted",
-                    "PendingSubmit",
-                ):
-                    logger.debug(
-                        "Ignoring status regression from PreSubmitted to Submitted",
-                        order_id=order_id,
-                        current_status=current_status,
-                        new_status=status,
-                    )
-                    if permanent_id:
-                        await db.execute(
-                            "UPDATE orders SET perm_id = ? WHERE order_id = ?",
-                            (permanent_id, order_id),
-                        )
-                    return False
-
-                # Ein Fehler-Status darf einen aktiven Zustand nicht überschreiben
-                if status == "Error" and (
-                    current_status in ("PreSubmitted", "Submitted")
-                    or (
-                        order_id in self._orders_with_warning_399
-                        and current_status == "Created"
-                    )
-                ):
-                    logger.info(
-                        "Ignoring error status update for active/pre-market order (likely warning/ValidationError)",
-                        order_id=order_id,
-                        current_status=current_status,
-                    )
-                    if permanent_id:
+                is_valid, update_perm_id_only = self._validate_status_transition(
+                    order_id, row["status"], status
+                )
+                if not is_valid:
+                    if update_perm_id_only and permanent_id:
                         await db.execute(
                             "UPDATE orders SET perm_id = ? WHERE order_id = ?",
                             (permanent_id, order_id),
@@ -348,6 +371,40 @@ class TwsCallbacksManager:
                 alert_error=str(alert_error),
             )
 
+    @staticmethod
+    def _map_tws_status(status: str, is_pre_market: bool, order_id: int) -> str:
+        """Mappt den TWS-Statusstring auf den internen System-Orderstatus."""
+        if status in ("PreSubmitted", "Submitted"):
+            return status
+        if status == "PendingSubmit":
+            return "Submitted"
+        if status == "PendingCancel":
+            return "PendingCancel"
+        if status == "Filled":
+            return "Filled"
+        if status in ("Cancelled", "Inactive"):
+            return "Cancelled"
+        if status == "ValidationError" and is_pre_market:
+            logger.info(
+                "Mapping ValidationError to PreSubmitted due to pre-market hold notice (399)",
+                order_id=order_id,
+            )
+            return "PreSubmitted"
+        return "Error"
+
+    @staticmethod
+    def _extract_cancellation_reason(trade: Trade) -> str:
+        """Extrahiert Grund für Stornierung oder Halten aus TWS-Log und OrderStatus."""
+        if getattr(trade, "log", None) and isinstance(trade.log, list):
+            for log_entry in reversed(trade.log):
+                msg = getattr(log_entry, "message", None)
+                if isinstance(msg, str) and msg.strip():
+                    return msg.strip()
+        why_held = getattr(trade.orderStatus, "whyHeld", None)
+        if isinstance(why_held, str) and why_held.strip():
+            return why_held.strip()
+        return ""
+
     def on_order_status(self, trade: Trade) -> None:
         """
         Wird aufgerufen, wenn TWS eine Statusänderung einer Order meldet.
@@ -366,26 +423,7 @@ class TwsCallbacksManager:
             if is_pre_market:
                 self._orders_with_warning_399.add(order_id)
 
-            mapped_status = status
-            if status in ("PreSubmitted", "Submitted"):
-                mapped_status = status
-            elif status == "PendingSubmit":
-                mapped_status = "Submitted"
-            elif status == "PendingCancel":
-                mapped_status = "PendingCancel"
-            elif status == "Filled":
-                mapped_status = "Filled"
-            elif status in ("Cancelled", "Inactive"):
-                mapped_status = "Cancelled"
-            elif status == "ValidationError" and is_pre_market:
-                mapped_status = "PreSubmitted"
-                logger.info(
-                    "Mapping ValidationError to PreSubmitted due to pre-market hold notice (399)",
-                    order_id=order_id,
-                )
-            else:
-                mapped_status = "Error"
-
+            mapped_status = self._map_tws_status(status, is_pre_market, order_id)
             logger.info(
                 "orderStatusEvent received",
                 order_id=order_id,
@@ -398,17 +436,7 @@ class TwsCallbacksManager:
             )
             event_symbol = trade.contract.symbol if trade.contract else None
             event_sec_type = trade.contract.secType if trade.contract else None
-
-            cancel_reason = ""
-            if getattr(trade, "log", None) and isinstance(trade.log, list):
-                for log_entry in reversed(trade.log):
-                    msg = getattr(log_entry, "message", None)
-                    if isinstance(msg, str) and msg.strip():
-                        cancel_reason = msg.strip()
-                        break
-            why_held = getattr(trade.orderStatus, "whyHeld", None)
-            if not cancel_reason and isinstance(why_held, str) and why_held.strip():
-                cancel_reason = why_held.strip()
+            cancel_reason = self._extract_cancellation_reason(trade)
 
             if cancel_reason:
                 asyncio.create_task(
@@ -433,6 +461,7 @@ class TwsCallbacksManager:
                         event_sec_type=event_sec_type,
                     )
                 )
+
         except Exception as unhandled:
             logger.exception(
                 "CRITICAL: Unhandled exception in on_order_status",
@@ -444,6 +473,67 @@ class TwsCallbacksManager:
                     details=f"Ausnahme beim Verarbeiten von orderStatusEvent: {unhandled}",
                 )
             )
+
+    async def _handle_filled_status(
+        self,
+        order_id: int,
+        avg_fill_price: float | None = None,
+    ) -> None:
+        """Verarbeitet gefüllte Orders, alarmiert via Telegram und triggert Settlement."""
+        db = await self.db_factory()
+        try:
+            query = """
+                SELECT symbol, bracket_role, action, quantity, order_type, target_price, strategy_name, account_id, trade_group_id
+                FROM orders
+                WHERE order_id = ?
+            """
+            async with db.execute(query, (order_id,)) as cursor:
+                order_row = await cursor.fetchone()
+
+            if not order_row:
+                return
+
+            raw_target_price = order_row["target_price"]
+            price_decimal = parse_positive_decimal(
+                avg_fill_price
+            ) or parse_positive_decimal(raw_target_price)
+            limit_price_decimal = parse_positive_decimal(raw_target_price)
+
+            await self.notifier.send_order_filled(
+                symbol=order_row["symbol"],
+                bracket_role=order_row["bracket_role"],
+                action=order_row["action"],
+                quantity=Decimal(str(order_row["quantity"])),
+                execution_price=price_decimal,
+                order_type=order_row["order_type"],
+                order_id=order_id,
+                strategy_name=order_row["strategy_name"],
+                limit_price=limit_price_decimal,
+            )
+
+            bracket_role = order_row["bracket_role"]
+            trade_group_id = order_row["trade_group_id"]
+            account_id = order_row["account_id"]
+
+            if self.update_account_metrics_callback and account_id:
+                asyncio.create_task(self.update_account_metrics_callback(account_id))
+
+            if bracket_role in ("SL", "TP", "EXIT"):
+                logger.info(
+                    "Exit order filled. Triggering settlement.",
+                    order_id=order_id,
+                    trade_group_id=trade_group_id,
+                )
+                asyncio.create_task(
+                    self.trigger_settlement_callback(trade_group_id, account_id)
+                )
+        except Exception as exception:
+            logger.error(
+                "Error during exit check in status callback",
+                error=str(exception),
+            )
+        finally:
+            await db.close()
 
     async def _process_status_change(
         self,
@@ -466,82 +556,23 @@ class TwsCallbacksManager:
                     event_sec_type=event_sec_type,
                 )
 
-            if not updated or mapped_status != "Filled":
-                if updated and mapped_status == "Cancelled":
-                    await self._handle_cancelled_status(
-                        order_id=order_id,
-                        event_symbol=event_symbol,
-                        reason=reason,
-                    )
-                elif updated and mapped_status == "Error":
-                    await self._handle_error_status(
-                        order_id=order_id,
-                        event_symbol=event_symbol,
-                        reason=reason,
-                    )
+            if not updated:
                 return
 
-            db = await self.db_factory()
-            try:
-                # Details für die Benachrichtigung und das Settlement abfragen
-                query = """
-                    SELECT symbol, bracket_role, action, quantity, order_type, target_price, strategy_name, account_id, trade_group_id
-                    FROM orders
-                    WHERE order_id = ?
-                """
-                async with db.execute(query, (order_id,)) as cursor:
-                    order_row = await cursor.fetchone()
-
-                if not order_row:
-                    return
-
-                raw_target_price = order_row["target_price"]
-
-                # Tatsächlichen Kurs bevorzugen (avg_fill_price), falls vorhanden und positiv, sonst target_price aus DB
-                price_decimal = parse_positive_decimal(
-                    avg_fill_price
-                ) or parse_positive_decimal(raw_target_price)
-
-                # Limit-Preis aus der DB für die Slippage-Anzeige aufbereiten
-                limit_price_decimal = parse_positive_decimal(raw_target_price)
-
-                await self.notifier.send_order_filled(
-                    symbol=order_row["symbol"],
-                    bracket_role=order_row["bracket_role"],
-                    action=order_row["action"],
-                    quantity=Decimal(str(order_row["quantity"])),
-                    execution_price=price_decimal,
-                    order_type=order_row["order_type"],
+            if mapped_status == "Filled":
+                await self._handle_filled_status(order_id, avg_fill_price)
+            elif mapped_status == "Cancelled":
+                await self._handle_cancelled_status(
                     order_id=order_id,
-                    strategy_name=order_row["strategy_name"],
-                    limit_price=limit_price_decimal,
+                    event_symbol=event_symbol,
+                    reason=reason,
                 )
-
-                bracket_role = order_row["bracket_role"]
-                trade_group_id = order_row["trade_group_id"]
-                account_id = order_row["account_id"]
-
-                if self.update_account_metrics_callback and account_id:
-                    asyncio.create_task(
-                        self.update_account_metrics_callback(account_id)
-                    )
-
-                if bracket_role in ("SL", "TP", "EXIT"):
-                    logger.info(
-                        "Exit order filled. Triggering settlement.",
-                        order_id=order_id,
-                        trade_group_id=trade_group_id,
-                    )
-                    asyncio.create_task(
-                        self.trigger_settlement_callback(trade_group_id, account_id)
-                    )
-            except Exception as exception:
-                logger.error(
-                    "Error during exit check in status callback",
-                    error=str(exception),
+            elif mapped_status == "Error":
+                await self._handle_error_status(
+                    order_id=order_id,
+                    event_symbol=event_symbol,
+                    reason=reason,
                 )
-            finally:
-                await db.close()
         except Exception as unhandled:
             logger.exception(
                 "CRITICAL: Unhandled exception in _process_status_change",
@@ -552,6 +583,33 @@ class TwsCallbacksManager:
                 title="🚨 KRITISCHER FEHLER IN STATUSVERARBEITUNG",
                 details=f"Ausnahme bei _process_status_change für Order {order_id}: {unhandled}",
             )
+
+    async def _fetch_cancellation_context(
+        self, order_id: int, db: aiosqlite.Connection, update_cancelled: bool = False
+    ) -> tuple[Any, bool, bool]:
+        """Lädt Order-Attribute, markiert ggf. als storniert und prüft Geschwister-Exit-Orders."""
+        query = """
+            SELECT symbol, bracket_role, action, quantity, order_type, target_price
+            FROM orders
+            WHERE order_id = ?
+        """
+        async with db.execute(query, (order_id,)) as cursor:
+            order_row = await cursor.fetchone()
+
+        if update_cancelled:
+            async with transaction(db):
+                await db.execute(
+                    "UPDATE orders SET status = 'Cancelled' WHERE order_id = ? AND status NOT IN ('Filled', 'Cancelled')",
+                    (order_id,),
+                )
+
+        has_filled_sibling = await self._has_filled_sibling_in_group(order_id, db=db)
+        has_siblings = (
+            await self._has_sibling_exit_legs(order_id, db=db)
+            if not has_filled_sibling
+            else False
+        )
+        return order_row, has_filled_sibling, has_siblings
 
     async def _handle_cancelled_status(
         self,
@@ -579,22 +637,11 @@ class TwsCallbacksManager:
             has_filled_sibling = False
             has_siblings = False
             try:
-                query = """
-                    SELECT symbol, bracket_role, action, quantity, order_type, target_price
-                    FROM orders
-                    WHERE order_id = ?
-                """
-                async with db.execute(query, (order_id,)) as cursor:
-                    order_row = await cursor.fetchone()
-
-                has_filled_sibling = await self._has_filled_sibling_in_group(
-                    order_id, db=db
-                )
-                has_siblings = (
-                    await self._has_sibling_exit_legs(order_id, db=db)
-                    if not has_filled_sibling
-                    else False
-                )
+                (
+                    order_row,
+                    has_filled_sibling,
+                    has_siblings,
+                ) = await self._fetch_cancellation_context(order_id, db)
             except Exception as exception:
                 logger.error(
                     "Error querying order details for cancelled status",
@@ -622,6 +669,15 @@ class TwsCallbacksManager:
                 log_prefix="Order status Cancelled/Inactive notification",
             )
 
+    def _is_cancellation_eod_or_expired(self, symbol: str | None, reason: str) -> bool:
+        """Prüft, ob ein Stornierungsgrund auf regulären Marktschluss oder GTD zurückzuführen ist."""
+        is_near_close = self._is_near_or_after_market_close(symbol)
+        is_gtd_expired = (
+            is_past_loc_gtd_cutoff(symbol) if (symbol and is_near_close) else False
+        )
+        is_eod_oca = self._is_eod_or_oca_reason(reason)
+        return is_near_close or is_gtd_expired or is_eod_oca
+
     async def _evaluate_and_notify_cancellation(
         self,
         order_id: int,
@@ -634,19 +690,12 @@ class TwsCallbacksManager:
         log_prefix: str,
     ) -> None:
         """Prüft EOD-, GTD- und OCA-Bedingungen und sendet bei echten Stornierungen einen Alarm."""
-        is_near_close = self._is_near_or_after_market_close(symbol)
-        is_gtd_expired = is_past_loc_gtd_cutoff(symbol) if symbol else False
-        is_eod_oca = self._is_eod_or_oca_reason(reason)
-
-        if is_near_close or is_gtd_expired or is_eod_oca:
+        if self._is_cancellation_eod_or_expired(symbol, reason):
             self._notified_cancelled_order_ids.add(order_id)
             logger.info(
                 f"{log_prefix} suppressed (EOD or OCA reason)",
                 order_id=order_id,
                 symbol=symbol,
-                is_near_close=is_near_close,
-                is_gtd_expired=is_gtd_expired,
-                is_eod_oca=is_eod_oca,
                 reason=reason,
             )
             return
@@ -669,20 +718,80 @@ class TwsCallbacksManager:
                 symbol=symbol,
                 bracket_role=bracket_role,
             )
-        else:
-            clean_reason = (
-                reason
-                if reason
-                else "Order durch TWS/Börse storniert oder inaktiviert."
+            return
+
+        clean_reason = (
+            reason if reason else "Order durch TWS/Börse storniert oder inaktiviert."
+        )
+        await self.notifier.send_order_failed(
+            order_id=order_id,
+            tws_code=tws_code,
+            reason=clean_reason,
+            symbol=symbol,
+            bracket_role=bracket_role,
+            is_fatal=False,
+        )
+
+    @staticmethod
+    def _format_failed_order_reason(error_string: str) -> str:
+        """Bereinigt und formatiert Fehlermeldungen inkl. 2FA/Token-Erkennung."""
+        if not error_string:
+            return "Order im Status Error / ValidationError gemeldet."
+        clean_error_string = re.sub(
+            r"[ \t]+", " ", re.sub(r"(?i)<br\s*/?>", " ", error_string)
+        ).strip()
+        reason_upper = clean_error_string.upper()
+        if (
+            "LOGIN TO CLIENT PORTAL" in reason_upper
+            or "VERIFY USING THE TOKEN" in reason_upper
+            or "VERIFICATION PROCESS" in reason_upper
+            or ("TOKEN" in reason_upper and "VERIFY" in reason_upper)
+        ):
+            return (
+                f"🔑 ANMELDUNG/VERIFIZIERUNG ERFORDERLICH: IBKR/CapTrader verlangt "
+                f"Token-Bestätigung im Client Portal! Details: {clean_error_string}"
             )
-            await self.notifier.send_order_failed(
+        return clean_error_string
+
+    async def _dispatch_failed_order_alert(
+        self,
+        order_id: int,
+        tws_code: int,
+        reason: str,
+        event_symbol: str | None = None,
+    ) -> None:
+        """Lädt Orderdetails und sendet einen fatalen Fehleralarm an Telegram."""
+        db = await self.db_factory()
+        order_row = None
+        try:
+            query = "SELECT symbol, bracket_role FROM orders WHERE order_id = ?"
+            async with db.execute(query, (order_id,)) as cursor:
+                order_row = await cursor.fetchone()
+        except Exception as exception:
+            logger.error(
+                "Error querying order details for failed order alert",
                 order_id=order_id,
-                tws_code=tws_code,
-                reason=clean_reason,
-                symbol=symbol,
-                bracket_role=bracket_role,
-                is_fatal=False,
+                error=str(exception),
             )
+        finally:
+            await db.close()
+
+        symbol = (
+            order_row["symbol"]
+            if order_row
+            else (event_symbol if event_symbol else "Unbekannt")
+        )
+        bracket_role = order_row["bracket_role"] if order_row else "-"
+        formatted_reason = self._format_failed_order_reason(reason)
+
+        await self.notifier.send_order_failed(
+            order_id=order_id,
+            tws_code=tws_code,
+            reason=formatted_reason,
+            symbol=symbol,
+            bracket_role=bracket_role,
+            is_fatal=True,
+        )
 
     async def _handle_error_status(
         self,
@@ -705,43 +814,55 @@ class TwsCallbacksManager:
             return
         self._notified_cancelled_order_ids.add(order_id)
 
-        db = await self.db_factory()
-        order_row = None
-        try:
-            query = """
-                SELECT symbol, bracket_role
-                FROM orders
-                WHERE order_id = ?
-            """
-            async with db.execute(query, (order_id,)) as cursor:
-                order_row = await cursor.fetchone()
-        except Exception as exception:
-            logger.error(
-                "Error querying order details for error status",
-                order_id=order_id,
-                error=str(exception),
-            )
-        finally:
-            await db.close()
-
-        symbol = (
-            order_row["symbol"]
-            if order_row
-            else (event_symbol if event_symbol else "Unbekannt")
-        )
-        bracket_role = order_row["bracket_role"] if order_row else "-"
-        clean_reason = (
-            reason if reason else "Order im Status Error / ValidationError gemeldet."
-        )
-
-        await self.notifier.send_order_failed(
+        await self._dispatch_failed_order_alert(
             order_id=order_id,
             tws_code=0,
-            reason=clean_reason,
-            symbol=symbol,
-            bracket_role=bracket_role,
-            is_fatal=True,
+            reason=reason,
+            event_symbol=event_symbol,
         )
+
+    @staticmethod
+    async def _check_orders_filled_sibling(
+        db: aiosqlite.Connection, order_id: int
+    ) -> bool:
+        """Prüft in der orders-Tabelle, ob ein Geschwister-Exit-Leg den Status 'Filled' hat."""
+        query = """
+            SELECT COUNT(*) AS filled_count
+            FROM orders AS sibling
+            WHERE sibling.trade_group_id = (
+                SELECT trade_group_id FROM orders
+                WHERE order_id = ? AND bracket_role IN ('SL', 'TP', 'EXIT')
+            )
+            AND sibling.order_id != ?
+            AND sibling.bracket_role IN ('SL', 'TP', 'EXIT')
+            AND sibling.status = 'Filled'
+        """
+        async with db.execute(query, (order_id, order_id)) as cursor:
+            row = await cursor.fetchone()
+            return bool(row and row["filled_count"] > 0)
+
+    @staticmethod
+    async def _check_executions_filled_sibling(
+        db: aiosqlite.Connection, order_id: int
+    ) -> bool:
+        """Prüft in der executions-Tabelle, ob für ein Geschwister-Exit-Leg bereits ein Fill verbucht wurde."""
+        query = """
+            SELECT COUNT(*) AS exec_count
+            FROM executions AS e
+            JOIN orders AS sibling ON e.order_id = sibling.order_id
+            WHERE sibling.trade_group_id = (
+                SELECT trade_group_id FROM orders
+                WHERE order_id = ? AND bracket_role IN ('SL', 'TP', 'EXIT')
+            )
+            AND sibling.order_id != ?
+            AND sibling.bracket_role IN ('SL', 'TP', 'EXIT')
+        """
+        try:
+            async with db.execute(query, (order_id, order_id)) as cursor:
+                exec_row = await cursor.fetchone()
+                return bool(exec_row and exec_row["exec_count"] > 0)
+        except Exception:
+            return False
 
     async def _has_filled_sibling_in_group(
         self, order_id: int, db: aiosqlite.Connection | None = None
@@ -758,41 +879,9 @@ class TwsCallbacksManager:
             should_close = True
 
         try:
-            query = """
-                SELECT COUNT(*) AS filled_count
-                FROM orders AS sibling
-                WHERE sibling.trade_group_id = (
-                    SELECT trade_group_id FROM orders
-                    WHERE order_id = ? AND bracket_role IN ('SL', 'TP', 'EXIT')
-                )
-                AND sibling.order_id != ?
-                AND sibling.bracket_role IN ('SL', 'TP', 'EXIT')
-                AND sibling.status = 'Filled'
-            """
-            async with db.execute(query, (order_id, order_id)) as cursor:
-                row = await cursor.fetchone()
-                if row and row["filled_count"] > 0:
-                    return True
-
-            # Ergänzende Prüfung: Wurde für ein Geschwister-Exit-Leg bereits ein Fill verbucht?
-            query_executions = """
-                SELECT COUNT(*) AS exec_count
-                FROM executions AS e
-                JOIN orders AS sibling ON e.order_id = sibling.order_id
-                WHERE sibling.trade_group_id = (
-                    SELECT trade_group_id FROM orders
-                    WHERE order_id = ? AND bracket_role IN ('SL', 'TP', 'EXIT')
-                )
-                AND sibling.order_id != ?
-                AND sibling.bracket_role IN ('SL', 'TP', 'EXIT')
-            """
-            try:
-                async with db.execute(query_executions, (order_id, order_id)) as cursor:
-                    exec_row = await cursor.fetchone()
-                    return bool(exec_row and exec_row["exec_count"] > 0)
-            except Exception:
-                # Falls executions-Tabelle in isolierten Unit-Tests nicht existiert
-                return False
+            if await self._check_orders_filled_sibling(db, order_id):
+                return True
+            return await self._check_executions_filled_sibling(db, order_id)
         except Exception as exception:
             logger.error(
                 "Error checking for filled sibling in OCA group",
@@ -877,6 +966,27 @@ class TwsCallbacksManager:
             )
         )
 
+    @staticmethod
+    def _handle_unmatched_execution(
+        order_id: int,
+        exec_id: str,
+        symbol: str | None,
+        db_symbol: str | None,
+        trade: object,
+        fill: object,
+    ) -> None:
+        """Protokolliert Ausführungen, die keiner bekannten Order oder passendem Symbol zugeordnet werden können."""
+        if trade is not None and fill is not None:
+            handle_unassigned_execution(trade, fill)
+        else:
+            logger.warning(
+                "Unassigned execution received (order not found or symbol mismatch in local DB)",
+                order_id=order_id,
+                exec_id=exec_id,
+                event_symbol=symbol,
+                db_symbol=db_symbol,
+            )
+
     async def _save_execution(
         self,
         exec_id: str,
@@ -892,7 +1002,6 @@ class TwsCallbacksManager:
         """Speichert ein Ausführungsdetail in der executions-Tabelle."""
         db = await self.db_factory()
         try:
-            # Überprüfen, ob die Order in unserer DB existiert und das Symbol übereinstimmt
             async with db.execute(
                 "SELECT symbol FROM orders WHERE order_id = ?", (order_id,)
             ) as cursor:
@@ -901,16 +1010,14 @@ class TwsCallbacksManager:
             if not order_row or (
                 symbol is not None and not symbols_match(symbol, order_row["symbol"])
             ):
-                if trade is not None and fill is not None:
-                    handle_unassigned_execution(trade, fill)
-                else:
-                    logger.warning(
-                        "Unassigned execution received (order not found or symbol mismatch in local DB)",
-                        order_id=order_id,
-                        exec_id=exec_id,
-                        event_symbol=symbol,
-                        db_symbol=order_row["symbol"] if order_row else None,
-                    )
+                self._handle_unmatched_execution(
+                    order_id=order_id,
+                    exec_id=exec_id,
+                    symbol=symbol,
+                    db_symbol=order_row["symbol"] if order_row else None,
+                    trade=trade,
+                    fill=fill,
+                )
                 return
 
             async with transaction(db):
@@ -961,6 +1068,65 @@ class TwsCallbacksManager:
 
         asyncio.create_task(self._update_commission(exec_id, commission, currency))
 
+    async def _try_update_commission_attempt(
+        self,
+        exec_id: str,
+        commission: Decimal,
+        currency: str,
+        attempt: int,
+        max_attempts: int,
+        retry_delay_s: float,
+    ) -> bool:
+        """Führt einen einzelnen Versuch zur Aktualisierung der Kommission durch.
+
+        Gibt True zurück, wenn die Aktualisierung erfolgreich war oder max_attempts erreicht wurden.
+        """
+        db = await self.db_factory()
+        try:
+            async with transaction(db):
+                cursor = await db.execute(
+                    "UPDATE executions SET commission = ?, currency = ? WHERE exec_id = ?",
+                    (str(commission), currency, exec_id),
+                )
+                if cursor.rowcount > 0:
+                    logger.debug(
+                        "Commission for partial execution updated",
+                        exec_id=exec_id,
+                        attempt=attempt,
+                    )
+                    return True
+
+            if attempt == max_attempts:
+                logger.warning(
+                    "Failed to update commission: execution row not found after maximum retries",
+                    exec_id=exec_id,
+                    max_attempts=max_attempts,
+                )
+                return True
+
+            logger.debug(
+                "Execution row not found yet for commission update. Retrying...",
+                exec_id=exec_id,
+                attempt=attempt,
+                next_retry_in_s=retry_delay_s,
+            )
+            await asyncio.sleep(retry_delay_s)
+            return False
+
+        except Exception as exception:
+            logger.error(
+                "Error updating commission",
+                exec_id=exec_id,
+                attempt=attempt,
+                error=str(exception),
+            )
+            if attempt == max_attempts:
+                raise
+            await asyncio.sleep(retry_delay_s)
+            return False
+        finally:
+            await db.close()
+
     async def _update_commission(
         self, exec_id: str, commission: Decimal, currency: str
     ) -> None:
@@ -974,49 +1140,20 @@ class TwsCallbacksManager:
         retry_delay_s = 0.05
 
         for attempt in range(1, max_attempts + 1):
-            db = await self.db_factory()
-            try:
-                async with transaction(db):
-                    cursor = await db.execute(
-                        "UPDATE executions SET commission = ?, currency = ? WHERE exec_id = ?",
-                        (str(commission), currency, exec_id),
-                    )
-                    if cursor.rowcount > 0:
-                        logger.debug(
-                            "Commission for partial execution updated",
-                            exec_id=exec_id,
-                            attempt=attempt,
-                        )
-                        return
+            if await self._try_update_commission_attempt(
+                exec_id=exec_id,
+                commission=commission,
+                currency=currency,
+                attempt=attempt,
+                max_attempts=max_attempts,
+                retry_delay_s=retry_delay_s,
+            ):
+                return
 
-                if attempt == max_attempts:
-                    logger.warning(
-                        "Failed to update commission: execution row not found after maximum retries",
-                        exec_id=exec_id,
-                        max_attempts=max_attempts,
-                    )
-                    return
-
-                logger.debug(
-                    "Execution row not found yet for commission update. Retrying...",
-                    exec_id=exec_id,
-                    attempt=attempt,
-                    next_retry_in_s=retry_delay_s,
-                )
-                await asyncio.sleep(retry_delay_s)
-
-            except Exception as exception:
-                logger.error(
-                    "Error updating commission",
-                    exec_id=exec_id,
-                    attempt=attempt,
-                    error=str(exception),
-                )
-                if attempt == max_attempts:
-                    raise
-                await asyncio.sleep(retry_delay_s)
-            finally:
-                await db.close()
+    @staticmethod
+    def _is_ignorable_system_info(request_id: int, error_code: int) -> bool:
+        """Prüft, ob es sich um eine unkritische TWS-Systemnachricht handelt (z.B. Marktdatenfarm-Verbindung)."""
+        return request_id == -1 and error_code in (2104, 2106, 2158, 2100)
 
     def on_error(
         self,
@@ -1039,7 +1176,7 @@ class TwsCallbacksManager:
                     message=error_string,
                 )
 
-            if request_id == -1 and error_code in (2104, 2106, 2158, 2100):
+            if self._is_ignorable_system_info(request_id, error_code):
                 logger.debug(
                     "TWS system info received", code=error_code, message=error_string
                 )
@@ -1074,6 +1211,41 @@ class TwsCallbacksManager:
                 )
             )
 
+    async def _handle_connection_error(
+        self,
+        request_id: int,
+        error_code: int,
+        error_string: str,
+        error_class: ErrorClass,
+    ) -> bool:
+        """Behandelt Verbindungsverlust- und Reconnect-Meldungen von TWS.
+
+        Gibt True zurück, wenn der Fehler als Verbindungsereignis behandelt wurde.
+        """
+        if request_id == -1 and error_code in (1100, 2110):
+            if self._broker_connected:
+                self._broker_connected = False
+                await self.notifier.send_broker_connection_status(
+                    is_connected=False,
+                    error_code=error_code,
+                    details=error_string,
+                )
+            return True
+
+        if error_class == ErrorClass.RECONNECT:
+            logger.info("Reconnect signaled. Triggering recovery run.")
+            if not self._broker_connected:
+                self._broker_connected = True
+                await self.notifier.send_broker_connection_status(
+                    is_connected=True,
+                    error_code=error_code,
+                    details=error_string,
+                )
+            asyncio.create_task(self.run_recovery_callback())
+            return True
+
+        return False
+
     async def _process_error(
         self,
         request_id: int,
@@ -1086,27 +1258,9 @@ class TwsCallbacksManager:
             if error_class == ErrorClass.INFO:
                 return
 
-            # Systemweite Broker-Konnektivitätsfehler (request_id == -1)
-            if request_id == -1 and error_code in (1100, 2110):
-                if self._broker_connected:
-                    self._broker_connected = False
-                    await self.notifier.send_broker_connection_status(
-                        is_connected=False,
-                        error_code=error_code,
-                        details=error_string,
-                    )
-                return
-
-            if error_class == ErrorClass.RECONNECT:
-                logger.info("Reconnect signaled. Triggering recovery run.")
-                if not self._broker_connected:
-                    self._broker_connected = True
-                    await self.notifier.send_broker_connection_status(
-                        is_connected=True,
-                        error_code=error_code,
-                        details=error_string,
-                    )
-                asyncio.create_task(self.run_recovery_callback())
+            if await self._handle_connection_error(
+                request_id, error_code, error_string, error_class
+            ):
                 return
 
             if error_class == ErrorClass.RETRIABLE:
@@ -1154,6 +1308,32 @@ class TwsCallbacksManager:
                 ),
             )
 
+    @staticmethod
+    def _clean_error_string(error_string: str) -> str:
+        """Bereinigt TWS-Fehlermeldungen von HTML-Tags und mehrfachen Leerzeichen."""
+        return re.sub(
+            r"[ \t]+", " ", re.sub(r"(?i)<br\s*/?>", " ", error_string)
+        ).strip()
+
+    def _trigger_loc_verification_if_needed(
+        self, order_id: int, order_row: Any, symbol: str
+    ) -> None:
+        """Triggert asynchrone LOC-Schlusskursprüfung, falls es sich um eine stornierte LOC-Order handelt."""
+        if (
+            order_row
+            and order_row["order_type"] == "LOC"
+            and order_row["target_price"] is not None
+        ):
+            asyncio.create_task(
+                self._check_loc_execution_price(
+                    order_id=order_id,
+                    symbol=symbol,
+                    action=order_row["action"],
+                    limit_price=Decimal(str(order_row["target_price"])),
+                    quantity=Decimal(str(order_row["quantity"])),
+                )
+            )
+
     async def _cancel_order_in_db(
         self, request_id: int, error_code: int, error_string: str
     ) -> None:
@@ -1170,28 +1350,12 @@ class TwsCallbacksManager:
             has_filled_sibling = False
             has_siblings = False
             try:
-                # Details für die Benachrichtigung laden
-                query = """
-                    SELECT symbol, bracket_role, action, quantity, order_type, target_price
-                    FROM orders
-                    WHERE order_id = ?
-                """
-                async with db.execute(query, (request_id,)) as cursor:
-                    order_row = await cursor.fetchone()
-
-                async with transaction(db):
-                    await db.execute(
-                        "UPDATE orders SET status = 'Cancelled' WHERE order_id = ? AND status NOT IN ('Filled', 'Cancelled')",
-                        (request_id,),
-                    )
-
-                has_filled_sibling = await self._has_filled_sibling_in_group(
-                    request_id, db=db
-                )
-                has_siblings = (
-                    await self._has_sibling_exit_legs(request_id, db=db)
-                    if not has_filled_sibling
-                    else False
+                (
+                    order_row,
+                    has_filled_sibling,
+                    has_siblings,
+                ) = await self._fetch_cancellation_context(
+                    request_id, db, update_cancelled=True
                 )
             except Exception as exception:
                 logger.error(
@@ -1205,9 +1369,7 @@ class TwsCallbacksManager:
 
             symbol = order_row["symbol"] if order_row else "Unbekannt"
             bracket_role = order_row["bracket_role"] if order_row else "-"
-            clean_error_string = re.sub(
-                r"[ \t]+", " ", re.sub(r"(?i)<br\s*/?>", " ", error_string)
-            ).strip()
+            clean_error_string = self._clean_error_string(error_string)
 
             await self._evaluate_and_notify_cancellation(
                 order_id=request_id,
@@ -1220,21 +1382,71 @@ class TwsCallbacksManager:
                 log_prefix="Order cancellation notification",
             )
 
-        # Überprüfung bei LOC-Orders nach Marktschluss anstoßen
-        if (
-            order_row
-            and order_row["order_type"] == "LOC"
-            and order_row["target_price"] is not None
-        ):
-            asyncio.create_task(
-                self._check_loc_execution_price(
-                    order_id=request_id,
-                    symbol=symbol,
-                    action=order_row["action"],
-                    limit_price=Decimal(str(order_row["target_price"])),
-                    quantity=Decimal(str(order_row["quantity"])),
+        self._trigger_loc_verification_if_needed(request_id, order_row, symbol)
+
+    @staticmethod
+    def _evaluate_loc_eligibility(
+        action: str, close_price: Decimal, limit_price: Decimal
+    ) -> bool:
+        """Prüft, ob die Order basierend auf Schluss- und Limitpreis ausgeführt hätte werden müssen."""
+        if action.upper() == "BUY" and close_price <= limit_price:
+            return True
+        if action.upper() == "SELL" and close_price >= limit_price:
+            return True
+        return False
+
+    async def _fetch_loc_closing_bar(
+        self, symbol: str, order_id: int
+    ) -> BarData | None:
+        """Fragt die täglichen historischen Bars ab und validiert das heutige Datum."""
+        contract = make_stock_contract(symbol)
+
+        # Kurz warten, bis IBKR-Server den Schlusskurs finalisiert haben
+        await asyncio.sleep(5)
+
+        bars = None
+        for attempt in range(1, 4):
+            try:
+                bars = await self.interactive_brokers.reqHistoricalDataAsync(
+                    contract=contract,
+                    endDateTime="",
+                    durationStr="1 D",
+                    barSizeSetting="1 day",
+                    whatToShow="TRADES",
+                    useRTH=True,
+                    formatDate=1,
+                    keepUpToDate=False,
                 )
+                if bars:
+                    break
+            except Exception as historical_data_error:
+                logger.warning(
+                    "Attempt to fetch historical close price failed",
+                    symbol=symbol,
+                    attempt=attempt,
+                    error=str(historical_data_error),
+                )
+            await asyncio.sleep(5)
+
+        if not bars:
+            logger.warning(
+                "Could not retrieve daily historical bars for LOC check",
+                symbol=symbol,
+                order_id=order_id,
             )
+            return None
+
+        last_bar = bars[-1]
+        if not self._is_bar_from_today(last_bar.date, symbol):
+            logger.warning(
+                "Retrieved daily bar is not from today. Close price check skipped.",
+                symbol=symbol,
+                order_id=order_id,
+                bar_date=str(last_bar.date),
+            )
+            return None
+
+        return last_bar
 
     async def _check_loc_execution_price(
         self,
@@ -1244,10 +1456,7 @@ class TwsCallbacksManager:
         limit_price: Decimal,
         quantity: Decimal,
     ) -> None:
-        """
-        Prüft nach dem Marktschluss, ob der Schlusskurs den Limitpreis einer stornierten
-        LOC-Order erreicht hat und alarmiert bei Abweichungen.
-        """
+        """Prüft nach Marktschluss, ob der Schlusskurs den Limitpreis einer stornierten LOC-Order erreicht hat."""
         if not self._is_near_or_after_market_close(symbol):
             logger.debug(
                 "Skipping LOC close price check: cancellation occurred before market close",
@@ -1265,53 +1474,8 @@ class TwsCallbacksManager:
         )
 
         try:
-            from app.trading.order_builder import make_stock_contract
-
-            contract = make_stock_contract(symbol)
-
-            # Kurz warten, bis IBKR-Server den Schlusskurs finalisiert haben
-            await asyncio.sleep(5)
-
-            bars = None
-            for attempt in range(1, 4):
-                try:
-                    bars = await self.interactive_brokers.reqHistoricalDataAsync(
-                        contract=contract,
-                        endDateTime="",
-                        durationStr="1 D",
-                        barSizeSetting="1 day",
-                        whatToShow="TRADES",
-                        useRTH=True,
-                        formatDate=1,
-                        keepUpToDate=False,
-                    )
-                    if bars:
-                        break
-                except Exception as historical_data_error:
-                    logger.warning(
-                        "Attempt to fetch historical close price failed",
-                        symbol=symbol,
-                        attempt=attempt,
-                        error=str(historical_data_error),
-                    )
-                await asyncio.sleep(5)
-
-            if not bars:
-                logger.warning(
-                    "Could not retrieve daily historical bars for LOC check",
-                    symbol=symbol,
-                    order_id=order_id,
-                )
-                return
-
-            last_bar = bars[-1]
-            if not self._is_bar_from_today(last_bar.date, symbol):
-                logger.warning(
-                    "Retrieved daily bar is not from today. Close price check skipped.",
-                    symbol=symbol,
-                    order_id=order_id,
-                    bar_date=str(last_bar.date),
-                )
+            last_bar = await self._fetch_loc_closing_bar(symbol, order_id)
+            if not last_bar:
                 return
 
             close_price = Decimal(str(last_bar.close))
@@ -1322,39 +1486,18 @@ class TwsCallbacksManager:
                 limit_price=limit_price,
             )
 
-            # Abgleich der Ausführungsbedingungen
-            was_eligible = False
-            if action.upper() == "BUY" and close_price <= limit_price:
-                was_eligible = True
-            elif action.upper() == "SELL" and close_price >= limit_price:
-                was_eligible = True
-
-            if was_eligible:
-                logger.error(
-                    "LOC order anomaly detected: Limit price reached but order cancelled",
-                    order_id=order_id,
-                    symbol=symbol,
-                    action=action,
-                    limit_price=limit_price,
-                    close_price=close_price,
-                )
-                await self.notifier.send_loc_execution_anomaly(
-                    order_id=order_id,
-                    symbol=symbol,
-                    action=action,
-                    limit_price=limit_price,
-                    close_price=close_price,
-                    quantity=quantity,
-                )
-            else:
-                logger.debug(
-                    "LOC order cancellation justified: limit price not reached by close price",
-                    order_id=order_id,
-                    symbol=symbol,
-                    limit_price=limit_price,
-                    close_price=close_price,
-                )
-
+            was_eligible = self._evaluate_loc_eligibility(
+                action, close_price, limit_price
+            )
+            await self._handle_loc_anomaly_result(
+                was_eligible=was_eligible,
+                order_id=order_id,
+                symbol=symbol,
+                action=action,
+                limit_price=limit_price,
+                close_price=close_price,
+                quantity=quantity,
+            )
         except Exception as exception:
             logger.error(
                 "Error checking LOC execution price",
@@ -1363,57 +1506,78 @@ class TwsCallbacksManager:
                 error=str(exception),
             )
 
+    async def _handle_loc_anomaly_result(
+        self,
+        was_eligible: bool,
+        order_id: int,
+        symbol: str,
+        action: str,
+        limit_price: Decimal,
+        close_price: Decimal,
+        quantity: Decimal,
+    ) -> None:
+        """Protokolliert und alarmiert bei Unstimmigkeiten zwischen Schluss- und Limitpreis."""
+        if was_eligible:
+            logger.error(
+                "LOC order anomaly detected: Limit price reached but order cancelled",
+                order_id=order_id,
+                symbol=symbol,
+                action=action,
+                limit_price=limit_price,
+                close_price=close_price,
+            )
+            await self.notifier.send_loc_execution_anomaly(
+                order_id=order_id,
+                symbol=symbol,
+                action=action,
+                limit_price=limit_price,
+                close_price=close_price,
+                quantity=quantity,
+            )
+        else:
+            logger.debug(
+                "LOC order cancellation justified: limit price not reached by close price",
+                order_id=order_id,
+                symbol=symbol,
+                limit_price=limit_price,
+                close_price=close_price,
+            )
+
+    @staticmethod
+    def _get_localized_time(
+        target_zone: ZoneInfo, current_time: datetime | None = None
+    ) -> datetime:
+        """Konvertiert oder ermittelt die aktuelle Zeit in der angegebenen Zeitzone."""
+        if current_time and current_time.tzinfo:
+            return current_time.astimezone(target_zone)
+        if current_time:
+            return current_time.replace(tzinfo=target_zone)
+        return datetime.now(target_zone)
+
+    @staticmethod
     def _is_near_or_after_market_close(
-        self, symbol: str | None, current_time: datetime | None = None
+        symbol: str | None, current_time: datetime | None = None
     ) -> bool:
         """Überprüft, ob der aktuelle Zeitpunkt nahe oder nach dem regulären Marktschluss liegt."""
-        if not symbol:
-            ny_tz = ZoneInfo("America/New_York")
-            now_ny = (
-                current_time.astimezone(ny_tz)
-                if current_time and current_time.tzinfo
-                else (
-                    current_time.replace(tzinfo=ny_tz)
-                    if current_time
-                    else datetime.now(ny_tz)
-                )
-            )
-            market_close = now_ny.replace(hour=15, minute=45, second=0, microsecond=0)
-            return now_ny >= market_close
-
-        symbol_upper = symbol.upper()
-        if symbol_upper.endswith(".DE"):
-            # Deutscher Markt (Xetra) schließt um 17:30 Uhr Berlin-Zeit
-            berlin_tz = ZoneInfo("Europe/Berlin")
-            now_berlin = (
-                current_time.astimezone(berlin_tz)
-                if current_time and current_time.tzinfo
-                else (
-                    current_time.replace(tzinfo=berlin_tz)
-                    if current_time
-                    else datetime.now(berlin_tz)
-                )
+        if symbol and symbol.upper().endswith(".DE"):
+            # Deutscher Markt (Xetra) schließt um 17:30 Uhr Berlin-Zeit (Cutoff 17:15)
+            now_berlin = TwsCallbacksManager._get_localized_time(
+                ZoneInfo("Europe/Berlin"), current_time
             )
             market_close = now_berlin.replace(
                 hour=17, minute=15, second=0, microsecond=0
             )
             return now_berlin >= market_close
-        else:
-            # US-Markt (NASDAQ/NYSE) schließt um 16:00 Uhr New York-Zeit
-            ny_tz = ZoneInfo("America/New_York")
-            now_ny = (
-                current_time.astimezone(ny_tz)
-                if current_time and current_time.tzinfo
-                else (
-                    current_time.replace(tzinfo=ny_tz)
-                    if current_time
-                    else datetime.now(ny_tz)
-                )
-            )
-            market_close = now_ny.replace(hour=15, minute=45, second=0, microsecond=0)
-            return now_ny >= market_close
 
-    def _is_bar_from_today(self, bar_date: object, symbol: str) -> bool:
+        # US-Markt (NASDAQ/NYSE) schließt um 16:00 Uhr New York-Zeit (Cutoff 15:45)
+        now_ny = TwsCallbacksManager._get_localized_time(
+            ZoneInfo("America/New_York"), current_time
+        )
+        market_close = now_ny.replace(hour=15, minute=45, second=0, microsecond=0)
+        return now_ny >= market_close
+
+    @staticmethod
+    def _is_bar_from_today(bar_date: object, symbol: str) -> bool:
         """Überprüft, ob das Datum des Bars dem heutigen Handelstag entspricht."""
         symbol_upper = symbol.upper()
         tz = (
@@ -1444,16 +1608,7 @@ class TwsCallbacksManager:
             return
 
         db = await self.db_factory()
-        order_row = None
         try:
-            query = """
-                SELECT symbol, bracket_role
-                FROM orders
-                WHERE order_id = ?
-            """
-            async with db.execute(query, (request_id,)) as cursor:
-                order_row = await cursor.fetchone()
-
             async with transaction(db):
                 await db.execute(
                     "UPDATE orders SET status = 'Error' WHERE order_id = ?",
@@ -1469,33 +1624,10 @@ class TwsCallbacksManager:
         finally:
             await db.close()
 
-        symbol = order_row["symbol"] if order_row else "Unbekannt"
-        bracket_role = order_row["bracket_role"] if order_row else "-"
-
-        clean_error_string = re.sub(
-            r"[ \t]+", " ", re.sub(r"(?i)<br\s*/?>", " ", error_string)
-        ).strip()
-        reason_upper = clean_error_string.upper()
-        if (
-            "LOGIN TO CLIENT PORTAL" in reason_upper
-            or "VERIFY USING THE TOKEN" in reason_upper
-            or "VERIFICATION PROCESS" in reason_upper
-            or ("TOKEN" in reason_upper and "VERIFY" in reason_upper)
-        ):
-            reason = (
-                f"🔑 ANMELDUNG/VERIFIZIERUNG ERFORDERLICH: IBKR/CapTrader verlangt "
-                f"Token-Bestätigung im Client Portal! Details: {clean_error_string}"
-            )
-        else:
-            reason = clean_error_string
-
-        await self.notifier.send_order_failed(
+        await self._dispatch_failed_order_alert(
             order_id=request_id,
             tws_code=error_code,
-            reason=reason,
-            symbol=symbol,
-            bracket_role=bracket_role,
-            is_fatal=True,
+            reason=error_string,
         )
 
     def on_disconnected(self) -> None:

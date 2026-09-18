@@ -288,8 +288,10 @@ async def test_loc_order_cancel_not_near_close(db, mock_config: Config) -> None:
     )
 
     mock_now = datetime(2026, 7, 8, 10, 0, 0, tzinfo=ZoneInfo("America/New_York"))
-
-    with patch("app.trading.callbacks.datetime") as mock_dt:
+    with (
+        patch("app.trading.callbacks.datetime") as mock_dt,
+        patch("app.trading.callbacks.is_past_loc_gtd_cutoff", return_value=False),
+    ):
         mock_dt.now.return_value = mock_now
 
         try:
@@ -1266,7 +1268,10 @@ async def test_cancel_order_in_db_updates_and_notifies(db, mock_config: Config) 
     original_close = db.close
     db.close = AsyncMock()
     try:
-        await manager._cancel_order_in_db(60, 202, "Order Canceled by User")
+        with patch.object(
+            manager, "_is_cancellation_eod_or_expired", return_value=False
+        ):
+            await manager._cancel_order_in_db(60, 202, "Order Canceled by User")
     finally:
         db.close = original_close
 
@@ -1485,7 +1490,10 @@ async def test_on_error_dispatches_and_fail_order(db, mock_config: Config) -> No
 
         # CANCEL code with <br>
         mock_notifier.send_order_failed.reset_mock()
-        await manager._cancel_order_in_db(50, 202, "Order cancelled <br>by system")
+        with patch.object(
+            manager, "_is_cancellation_eod_or_expired", return_value=False
+        ):
+            await manager._cancel_order_in_db(50, 202, "Order cancelled <br>by system")
         mock_notifier.send_order_failed.assert_called_once()
         cancel_reason = mock_notifier.send_order_failed.call_args[1]["reason"]
         assert "<br>" not in cancel_reason
@@ -2511,10 +2519,11 @@ async def test_cancelled_exit_without_filled_sibling_sends_notification(
         trade.contract.symbol = "NBIS"
         trade.contract.secType = "STK"
         trade.orderStatus.whyHeld = ""
-        trade.log = []
-
-        manager.on_order_status(trade)
-        await asyncio.sleep(0.25)
+        with patch.object(
+            manager, "_is_cancellation_eod_or_expired", return_value=False
+        ):
+            manager.on_order_status(trade)
+            await asyncio.sleep(0.25)
 
         # Assert: Notification should be sent because sibling 953 is NOT Filled
         mock_notifier.send_order_failed.assert_called_once()
@@ -2624,8 +2633,11 @@ async def test_cancelled_entry_with_filled_sibling_still_sends_notification(
         trade.orderStatus.whyHeld = ""
         trade.log = []
 
-        manager.on_order_status(trade)
-        await asyncio.sleep(0.05)
+        with patch.object(
+            manager, "_is_cancellation_eod_or_expired", return_value=False
+        ):
+            manager.on_order_status(trade)
+            await asyncio.sleep(0.05)
 
         # Assert: Notification should be sent because 956 is ENTRY and sibling 957 is also ENTRY (not SL/TP/EXIT)
         mock_notifier.send_order_failed.assert_called_once()
