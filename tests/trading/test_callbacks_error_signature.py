@@ -652,3 +652,73 @@ def test_is_market_closed_error_codes_all_branches() -> None:
 
     t_us_closed = datetime(2026, 9, 11, 16, 1, 0)
     assert is_market_closed("AAPL", t_us_closed) is True
+
+
+@pytest.mark.asyncio
+async def test_error_202_oca_sibling_filled_suppresses_alert(
+    callbacks_manager: TwsCallbacksManager,
+    in_memory_db: aiosqlite.Connection,
+    mock_notifier: MagicMock,
+) -> None:
+    """Verifiziert, dass bei Error 202 ohne EOD/Reason der Alarm unterdrückt wird, wenn ein OCA-Sibling Filled ist."""
+    # Arrange
+    trade_group_id = "TG_OCA_ERROR_202"
+    await in_memory_db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status)
+        VALUES (3001, ?, 'U12345', 'TP', 'NBIS', 'STK', 'SMART', 'SELL', 10, 'LMT', '225.0', 'Submitted'),
+               (3002, ?, 'U12345', 'SL', 'NBIS', 'STK', 'SMART', 'SELL', 10, 'STP', '200.0', 'Filled')
+        """,
+        (trade_group_id, trade_group_id),
+    )
+    await in_memory_db.commit()
+
+    with patch.object(
+        callbacks_manager,
+        "_is_near_or_after_market_close",
+        return_value=False,
+    ):
+        # Act: Error 202 mit generischem Text (kein EOD/GTD)
+        await callbacks_manager._cancel_order_in_db(
+            request_id=3001,
+            error_code=202,
+            error_string="Order Canceled - reason:",
+        )
+
+    # Assert: Alarm darf NICHT gesendet werden
+    mock_notifier.send_order_failed.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_error_202_oca_sibling_unfilled_sends_alert(
+    callbacks_manager: TwsCallbacksManager,
+    in_memory_db: aiosqlite.Connection,
+    mock_notifier: MagicMock,
+) -> None:
+    """Verifiziert, dass bei Error 202 ohne EOD/Reason der Alarm gesendet wird, wenn kein OCA-Sibling Filled ist."""
+    # Arrange
+    trade_group_id = "TG_OCA_UNFILLED_202"
+    await in_memory_db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status)
+        VALUES (3003, ?, 'U12345', 'TP', 'NBIS', 'STK', 'SMART', 'SELL', 10, 'LMT', '225.0', 'Submitted'),
+               (3004, ?, 'U12345', 'SL', 'NBIS', 'STK', 'SMART', 'SELL', 10, 'STP', '200.0', 'Submitted')
+        """,
+        (trade_group_id, trade_group_id),
+    )
+    await in_memory_db.commit()
+
+    with patch.object(
+        callbacks_manager,
+        "_is_near_or_after_market_close",
+        return_value=False,
+    ):
+        # Act
+        await callbacks_manager._cancel_order_in_db(
+            request_id=3003,
+            error_code=202,
+            error_string="Order Canceled - reason:",
+        )
+
+    # Assert: Alarm MUSS gesendet werden
+    mock_notifier.send_order_failed.assert_awaited_once()

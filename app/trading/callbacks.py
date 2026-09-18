@@ -583,12 +583,17 @@ class TwsCallbacksManager:
             """
             async with db.execute(query, (order_id,)) as cursor:
                 order_row = await cursor.fetchone()
+
+            has_filled_sibling = await self._has_filled_sibling_in_group(
+                order_id, db=db
+            )
         except Exception as exception:
             logger.error(
                 "Error querying order details for cancelled status",
                 order_id=order_id,
                 error=str(exception),
             )
+            has_filled_sibling = False
         finally:
             await db.close()
 
@@ -614,6 +619,13 @@ class TwsCallbacksManager:
                 is_gtd_expired=is_gtd_expired,
                 is_eod_oca=is_eod_oca,
                 reason=reason,
+            )
+        elif has_filled_sibling:
+            logger.info(
+                "Order cancellation notification suppressed (OCA sibling already filled)",
+                order_id=order_id,
+                symbol=symbol,
+                bracket_role=bracket_role,
             )
         else:
             clean_reason = (
@@ -688,6 +700,46 @@ class TwsCallbacksManager:
             bracket_role=bracket_role,
             is_fatal=True,
         )
+
+    async def _has_filled_sibling_in_group(
+        self, order_id: int, db: aiosqlite.Connection | None = None
+    ) -> bool:
+        """Prüft, ob eine Geschwister-Exit-Order derselben trade_group_id bereits 'Filled' ist.
+
+        Wenn eine OCA-Gruppe existiert und ein Leg gefüllt wurde, storniert IBKR
+        automatisch die verbleibenden Legs. Diese Stornierungen sind regulär und
+        erfordern keine Alarm-Benachrichtigung.
+        """
+        should_close = False
+        if db is None:
+            db = await self.db_factory()
+            should_close = True
+
+        try:
+            query = """
+                SELECT COUNT(*) AS filled_count
+                FROM orders AS sibling
+                WHERE sibling.trade_group_id = (
+                    SELECT trade_group_id FROM orders
+                    WHERE order_id = ? AND bracket_role IN ('SL', 'TP', 'EXIT')
+                )
+                AND sibling.order_id != ?
+                AND sibling.bracket_role IN ('SL', 'TP', 'EXIT')
+                AND sibling.status = 'Filled'
+            """
+            async with db.execute(query, (order_id, order_id)) as cursor:
+                row = await cursor.fetchone()
+                return bool(row and row["filled_count"] > 0)
+        except Exception as exception:
+            logger.error(
+                "Error checking for filled sibling in OCA group",
+                order_id=order_id,
+                error=str(exception),
+            )
+            return False
+        finally:
+            if should_close:
+                await db.close()
 
     def on_exec_details(self, trade: Trade, fill: Fill) -> None:
         """
@@ -1016,6 +1068,7 @@ class TwsCallbacksManager:
 
         db = await self.db_factory()
         order_row = None
+        has_filled_sibling = False
         try:
             # Details für die Benachrichtigung laden
             query = """
@@ -1031,6 +1084,10 @@ class TwsCallbacksManager:
                     "UPDATE orders SET status = 'Cancelled' WHERE order_id = ?",
                     (request_id,),
                 )
+
+            has_filled_sibling = await self._has_filled_sibling_in_group(
+                request_id, db=db
+            )
         except Exception as exception:
             logger.error(
                 "Error updating DB for cancelled order",
@@ -1062,6 +1119,13 @@ class TwsCallbacksManager:
                 is_gtd_expired=is_gtd_expired,
                 is_eod_oca=is_eod_oca,
                 reason=clean_error_string,
+            )
+        elif has_filled_sibling:
+            logger.info(
+                "Order cancellation notification suppressed (OCA sibling already filled)",
+                order_id=request_id,
+                symbol=symbol,
+                bracket_role=bracket_role,
             )
         else:
             await self.notifier.send_order_failed(

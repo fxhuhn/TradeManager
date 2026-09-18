@@ -2404,3 +2404,263 @@ async def test_gtd_cancellation_at_15_48_suppresses_alert(
             assert row["status"] == "Cancelled"
     finally:
         db.close = original_close
+
+
+@pytest.mark.asyncio
+async def test_cancelled_exit_with_filled_sibling_suppresses_notification(
+    db, mock_config: Config
+) -> None:
+    """Verifies that an exit order cancellation alert is suppressed when a sibling exit is already Filled."""
+    # Arrange
+    trade_group_id = "group_oca_test_filled"
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status)
+        VALUES (950, ?, 'U12345', 'TP', 'NBIS', 'STK', 'SMART', 'SELL', 10, 'LMT', '225.0', 'Submitted'),
+               (951, ?, 'U12345', 'SL', 'NBIS', 'STK', 'SMART', 'SELL', 10, 'STP', '200.0', 'Filled')
+        """,
+        (trade_group_id, trade_group_id),
+    )
+    await db.commit()
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=MagicMock(),
+        notifier=mock_notifier,
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    try:
+        # Act
+        trade = MagicMock()
+        trade.order.orderId = 950
+        trade.orderStatus.status = "Cancelled"
+        trade.orderStatus.permId = 333950
+        trade.orderStatus.avgFillPrice = 0.0
+        trade.contract.symbol = "NBIS"
+        trade.contract.secType = "STK"
+        trade.orderStatus.whyHeld = ""
+        trade.log = []
+
+        manager.on_order_status(trade)
+        await asyncio.sleep(0.05)
+
+        # Assert: Notification should be suppressed because sibling 951 is Filled
+        mock_notifier.send_order_failed.assert_not_called()
+    finally:
+        db.close = original_close
+
+
+@pytest.mark.asyncio
+async def test_cancelled_exit_without_filled_sibling_sends_notification(
+    db, mock_config: Config
+) -> None:
+    """Verifies that an exit order cancellation alert is sent when no sibling exit is Filled."""
+    # Arrange
+    trade_group_id = "group_oca_test_unfilled"
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status)
+        VALUES (952, ?, 'U12345', 'TP', 'NBIS', 'STK', 'SMART', 'SELL', 10, 'LMT', '225.0', 'Submitted'),
+               (953, ?, 'U12345', 'SL', 'NBIS', 'STK', 'SMART', 'SELL', 10, 'STP', '200.0', 'Submitted')
+        """,
+        (trade_group_id, trade_group_id),
+    )
+    await db.commit()
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=MagicMock(),
+        notifier=mock_notifier,
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    try:
+        # Act
+        trade = MagicMock()
+        trade.order.orderId = 952
+        trade.orderStatus.status = "Cancelled"
+        trade.orderStatus.permId = 333952
+        trade.orderStatus.avgFillPrice = 0.0
+        trade.contract.symbol = "NBIS"
+        trade.contract.secType = "STK"
+        trade.orderStatus.whyHeld = ""
+        trade.log = []
+
+        manager.on_order_status(trade)
+        await asyncio.sleep(0.05)
+
+        # Assert: Notification should be sent because sibling 953 is NOT Filled
+        mock_notifier.send_order_failed.assert_called_once()
+        assert mock_notifier.send_order_failed.call_args.kwargs["order_id"] == 952
+    finally:
+        db.close = original_close
+
+
+@pytest.mark.asyncio
+async def test_cancel_error_202_with_filled_sibling_suppresses_notification(
+    db, mock_config: Config
+) -> None:
+    """Verifies that an error 202 cancellation alert is suppressed when a sibling exit is already Filled."""
+    # Arrange
+    trade_group_id = "group_oca_error_202"
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status)
+        VALUES (954, ?, 'U12345', 'TP', 'NBIS', 'STK', 'SMART', 'SELL', 10, 'LMT', '225.0', 'Submitted'),
+               (955, ?, 'U12345', 'SL', 'NBIS', 'STK', 'SMART', 'SELL', 10, 'STP', '200.0', 'Filled')
+        """,
+        (trade_group_id, trade_group_id),
+    )
+    await db.commit()
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=MagicMock(),
+        notifier=mock_notifier,
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    try:
+        # Act
+        manager.on_error(
+            request_id=954,
+            error_code=202,
+            error_string="Order Canceled - reason:",
+        )
+        await asyncio.sleep(0.05)
+
+        # Assert: Notification should be suppressed
+        mock_notifier.send_order_failed.assert_not_called()
+    finally:
+        db.close = original_close
+
+
+@pytest.mark.asyncio
+async def test_cancelled_entry_with_filled_sibling_still_sends_notification(
+    db, mock_config: Config
+) -> None:
+    """Verifies that an ENTRY order cancellation alert is sent even if another order is Filled."""
+    # Arrange
+    trade_group_id = "group_oca_entry"
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status)
+        VALUES (956, ?, 'U12345', 'ENTRY', 'NBIS', 'STK', 'SMART', 'BUY', 10, 'LMT', '205.0', 'Submitted'),
+               (957, ?, 'U12345', 'TP', 'NBIS', 'STK', 'SMART', 'SELL', 10, 'LMT', '225.0', 'Filled')
+        """,
+        (trade_group_id, trade_group_id),
+    )
+    await db.commit()
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=MagicMock(),
+        notifier=mock_notifier,
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    try:
+        # Act
+        trade = MagicMock()
+        trade.order.orderId = 956
+        trade.orderStatus.status = "Cancelled"
+        trade.orderStatus.permId = 333956
+        trade.orderStatus.avgFillPrice = 0.0
+        trade.contract.symbol = "NBIS"
+        trade.contract.secType = "STK"
+        trade.orderStatus.whyHeld = ""
+        trade.log = []
+
+        manager.on_order_status(trade)
+        await asyncio.sleep(0.05)
+
+        # Assert: Notification should be sent because 956 is ENTRY and sibling 957 is also ENTRY (not SL/TP/EXIT)
+        mock_notifier.send_order_failed.assert_called_once()
+        assert mock_notifier.send_order_failed.call_args.kwargs["order_id"] == 956
+    finally:
+        db.close = original_close
+
+
+@pytest.mark.asyncio
+async def test_has_filled_sibling_in_group_handles_database_exception(
+    mock_config: Config,
+) -> None:
+    """Verifies that database exceptions in _has_filled_sibling_in_group are caught and False is returned."""
+    # Arrange
+    failing_db = MagicMock()
+    failing_db.execute.side_effect = RuntimeError("Database disk failure")
+    failing_db.close = AsyncMock()
+
+    async def failing_db_factory():
+        return failing_db
+
+    manager = TwsCallbacksManager(
+        db_factory=failing_db_factory,
+        interactive_brokers=MagicMock(),
+        notifier=MagicMock(),
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    # Act
+    result = await manager._has_filled_sibling_in_group(999)
+
+    # Assert
+    assert result is False
+    failing_db.close.assert_awaited_once()
