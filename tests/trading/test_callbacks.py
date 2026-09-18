@@ -2514,7 +2514,7 @@ async def test_cancelled_exit_without_filled_sibling_sends_notification(
         trade.log = []
 
         manager.on_order_status(trade)
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.25)
 
         # Assert: Notification should be sent because sibling 953 is NOT Filled
         mock_notifier.send_order_failed.assert_called_once()
@@ -2664,3 +2664,185 @@ async def test_has_filled_sibling_in_group_handles_database_exception(
     # Assert
     assert result is False
     failing_db.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_oca_cancellation_race_condition_suppressed_when_sibling_fills_during_grace_window(
+    db, mock_config: Config
+) -> None:
+    """Verifies that an exit cancellation notification is suppressed when an OCA sibling is filled during the grace window."""
+    trade_group_id = "group_oca_race_grace"
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status)
+        VALUES (1550, ?, 'U12345', 'SL', 'WDC', 'STK', 'SMART', 'SELL', 10, 'STP', '60.0', 'Submitted'),
+               (1551, ?, 'U12345', 'TP', 'WDC', 'STK', 'SMART', 'SELL', 10, 'LMT', '75.0', 'Submitted')
+        """,
+        (trade_group_id, trade_group_id),
+    )
+    await db.commit()
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=MagicMock(),
+        notifier=mock_notifier,
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    try:
+        # Act 1: Order 1550 receives Cancelled status while 1551 is still 'Submitted'
+        trade_1550 = MagicMock()
+        trade_1550.order.orderId = 1550
+        trade_1550.orderStatus.status = "Cancelled"
+        trade_1550.orderStatus.permId = 4441550
+        trade_1550.orderStatus.avgFillPrice = 0.0
+        trade_1550.contract.symbol = "WDC"
+        trade_1550.contract.secType = "STK"
+        trade_1550.orderStatus.whyHeld = ""
+        trade_1550.log = []
+
+        manager.on_order_status(trade_1550)
+
+        # Act 2: Simulate sibling 1551 fill completing during the 150ms grace window (at 50ms)
+        await asyncio.sleep(0.05)
+        await db.execute("UPDATE orders SET status = 'Filled' WHERE order_id = 1551")
+        await db.commit()
+
+        # Wait for the grace window (0.15s) to complete
+        await asyncio.sleep(0.20)
+
+        # Assert: Notification MUST be suppressed because sibling 1551 was marked Filled during grace window
+        mock_notifier.send_order_failed.assert_not_called()
+    finally:
+        db.close = original_close
+
+
+@pytest.mark.asyncio
+async def test_oca_cancellation_suppressed_via_executions_table(
+    db, mock_config: Config
+) -> None:
+    """Verifies that an exit cancellation alert is suppressed when sibling has rows in executions table even if order status is not yet Filled."""
+    trade_group_id = "group_oca_exec_table"
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status)
+        VALUES (1552, ?, 'U12345', 'SL', 'WDC', 'STK', 'SMART', 'SELL', 10, 'STP', '60.0', 'Submitted'),
+               (1553, ?, 'U12345', 'TP', 'WDC', 'STK', 'SMART', 'SELL', 10, 'LMT', '75.0', 'Submitted')
+        """,
+        (trade_group_id, trade_group_id),
+    )
+    # Insert execution row for sibling 1553
+    await db.execute(
+        """
+        INSERT INTO executions (exec_id, order_id, price, qty, currency, executed_at)
+        VALUES ('EXEC_1553_1', 1553, '75.0', '10.0', 'USD', '2026-09-18 20:46:00')
+        """
+    )
+    await db.commit()
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=MagicMock(),
+        notifier=mock_notifier,
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    try:
+        trade_1552 = MagicMock()
+        trade_1552.order.orderId = 1552
+        trade_1552.orderStatus.status = "Cancelled"
+        trade_1552.orderStatus.permId = 4441552
+        trade_1552.orderStatus.avgFillPrice = 0.0
+        trade_1552.contract.symbol = "WDC"
+        trade_1552.contract.secType = "STK"
+        trade_1552.orderStatus.whyHeld = ""
+        trade_1552.log = []
+
+        manager.on_order_status(trade_1552)
+        await asyncio.sleep(0.05)
+
+        # Assert: Notification MUST be suppressed immediately via executions table check
+        mock_notifier.send_order_failed.assert_not_called()
+    finally:
+        db.close = original_close
+
+
+@pytest.mark.asyncio
+async def test_oca_cancellation_error_202_grace_window_suppressed(
+    db, mock_config: Config
+) -> None:
+    """Verifies that an Error 202 cancellation alert is suppressed when sibling fills during grace window."""
+    trade_group_id = "group_oca_error_202_grace"
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status)
+        VALUES (1554, ?, 'U12345', 'SL', 'WDC', 'STK', 'SMART', 'SELL', 10, 'STP', '60.0', 'Submitted'),
+               (1555, ?, 'U12345', 'TP', 'WDC', 'STK', 'SMART', 'SELL', 10, 'LMT', '75.0', 'Submitted')
+        """,
+        (trade_group_id, trade_group_id),
+    )
+    await db.commit()
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=MagicMock(),
+        notifier=mock_notifier,
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    try:
+        manager.on_error(
+            request_id=1554,
+            error_code=202,
+            error_string="Order Canceled - reason:",
+        )
+
+        await asyncio.sleep(0.05)
+        await db.execute("UPDATE orders SET status = 'Filled' WHERE order_id = 1555")
+        await db.commit()
+
+        await asyncio.sleep(0.20)
+
+        # Assert: Notification MUST be suppressed
+        mock_notifier.send_order_failed.assert_not_called()
+    finally:
+        db.close = original_close

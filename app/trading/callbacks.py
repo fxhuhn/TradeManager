@@ -570,49 +570,78 @@ class TwsCallbacksManager:
             )
             return
 
-        if order_id in self._notified_cancelled_order_ids:
-            return
+        async with self._get_order_lock(order_id):
+            if order_id in self._notified_cancelled_order_ids:
+                return
 
-        db = await self.db_factory()
-        order_row = None
-        try:
-            query = """
-                SELECT symbol, bracket_role, action, quantity, order_type, target_price
-                FROM orders
-                WHERE order_id = ?
-            """
-            async with db.execute(query, (order_id,)) as cursor:
-                order_row = await cursor.fetchone()
-
-            has_filled_sibling = await self._has_filled_sibling_in_group(
-                order_id, db=db
-            )
-        except Exception as exception:
-            logger.error(
-                "Error querying order details for cancelled status",
-                order_id=order_id,
-                error=str(exception),
-            )
+            db = await self.db_factory()
+            order_row = None
             has_filled_sibling = False
-        finally:
-            await db.close()
+            has_siblings = False
+            try:
+                query = """
+                    SELECT symbol, bracket_role, action, quantity, order_type, target_price
+                    FROM orders
+                    WHERE order_id = ?
+                """
+                async with db.execute(query, (order_id,)) as cursor:
+                    order_row = await cursor.fetchone()
 
-        symbol = (
-            order_row["symbol"]
-            if order_row
-            else (event_symbol if event_symbol else "Unbekannt")
-        )
-        bracket_role = order_row["bracket_role"] if order_row else "-"
+                has_filled_sibling = await self._has_filled_sibling_in_group(
+                    order_id, db=db
+                )
+                has_siblings = (
+                    await self._has_sibling_exit_legs(order_id, db=db)
+                    if not has_filled_sibling
+                    else False
+                )
+            except Exception as exception:
+                logger.error(
+                    "Error querying order details for cancelled status",
+                    order_id=order_id,
+                    error=str(exception),
+                )
+            finally:
+                await db.close()
 
+            symbol = (
+                order_row["symbol"]
+                if order_row
+                else (event_symbol if event_symbol else "Unbekannt")
+            )
+            bracket_role = order_row["bracket_role"] if order_row else "-"
+
+            await self._evaluate_and_notify_cancellation(
+                order_id=order_id,
+                symbol=symbol,
+                bracket_role=bracket_role,
+                reason=reason,
+                tws_code=0,
+                has_filled_sibling=has_filled_sibling,
+                has_siblings=has_siblings,
+                log_prefix="Order status Cancelled/Inactive notification",
+            )
+
+    async def _evaluate_and_notify_cancellation(
+        self,
+        order_id: int,
+        symbol: str,
+        bracket_role: str,
+        reason: str,
+        tws_code: int,
+        has_filled_sibling: bool,
+        has_siblings: bool,
+        log_prefix: str,
+    ) -> None:
+        """Prüft EOD-, GTD- und OCA-Bedingungen und sendet bei echten Stornierungen einen Alarm."""
         is_near_close = self._is_near_or_after_market_close(symbol)
         is_gtd_expired = is_past_loc_gtd_cutoff(symbol) if symbol else False
         is_eod_oca = self._is_eod_or_oca_reason(reason)
 
-        self._notified_cancelled_order_ids.add(order_id)
-
         if is_near_close or is_gtd_expired or is_eod_oca:
+            self._notified_cancelled_order_ids.add(order_id)
             logger.info(
-                "Order status Cancelled/Inactive notification suppressed (EOD or OCA reason)",
+                f"{log_prefix} suppressed (EOD or OCA reason)",
                 order_id=order_id,
                 symbol=symbol,
                 is_near_close=is_near_close,
@@ -620,7 +649,20 @@ class TwsCallbacksManager:
                 is_eod_oca=is_eod_oca,
                 reason=reason,
             )
-        elif has_filled_sibling:
+            return
+
+        if (
+            not has_filled_sibling
+            and has_siblings
+            and bracket_role in ("SL", "TP", "EXIT")
+        ):
+            # Grace window: Kooperativer Yield für in-flight Sibling-Fills
+            await asyncio.sleep(0.15)
+            has_filled_sibling = await self._has_filled_sibling_in_group(order_id)
+
+        self._notified_cancelled_order_ids.add(order_id)
+
+        if has_filled_sibling:
             logger.info(
                 "Order cancellation notification suppressed (OCA sibling already filled)",
                 order_id=order_id,
@@ -635,7 +677,7 @@ class TwsCallbacksManager:
             )
             await self.notifier.send_order_failed(
                 order_id=order_id,
-                tws_code=0,
+                tws_code=tws_code,
                 reason=clean_reason,
                 symbol=symbol,
                 bracket_role=bracket_role,
@@ -729,10 +771,65 @@ class TwsCallbacksManager:
             """
             async with db.execute(query, (order_id, order_id)) as cursor:
                 row = await cursor.fetchone()
-                return bool(row and row["filled_count"] > 0)
+                if row and row["filled_count"] > 0:
+                    return True
+
+            # Ergänzende Prüfung: Wurde für ein Geschwister-Exit-Leg bereits ein Fill verbucht?
+            query_executions = """
+                SELECT COUNT(*) AS exec_count
+                FROM executions AS e
+                JOIN orders AS sibling ON e.order_id = sibling.order_id
+                WHERE sibling.trade_group_id = (
+                    SELECT trade_group_id FROM orders
+                    WHERE order_id = ? AND bracket_role IN ('SL', 'TP', 'EXIT')
+                )
+                AND sibling.order_id != ?
+                AND sibling.bracket_role IN ('SL', 'TP', 'EXIT')
+            """
+            try:
+                async with db.execute(query_executions, (order_id, order_id)) as cursor:
+                    exec_row = await cursor.fetchone()
+                    return bool(exec_row and exec_row["exec_count"] > 0)
+            except Exception:
+                # Falls executions-Tabelle in isolierten Unit-Tests nicht existiert
+                return False
         except Exception as exception:
             logger.error(
                 "Error checking for filled sibling in OCA group",
+                order_id=order_id,
+                error=str(exception),
+            )
+            return False
+        finally:
+            if should_close:
+                await db.close()
+
+    async def _has_sibling_exit_legs(
+        self, order_id: int, db: aiosqlite.Connection | None = None
+    ) -> bool:
+        """Prüft, ob für die Order in derselben trade_group_id weitere Exit-Legs existieren."""
+        should_close = False
+        if db is None:
+            db = await self.db_factory()
+            should_close = True
+
+        try:
+            query = """
+                SELECT COUNT(*) AS sibling_count
+                FROM orders AS sibling
+                WHERE sibling.trade_group_id = (
+                    SELECT trade_group_id FROM orders
+                    WHERE order_id = ? AND bracket_role IN ('SL', 'TP', 'EXIT')
+                )
+                AND sibling.order_id != ?
+                AND sibling.bracket_role IN ('SL', 'TP', 'EXIT')
+            """
+            async with db.execute(query, (order_id, order_id)) as cursor:
+                row = await cursor.fetchone()
+                return bool(row and row["sibling_count"] > 0)
+        except Exception as exception:
+            logger.error(
+                "Error checking for sibling exit legs in trade group",
                 order_id=order_id,
                 error=str(exception),
             )
@@ -1063,78 +1160,64 @@ class TwsCallbacksManager:
         """Kennzeichnet Order in DB als storniert und benachrichtigt via Telegram."""
         if request_id <= 0:
             return
-        if request_id in self._notified_cancelled_order_ids:
-            return
 
-        db = await self.db_factory()
-        order_row = None
-        has_filled_sibling = False
-        try:
-            # Details für die Benachrichtigung laden
-            query = """
-                SELECT symbol, bracket_role, action, quantity, order_type, target_price
-                FROM orders
-                WHERE order_id = ?
-            """
-            async with db.execute(query, (request_id,)) as cursor:
-                order_row = await cursor.fetchone()
+        async with self._get_order_lock(request_id):
+            if request_id in self._notified_cancelled_order_ids:
+                return
 
-            async with transaction(db):
-                await db.execute(
-                    "UPDATE orders SET status = 'Cancelled' WHERE order_id = ?",
-                    (request_id,),
+            db = await self.db_factory()
+            order_row = None
+            has_filled_sibling = False
+            has_siblings = False
+            try:
+                # Details für die Benachrichtigung laden
+                query = """
+                    SELECT symbol, bracket_role, action, quantity, order_type, target_price
+                    FROM orders
+                    WHERE order_id = ?
+                """
+                async with db.execute(query, (request_id,)) as cursor:
+                    order_row = await cursor.fetchone()
+
+                async with transaction(db):
+                    await db.execute(
+                        "UPDATE orders SET status = 'Cancelled' WHERE order_id = ? AND status NOT IN ('Filled', 'Cancelled')",
+                        (request_id,),
+                    )
+
+                has_filled_sibling = await self._has_filled_sibling_in_group(
+                    request_id, db=db
                 )
+                has_siblings = (
+                    await self._has_sibling_exit_legs(request_id, db=db)
+                    if not has_filled_sibling
+                    else False
+                )
+            except Exception as exception:
+                logger.error(
+                    "Error updating DB for cancelled order",
+                    order_id=request_id,
+                    error=str(exception),
+                )
+                return
+            finally:
+                await db.close()
 
-            has_filled_sibling = await self._has_filled_sibling_in_group(
-                request_id, db=db
-            )
-        except Exception as exception:
-            logger.error(
-                "Error updating DB for cancelled order",
-                order_id=request_id,
-                error=str(exception),
-            )
-            return
-        finally:
-            await db.close()
+            symbol = order_row["symbol"] if order_row else "Unbekannt"
+            bracket_role = order_row["bracket_role"] if order_row else "-"
+            clean_error_string = re.sub(
+                r"[ \t]+", " ", re.sub(r"(?i)<br\s*/?>", " ", error_string)
+            ).strip()
 
-        symbol = order_row["symbol"] if order_row else "Unbekannt"
-        bracket_role = order_row["bracket_role"] if order_row else "-"
-        clean_error_string = re.sub(
-            r"[ \t]+", " ", re.sub(r"(?i)<br\s*/?>", " ", error_string)
-        ).strip()
-
-        is_near_close = self._is_near_or_after_market_close(symbol)
-        is_gtd_expired = is_past_loc_gtd_cutoff(symbol) if symbol else False
-        is_eod_oca = self._is_eod_or_oca_reason(clean_error_string)
-
-        self._notified_cancelled_order_ids.add(request_id)
-
-        if is_near_close or is_gtd_expired or is_eod_oca:
-            logger.info(
-                "Order cancellation notification suppressed (EOD or OCA reason)",
-                order_id=request_id,
-                symbol=symbol,
-                is_near_close=is_near_close,
-                is_gtd_expired=is_gtd_expired,
-                is_eod_oca=is_eod_oca,
-                reason=clean_error_string,
-            )
-        elif has_filled_sibling:
-            logger.info(
-                "Order cancellation notification suppressed (OCA sibling already filled)",
+            await self._evaluate_and_notify_cancellation(
                 order_id=request_id,
                 symbol=symbol,
                 bracket_role=bracket_role,
-            )
-        else:
-            await self.notifier.send_order_failed(
-                order_id=request_id,
+                reason=clean_error_string,
                 tws_code=error_code,
-                reason=clean_error_string,
-                symbol=symbol,
-                bracket_role=bracket_role,
-                is_fatal=False,
+                has_filled_sibling=has_filled_sibling,
+                has_siblings=has_siblings,
+                log_prefix="Order cancellation notification",
             )
 
         # Überprüfung bei LOC-Orders nach Marktschluss anstoßen
