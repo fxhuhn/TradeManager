@@ -89,3 +89,5 @@ brain/
 # Custom App Data
 /data
 /doc/*.pdf
+
+/tests/scripts/
