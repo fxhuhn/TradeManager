@@ -112,6 +112,9 @@ db_backup_interval_s = 86400
 # Intervall in Sekunden für die Reautorisierungs-Prüfung der IBKR-Sitzung (1800 = 30 Minuten).
 reauth_check_interval_s = 1800
 
+# Maximale tolerierte nachteilige Slippage als Dezimalanteil (0.01 = 1 %), ab der ein Warn-Alert ausgelöst wird.
+max_slippage_pct = 0.01
+
 
 # -----------------------------------------------------------------------------
 # 3. KONTO- & RISIKOMANAGEMENT ([account])

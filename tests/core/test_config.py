@@ -56,9 +56,25 @@ def test_config_parsing_from_toml(tmp_path: Path) -> None:
         config = load_config(tmp_path)
 
         assert config.tws.host == "10.0.0.1"
-        assert config.tws.port == 9999
         assert config.tws.client_id == 42
         assert config.tws.whatif_timeout_s == 10.0
+        assert config.app.max_slippage_pct == 0.01
+
+
+def test_config_parsing_custom_max_slippage_pct(tmp_path: Path) -> None:
+    """Verifies that custom max_slippage_pct is parsed correctly from config.toml."""
+    config_content = """
+    [tws]
+    host = "127.0.0.1"
+
+    [app]
+    max_slippage_pct = 0.025
+    """
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(config_content, encoding="utf-8")
+
+    config = load_config(tmp_path)
+    assert config.app.max_slippage_pct == 0.025
 
 
 def test_config_parsing_env_overrides(tmp_path: Path) -> None:

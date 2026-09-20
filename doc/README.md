@@ -266,12 +266,13 @@ Das System wird über zwei Dateien konfiguriert: `config.toml` (strukturelle Par
 | `max_csv_size_bytes`       | Integer | `5242880`     | Maximale CSV-Dateigröße in Bytes (5 MB, DoS-Schutz)            |
 | `log_file_path`            | String  | `"data/app.log"` | Pfad zur zentralen Logdatei                                  |
 | `log_rotation_backup_count`| Integer | `5`           | Anzahl rotierender Backup-Logdateien                            |
+| `max_slippage_pct`         | Float   | `0.01`        | Maximale nachteilige Slippage (1%) vor Alert-Auslösung          |
 
 #### `[account]` — Kontoeinstellungen
 
 | Parameter                  | Typ   | Standard                    | Beschreibung                                                             |
 |:---------------------------|:------|:----------------------------|:-------------------------------------------------------------------------|
-| `default_limit_pct`        | Float | `0.05`                      | Standard-Kapitalallokation (5% für Slippage-Warnung)                     |
+| `default_limit_pct`        | Float | `0.05`                      | Standard-Kapitalallokation (5% des Net Liquidation Value pro Position)   |
 | `margin_multiplier_factor` | Float | `2.0`                       | Faktor zur Bestimmung des Margin-Hebels (für Downscaling)                |
 | `sizing_mode`              | String| `"margin_adjusted_capital"` | Sizing-Modus: `'margin_adjusted_capital'` (Standard) oder `'total_cash'` |
 | `max_margin_usage_pct`     | Float | `0.80`                      | Maximale Margin-Auslastung (80%) bezogen auf den Netto-Liquidationswert  |
@@ -910,7 +911,7 @@ Der `alert_watcher` läuft kontinuierlich in einem Hintergrund-Loop und führt S
 | Prüfung              | Intervall | Schwellwert                    | Aktion bei Auslösung                     |
 |:----------------------|:----------|:-------------------------------|:-----------------------------------------|
 | **Dead Order Check**  | 60 Sek.   | `dead_order_threshold_min` (15 Min.) | Telegram: `⚠️ DEAD ORDER: …`         |
-| **High Slippage Check** | 60 Sek. | `default_limit_pct` (5%)       | Telegram: `📉 SLIPPAGE: …`              |
+| **High Slippage Check** | 60 Sek. | `max_slippage_pct` (1%)        | Telegram: `📉 HIGH SLIPPAGE: …`          |
 | **Order Status Sync** | 300 Sek.  | —                              | Recovery-Lauf (Zustandsabgleich mit TWS) |
 
 **Redundanz-Schutz:** Der Watcher verfügt über einen In-Memory-Status (`AlertState`), um doppelte Benachrichtigungen für dasselbe Problem zu verhindern.

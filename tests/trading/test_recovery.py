@@ -278,6 +278,7 @@ async def test_recovery_recovers_filled_entry_with_active_child(
         order_id=177,
         strategy_name="DipBuyer",
         limit_price=Decimal("115.17"),
+        sec_type="STK",
     )
 
 
@@ -427,6 +428,7 @@ async def test_recovery_recovers_filled_order_downtime(db, mock_config: Config) 
         order_id=180,
         strategy_name="DipBuyer",
         limit_price=Decimal("50.0"),
+        sec_type="STK",
     )
 
     await asyncio.sleep(0.1)

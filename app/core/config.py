@@ -50,6 +50,7 @@ class AppConfig:
     log_rotation_backup_count: int
     db_backup_interval_s: int = 86400
     reauth_check_interval_s: int = 1800
+    max_slippage_pct: float = 0.01
 
 
 @dataclass(frozen=True)
@@ -205,6 +206,7 @@ def _parse_app_config(app_data: dict[str, object]) -> AppConfig:
         log_rotation_backup_count=_to_int(app_data.get("log_rotation_backup_count"), 5),
         db_backup_interval_s=_to_int(app_data.get("db_backup_interval_s"), 86400),
         reauth_check_interval_s=_to_int(app_data.get("reauth_check_interval_s"), 1800),
+        max_slippage_pct=_to_float(app_data.get("max_slippage_pct"), 0.01),
     )
 
 

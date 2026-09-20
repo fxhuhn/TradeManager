@@ -304,6 +304,7 @@ async def _handle_filled_during_downtime(
         order_id=order_id,
         strategy_name=order.strategy_name or "",
         limit_price=limit_price_decimal,
+        sec_type=order.sec_type,
     )
 
     asyncio.create_task(
@@ -369,6 +370,7 @@ async def _try_recover_indirect_entry_fill(
         order_id=order_id,
         strategy_name=order.strategy_name or "",
         limit_price=limit_price_decimal,
+        sec_type=order.sec_type,
     )
     return True
 

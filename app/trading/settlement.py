@@ -82,6 +82,7 @@ async def trigger_settlement(
                 settlement_input.entry_target_price,
                 calculation_outputs,
                 settlement_input.total_commissions,
+                entry_sec_type=settlement_input.entry_sec_type,
             )
 
         except Exception as exception:
@@ -116,7 +117,7 @@ async def _fetch_settlement_data(
     """Lädt Executions und Target-Preise für die Trade-Gruppe aus der DB."""
     query = """
         SELECT e.qty, e.price, COALESCE(e.commission, 0.0) as commission,
-               o.bracket_role, o.action, o.target_price
+               o.bracket_role, o.action, o.target_price, o.sec_type
         FROM executions e
         JOIN orders o ON e.order_id = o.order_id
         WHERE o.trade_group_id = ?
@@ -127,6 +128,7 @@ async def _fetch_settlement_data(
     total_commissions = Decimal("0.0")
     entry_target_price: Decimal | None = None
     entry_action = "BUY"
+    entry_sec_type = "STK"
 
     async with db.execute(query, (trade_group_id,)) as cursor:
         async for row in cursor:
@@ -151,6 +153,8 @@ async def _fetch_settlement_data(
                 else:
                     entry_target_price = None
                 entry_action = row["action"]
+                if "sec_type" in row.keys() and row["sec_type"]:
+                    entry_sec_type = str(row["sec_type"])
             elif role in ("SL", "TP", "EXIT"):
                 exit_executions.append(ExecutionTuple(quantity=quantity, price=price))
 
@@ -173,6 +177,7 @@ async def _fetch_settlement_data(
         entry_target_price=entry_target_price,
         entry_action=entry_action,
         total_commissions=total_commissions,
+        entry_sec_type=entry_sec_type,
     )
 
 
@@ -212,16 +217,46 @@ async def _send_settlement_notification(
     entry_target_price: Decimal | None,
     outputs: SettlementOutput,
     total_commissions: Decimal,
+    entry_sec_type: str = "STK",
 ) -> None:
     """Sends a Telegram notification about the successful trade settlement."""
     profit_loss_emoji = (
         "🟢 Profit" if outputs.net_profit_loss >= Decimal("0.0") else "🔴 Loss"
     )
-    if entry_target_price is not None and entry_target_price > Decimal("0.0"):
+    is_valid_target = (
+        entry_target_price is not None
+        and entry_target_price > Decimal("0.0")
+        and entry_sec_type != "FUT"
+        and outputs.avg_entry_price > Decimal("0.0")
+        and (
+            abs(outputs.avg_entry_price - entry_target_price) / entry_target_price
+            <= Decimal("3.0")
+        )
+    )
+
+    if is_valid_target:
+        assert entry_target_price is not None
         target_str = f"{float(entry_target_price):.2f}"
-        slippage_str = f"{float(outputs.price_diff_slippage):+.2f}"
+        if outputs.price_diff_slippage > Decimal("0.0"):
+            pct = (outputs.price_diff_slippage / outputs.avg_entry_price) * Decimal(
+                "100"
+            )
+            slippage_str = (
+                f"+{float(outputs.price_diff_slippage):.2f} ({float(pct):.2f}% Vorteil)"
+            )
+        elif outputs.price_diff_slippage < Decimal("0.0"):
+            pct = (
+                abs(outputs.price_diff_slippage) / outputs.avg_entry_price
+            ) * Decimal("100")
+            slippage_str = f"-{float(abs(outputs.price_diff_slippage)):.2f} ({float(pct):.2f}% Nachteil)"
+        else:
+            slippage_str = "0.00"
     else:
-        target_str = "N/A"
+        target_str = (
+            "N/A"
+            if entry_sec_type == "FUT"
+            else (f"{float(entry_target_price):.2f}" if entry_target_price else "N/A")
+        )
         slippage_str = "N/A"
 
     message = (
@@ -267,6 +302,7 @@ class SettlementInput:
     entry_target_price: Decimal | None
     entry_action: str
     total_commissions: Decimal
+    entry_sec_type: str = "STK"
 
 
 @dataclass(frozen=True)
@@ -311,7 +347,11 @@ def calculate_settlement(inputs: SettlementInput) -> SettlementOutput:
         else Decimal("0.0")
     )
 
-    if inputs.entry_target_price is None or inputs.entry_target_price <= Decimal("0.0"):
+    if (
+        inputs.entry_target_price is None
+        or inputs.entry_target_price <= Decimal("0.0")
+        or inputs.entry_sec_type == "FUT"
+    ):
         price_diff_slippage = Decimal("0.0")
     elif inputs.entry_action == "BUY":
         price_diff_slippage = inputs.entry_target_price - avg_entry_price

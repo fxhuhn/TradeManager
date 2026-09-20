@@ -335,20 +335,20 @@ async def test_alert_watcher_moc_dead_orders_integration(
 
 @pytest.mark.asyncio
 async def test_check_high_slippage_sends_alert(temp_db: aiosqlite.Connection) -> None:
-    """Verifies that high slippage alerts are sent if slippage exceeds the threshold."""
+    """Verifies that high slippage alerts are sent if adverse slippage exceeds the threshold."""
     # Arrange
     mock_notifier = MagicMock()
     mock_notifier.send_message = AsyncMock(return_value=True)
     state = AlertState()
 
-    # avg_entry_price = 100.0, price_diff_slippage = 1.05, limit = 1.00 (1%) -> Exceeded
+    # avg_entry_price = 100.0, adverse slippage = -1.05, limit = 1.00 (1%) -> Exceeded
     await temp_db.execute(
         "INSERT INTO orders (order_id, trade_group_id, symbol, bracket_role, status, target_price) "
         "VALUES (1, 'G1', 'AAPL', 'ENTRY', 'Filled', '100.0')"
     )
     await temp_db.execute(
         "INSERT INTO trades_settlement (trade_group_id, price_diff_slippage, avg_entry_price) "
-        "VALUES ('G1', 1.05, 100.0)"
+        "VALUES ('G1', -1.05, 100.0)"
     )
     await temp_db.commit()
 
@@ -362,8 +362,8 @@ async def test_check_high_slippage_sends_alert(temp_db: aiosqlite.Connection) ->
     called_msg = mock_notifier.send_message.call_args[0][0]
     assert "📉 <b>HIGH SLIPPAGE</b> | <code>AAPL</code>" in called_msg
     assert "├─ <b>Trade-Gruppe:</b> <code>G1</code>" in called_msg
-    assert "├─ <b>Slippage:</b> <code>1.05</code>" in called_msg
-    assert "└─ <b>Limit:</b> <code>1.00</code>" in called_msg
+    assert "├─ <b>Slippage:</b> <code>1.05 (1.05% Nachteil)</code>" in called_msg
+    assert "└─ <b>Limit:</b> <code>1.00 (1.00%)</code>" in called_msg
     assert state.is_group_reported("G1")
 
 
@@ -371,20 +371,80 @@ async def test_check_high_slippage_sends_alert(temp_db: aiosqlite.Connection) ->
 async def test_check_high_slippage_does_not_alert_within_limits(
     temp_db: aiosqlite.Connection,
 ) -> None:
-    """Verifies that check_high_slippage does not alert if slippage is within limit boundary."""
+    """Verifies that check_high_slippage does not alert if adverse slippage is within limit boundary."""
     # Arrange
     mock_notifier = MagicMock()
     mock_notifier.send_message = AsyncMock(return_value=True)
     state = AlertState()
 
-    # avg_entry_price = 100.0, price_diff_slippage = 0.99, limit = 1.00 -> Within limits
+    # avg_entry_price = 100.0, price_diff_slippage = -0.99, limit = 1.00 -> Within limits
     await temp_db.execute(
         "INSERT INTO orders (order_id, trade_group_id, symbol, bracket_role, status, target_price) "
         "VALUES (1, 'G1', 'AAPL', 'ENTRY', 'Filled', '100.0')"
     )
     await temp_db.execute(
         "INSERT INTO trades_settlement (trade_group_id, price_diff_slippage, avg_entry_price) "
-        "VALUES ('G1', 0.99, 100.0)"
+        "VALUES ('G1', -0.99, 100.0)"
+    )
+    await temp_db.commit()
+
+    # Act
+    await check_high_slippage(
+        temp_db, mock_notifier, state, max_slippage_percentage=0.01
+    )
+
+    # Assert
+    mock_notifier.send_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_check_high_slippage_ignores_price_improvement(
+    temp_db: aiosqlite.Connection,
+) -> None:
+    """Verifies that positive slippage (price improvement / Vorteil) never triggers high slippage alerts."""
+    # Arrange
+    mock_notifier = MagicMock()
+    mock_notifier.send_message = AsyncMock(return_value=True)
+    state = AlertState()
+
+    # Real-world scenario like MU: bought at 907.0 instead of limit 954.40 -> +47.40 Vorteil
+    await temp_db.execute(
+        "INSERT INTO orders (order_id, trade_group_id, symbol, bracket_role, status, target_price) "
+        "VALUES (1, 'G_PROFIT', 'MU', 'ENTRY', 'Filled', '954.40')"
+    )
+    await temp_db.execute(
+        "INSERT INTO trades_settlement (trade_group_id, price_diff_slippage, avg_entry_price) "
+        "VALUES ('G_PROFIT', 47.40, 907.0)"
+    )
+    await temp_db.commit()
+
+    # Act
+    await check_high_slippage(
+        temp_db, mock_notifier, state, max_slippage_percentage=0.01
+    )
+
+    # Assert
+    mock_notifier.send_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_check_high_slippage_ignores_futures(
+    temp_db: aiosqlite.Connection,
+) -> None:
+    """Verifies that futures contracts with sec_type='FUT' are skipped to prevent cross-asset alerts."""
+    # Arrange
+    mock_notifier = MagicMock()
+    mock_notifier.send_message = AsyncMock(return_value=True)
+    state = AlertState()
+
+    # Futures scenario: ETF target 706.90 vs MNQ fill at 29418.00
+    await temp_db.execute(
+        "INSERT INTO orders (order_id, trade_group_id, symbol, sec_type, bracket_role, status, target_price) "
+        "VALUES (1, 'G_FUT', 'MNQU6', 'FUT', 'ENTRY', 'Filled', '706.90')"
+    )
+    await temp_db.execute(
+        "INSERT INTO trades_settlement (trade_group_id, price_diff_slippage, avg_entry_price) "
+        "VALUES ('G_FUT', -28711.10, 29418.0)"
     )
     await temp_db.commit()
 

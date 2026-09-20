@@ -95,6 +95,10 @@ async def test_settlement_vwap_calculation(db) -> None:
         assert row["total_commissions"] == 4.0
         assert abs(row["net_pnl"] - 503.0) < 0.01
 
+    mock_notifier.send_message.assert_called_once()
+    msg = mock_notifier.send_message.call_args[0][0]
+    assert "Slippage:</b> <code>+0.02 (0.01% Vorteil)</code>" in msg
+
 
 def test_calculate_settlement_handles_zero_entry_quantity_gracefully() -> None:
     """Verifies that calculate_settlement returns 0.0 VWAP when entry executions sum to 0 quantity."""
@@ -345,6 +349,107 @@ async def test_settlement_with_null_target_price(db) -> None:
         await trigger_settlement(db_factory, "G_NULL_TARGET", "A1", mock_notifier)
     finally:
         db.close = original_close
+
+    mock_notifier.send_message.assert_called_once()
+    msg = mock_notifier.send_message.call_args[0][0]
+    assert "Target: N/A" in msg
+    assert "Slippage:</b> <code>N/A</code>" in msg
+
+
+@pytest.mark.asyncio
+async def test_settlement_notification_adverse_slippage(db) -> None:
+    """Verifies that adverse slippage is formatted with negative sign and Nachteil percentage."""
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, status
+        ) VALUES (30, NULL, 'G_ADVERSE', 'A1', 'ENTRY', 'MSFT', 'STK', 'SMART', 'BUY', 10, 'LMT', 100.00, 'Filled')
+        """
+    )
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, status
+        ) VALUES (31, 30, 'G_ADVERSE', 'A1', 'EXIT', 'MSFT', 'STK', 'SMART', 'SELL', 10, 'LMT', 110.00, 'Filled')
+        """
+    )
+    # Entry executed at 101.50 (worse than 100.00 target -> 1.50 Nachteil)
+    await db.execute(
+        "INSERT INTO executions (exec_id, order_id, price, qty, commission) VALUES ('E30', 30, 101.50, 10, 1.0)"
+    )
+    await db.execute(
+        "INSERT INTO executions (exec_id, order_id, price, qty, commission) VALUES ('E31', 31, 110.00, 10, 1.0)"
+    )
+    await db.commit()
+
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_message = AsyncMock(return_value=True)
+
+    try:
+        await trigger_settlement(db_factory, "G_ADVERSE", "A1", mock_notifier)
+    finally:
+        db.close = original_close
+
+    mock_notifier.send_message.assert_called_once()
+    msg = mock_notifier.send_message.call_args[0][0]
+    assert "Slippage:</b> <code>-1.50 (1.48% Nachteil)</code>" in msg
+
+
+@pytest.mark.asyncio
+async def test_settlement_futures_zero_slippage(db) -> None:
+    """Verifies that futures contracts (sec_type='FUT') result in 0.0 slippage and N/A notification."""
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, status
+        ) VALUES (40, NULL, 'G_FUT_SETTLE', 'A1', 'ENTRY', 'MNQU6', 'FUT', 'CME', 'BUY', 1, 'MKT', 706.90, 'Filled')
+        """
+    )
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, status
+        ) VALUES (41, 40, 'G_FUT_SETTLE', 'A1', 'EXIT', 'MNQU6', 'FUT', 'CME', 'SELL', 1, 'MKT', 714.00, 'Filled')
+        """
+    )
+    await db.execute(
+        "INSERT INTO executions (exec_id, order_id, price, qty, commission) VALUES ('E40', 40, 29418.0, 1, 1.25)"
+    )
+    await db.execute(
+        "INSERT INTO executions (exec_id, order_id, price, qty, commission) VALUES ('E41', 41, 29500.0, 1, 1.25)"
+    )
+    await db.commit()
+
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_message = AsyncMock(return_value=True)
+
+    try:
+        await trigger_settlement(db_factory, "G_FUT_SETTLE", "A1", mock_notifier)
+    finally:
+        db.close = original_close
+
+    async with db.execute(
+        "SELECT price_diff_slippage FROM trades_settlement WHERE trade_group_id = 'G_FUT_SETTLE'"
+    ) as cursor:
+        row = await cursor.fetchone()
+        assert row is not None
+        assert abs(float(row["price_diff_slippage"]) - 0.0) < 0.001
 
     mock_notifier.send_message.assert_called_once()
     msg = mock_notifier.send_message.call_args[0][0]

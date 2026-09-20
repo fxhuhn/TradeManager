@@ -362,7 +362,7 @@ class TradingSystemOrchestrator:
                 config=self.config,
                 interval_seconds=self.config.app.alert_watcher_interval_s,
                 dead_order_threshold_minutes=self.config.app.dead_order_threshold_minutes,
-                max_slippage_percentage=self.config.account.default_limit_pct,
+                max_slippage_percentage=self.config.app.max_slippage_pct,
                 archive_dir=self.root_directory_path / "data" / "orders" / "archive",
             )
         )

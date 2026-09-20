@@ -193,6 +193,12 @@ async def _evaluate_and_alert_single_slippage_row(
     max_slippage_percentage: float,
 ) -> None:
     """Evaluates slippage on an individual trade group entry and sends alert if excessive."""
+    sec_type = (
+        str(row["sec_type"]) if "sec_type" in row.keys() and row["sec_type"] else "STK"
+    )
+    if sec_type == "FUT":
+        return
+
     target_price_raw = row["target_price"]
     if target_price_raw is None:
         return
@@ -204,9 +210,20 @@ async def _evaluate_and_alert_single_slippage_row(
     if avg_entry_price <= Decimal("0"):
         return
 
+    # Guard against cross-asset scale mismatches (e.g. underlying stock target vs future fill)
+    if abs(avg_entry_price - target_price) / target_price > Decimal("3.0"):
+        return
+
     price_diff_slippage = Decimal(str(row["price_diff_slippage"]))
+
+    # price_diff_slippage >= 0 means favorable execution (price improvement) or exact match.
+    # High slippage alerts are only sent for adverse (negative) execution outcomes.
+    if price_diff_slippage >= Decimal("0"):
+        return
+
+    abs_slippage = abs(price_diff_slippage)
     slippage_limit = avg_entry_price * Decimal(str(max_slippage_percentage))
-    if abs(price_diff_slippage) <= slippage_limit:
+    if abs_slippage <= slippage_limit:
         return
 
     trade_group_id = str(row["trade_group_id"])
@@ -214,20 +231,30 @@ async def _evaluate_and_alert_single_slippage_row(
         return
 
     symbol = str(row["symbol"])
+    slippage_pct = (abs_slippage / avg_entry_price) * Decimal("100")
+    limit_pct = Decimal(str(max_slippage_percentage)) * Decimal("100")
+
     message_content = build_tree_message(
         title="HIGH SLIPPAGE",
         context=symbol,
         emoji="📉",
         rows=[
             ("Trade-Gruppe", f"<code>{trade_group_id}</code>"),
-            ("Slippage", f"<code>{price_diff_slippage:.2f}</code>"),
-            ("Limit", f"<code>{slippage_limit:.2f}</code>"),
+            (
+                "Slippage",
+                f"<code>{abs_slippage:.2f} ({slippage_pct:.2f}% Nachteil)</code>",
+            ),
+            (
+                "Limit",
+                f"<code>{slippage_limit:.2f} ({limit_pct:.2f}%)</code>",
+            ),
         ],
     )
     logger.warning(
-        "High slippage detected",
+        "High adverse slippage detected",
         trade_group_id=trade_group_id,
-        slippage=float(price_diff_slippage),
+        slippage=float(abs_slippage),
+        slippage_pct=float(slippage_pct),
     )
 
     if await notifier.send_message(message_content):
@@ -241,11 +268,12 @@ async def check_high_slippage(
     max_slippage_percentage: float = 0.01,
 ) -> None:
     """
-    Prüft auf hohe Slippage (Abweichung des realisierten Einstiegspreises vom Target).
-    Vergleicht den absoluten Wert von price_diff_slippage mit dem avg_entry_price * max_slippage_percentage.
+    Prüft auf hohe nachteilige Slippage (Abweichung des realisierten Einstiegspreises vom Target).
+    Ignoriert Preisverbesserungen (positive Slippage) und vergleicht nachteilige Slippage mit
+    dem Grenzwert (avg_entry_price * max_slippage_percentage).
     """
     query = """
-        SELECT ts.trade_group_id, ts.price_diff_slippage, ts.avg_entry_price, o.symbol, o.target_price
+        SELECT ts.trade_group_id, ts.price_diff_slippage, ts.avg_entry_price, o.symbol, o.target_price, o.sec_type
         FROM trades_settlement ts
         JOIN orders o ON ts.trade_group_id = o.trade_group_id AND o.bracket_role = 'ENTRY'
     """

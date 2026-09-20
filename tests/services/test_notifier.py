@@ -617,13 +617,69 @@ def test_format_slippage_line_variants() -> None:
     assert "1.50" in line_sell_vorteil
     assert "1.50% Vorteil" in line_sell_vorteil
 
-    # 4. SELL unfavorable (Limit 100.00, Fill 98.50 -> 1.50 Nachteil)
-    line_sell_nachteil = _format_slippage_line(
-        Decimal("100.00"), Decimal("98.50"), "SELL"
+    # 5. FUT sec_type returns empty string to prevent cross-asset alerts
+    line_fut = _format_slippage_line(
+        Decimal("706.90"), Decimal("29418.00"), "BUY", sec_type="FUT"
     )
-    assert "📉" in line_sell_nachteil
-    assert "1.50" in line_sell_nachteil
-    assert "1.50% Nachteil" in line_sell_nachteil
+    assert line_fut == ""
+
+    # 6. Cross-asset scale mismatch (> 300% divergence) returns empty string
+    line_scale_mismatch = _format_slippage_line(
+        Decimal("100.00"), Decimal("500.00"), "BUY", sec_type="STK"
+    )
+    assert line_scale_mismatch == ""
+
+
+@pytest.mark.asyncio
+async def test_send_order_filled_stop_order_label(mock_config: MagicMock) -> None:
+    """Verifies that send_order_filled formats Stop label instead of Limit for SL orders."""
+    notifier = TelegramNotifier(mock_config)
+
+    with patch.object(notifier, "send_message", new_callable=AsyncMock) as mock_send:
+        mock_send.return_value = True
+        await notifier.send_order_filled(
+            symbol="AAPL",
+            bracket_role="SL",
+            action="SELL",
+            quantity=Decimal("100"),
+            execution_price=Decimal("148.50"),
+            order_type="STP",
+            order_id=456,
+            strategy_name="Momentum",
+            limit_price=Decimal("150.00"),
+        )
+
+        mock_send.assert_called_once()
+        called_text = mock_send.call_args[0][0]
+        assert "<b>Stop:</b> <code>150.00</code>" in called_text
+        assert "<b>Limit:</b>" not in called_text
+
+
+@pytest.mark.asyncio
+async def test_send_order_filled_futures_suppresses_slippage(
+    mock_config: MagicMock,
+) -> None:
+    """Verifies that send_order_filled does not render slippage line for FUT sec_type."""
+    notifier = TelegramNotifier(mock_config)
+
+    with patch.object(notifier, "send_message", new_callable=AsyncMock) as mock_send:
+        mock_send.return_value = True
+        await notifier.send_order_filled(
+            symbol="MNQU6",
+            bracket_role="ENTRY",
+            action="BUY",
+            quantity=Decimal("1"),
+            execution_price=Decimal("29418.00"),
+            order_type="MKT",
+            order_id=789,
+            strategy_name="BounceBandit",
+            limit_price=Decimal("706.90"),
+            sec_type="FUT",
+        )
+
+        mock_send.assert_called_once()
+        called_text = mock_send.call_args[0][0]
+        assert "Slippage:" not in called_text
 
 
 @pytest.mark.asyncio

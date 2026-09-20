@@ -483,7 +483,7 @@ class TwsCallbacksManager:
         db = await self.db_factory()
         try:
             query = """
-                SELECT symbol, bracket_role, action, quantity, order_type, target_price, strategy_name, account_id, trade_group_id
+                SELECT symbol, sec_type, bracket_role, action, quantity, order_type, target_price, strategy_name, account_id, trade_group_id
                 FROM orders
                 WHERE order_id = ?
             """
@@ -498,6 +498,11 @@ class TwsCallbacksManager:
                 avg_fill_price
             ) or parse_positive_decimal(raw_target_price)
             limit_price_decimal = parse_positive_decimal(raw_target_price)
+            sec_type_str = (
+                str(order_row["sec_type"])
+                if "sec_type" in order_row.keys() and order_row["sec_type"]
+                else "STK"
+            )
 
             await self.notifier.send_order_filled(
                 symbol=order_row["symbol"],
@@ -509,6 +514,7 @@ class TwsCallbacksManager:
                 order_id=order_id,
                 strategy_name=order_row["strategy_name"],
                 limit_price=limit_price_decimal,
+                sec_type=sec_type_str,
             )
 
             bracket_role = order_row["bracket_role"]

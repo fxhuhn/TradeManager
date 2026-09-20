@@ -117,6 +117,7 @@ def _format_slippage_line(
     limit_price: Decimal | None,
     execution_price: Decimal | None,
     action: str,
+    sec_type: str = "STK",
 ) -> str:
     """Formats a slippage indicator line for Telegram if prices diverge.
 
@@ -124,9 +125,17 @@ def _format_slippage_line(
     - BUY:  fill below limit = favorable (saved money) -> 📈 Slippage: X.XX (Y.YY% Vorteil)
     - SELL: fill above limit = favorable (received more) -> 📈 Slippage: X.XX (Y.YY% Vorteil)
 
-    Returns an empty string when slippage cannot be determined or is zero.
+    Returns an empty string when slippage cannot be determined or is zero, or when sec_type is FUT
+    to prevent false alerts from underlying stock condition price scale mismatches.
     """
+    if sec_type == "FUT":
+        return ""
+
     if limit_price is None or limit_price <= Decimal("0.0") or execution_price is None:
+        return ""
+
+    # Guard against cross-asset scale mismatches
+    if abs(execution_price - limit_price) / limit_price > Decimal("3.0"):
         return ""
 
     price_difference = execution_price - limit_price
@@ -389,6 +398,7 @@ class TelegramNotifier:
         order_id: int,
         strategy_name: str,
         limit_price: Decimal | None = None,
+        sec_type: str = "STK",
     ) -> bool:
         """Sendet eine Erfolgsmeldung für eine gefüllte Order inkl. Slippage-Anzeige."""
         total_value = (
@@ -400,15 +410,22 @@ class TelegramNotifier:
             f"{execution_price:.2f}" if execution_price is not None else "MKT"
         )
 
-        slippage_line = _format_slippage_line(limit_price, execution_price, action)
+        slippage_line = _format_slippage_line(
+            limit_price, execution_price, action, sec_type=sec_type
+        )
 
         rows: list[TreeRow] = [
             ("Typ", f"<code>{bracket_role}</code> ({action})"),
         ]
         if limit_price is not None and execution_price is not None:
+            price_label = (
+                "Stop"
+                if bracket_role == "SL" or order_type.upper() in ("STP", "TRAIL")
+                else "Limit"
+            )
             rows.append(
                 (
-                    "Limit",
+                    price_label,
                     f"<code>{limit_price:.2f}</code> → <b>Fill:</b> <code>{price_string}</code> ({order_type})",
                 )
             )
