@@ -9,7 +9,9 @@ from ib_async import Future, PriceCondition, Stock, TimeCondition
 from app.core.models import OrderRow
 from app.trading.order_builder import (
     QQQ_CON_ID,
+    SPY_CON_ID,
     build_order,
+    get_underlying_etf_info,
     make_contract_for_order,
     make_future_contract,
 )
@@ -153,34 +155,154 @@ def test_build_order_bounce_bandit_tp_with_conditions() -> None:
     assert tc.isMore is False
 
 
-def test_build_order_generic_future_without_bounce_bandit_conditions() -> None:
-    """Prüft, dass generische Futures-Orders anderer Strategien reguläre LMT/STP-Orders ohne BB-Konditionen bleiben."""
+def test_get_underlying_etf_info() -> None:
+    """Prüft die universelle Auflösung von Future-Symbolen auf Basiswert-ETFs und ConIDs."""
+    assert get_underlying_etf_info("MNQU6") == ("QQQ", QQQ_CON_ID)
+    assert get_underlying_etf_info("MNQZ6") == ("QQQ", QQQ_CON_ID)
+    assert get_underlying_etf_info("MESU6") == ("SPY", SPY_CON_ID)
+    assert get_underlying_etf_info("MESZ6") == ("SPY", SPY_CON_ID)
+    assert get_underlying_etf_info("M2KU6") == ("IWM", 13317)
+    assert get_underlying_etf_info("MYMU6") == ("DIA", 4391)
+    assert get_underlying_etf_info("XYZU6") is None
+
+
+def test_build_order_tgim_spy_loc_entry_conditioned() -> None:
+    """Prüft, dass TGIM BUY SPY LOC als MES MKT mit PriceCondition (SPY <= price) kurz vor Close aufgebaut wird."""
     entry_row = OrderRow(
         order_id=20,
         perm_id=None,
         parent_id=None,
-        trade_group_id="TG_SPX_1",
+        trade_group_id="1529_TGIM_SPY",
         account_id="ACC1",
         bracket_role="ENTRY",
-        symbol="MESU6",
+        symbol="MESZ6",
+        sec_type="FUT",
+        exchange="CME",
+        action="BUY",
+        quantity=1,
+        order_type="LOC",
+        target_price=Decimal("760.71"),
+        tif="DAY",
+        strategy_name="TGIM",
+        status="Created",
+    )
+    ib_order = build_order(entry_row)
+
+    assert ib_order.action == "BUY"
+    assert ib_order.orderType == "MKT"
+    assert ib_order.totalQuantity == 1.0
+    assert ib_order.outsideRth is True
+    assert "14:59:00 US/Central" in ib_order.goodAfterTime
+    assert len(ib_order.conditions) == 2
+
+    pc = ib_order.conditions[0]
+    assert isinstance(pc, PriceCondition)
+    assert pc.conId == SPY_CON_ID
+    assert pc.price == 760.71
+    assert pc.isMore is False  # Kaufen wenn SPY <= 760.71
+
+    tc = ib_order.conditions[1]
+    assert isinstance(tc, TimeCondition)
+    assert "15:00:00 US/Central" in tc.time
+    assert tc.isMore is False
+
+
+def test_build_order_two_percent_qqq_lmt_entry_conditioned() -> None:
+    """Prüft, dass TwoPercent BUY QQQ LMT als MNQ MKT mit PriceCondition (QQQ <= price) während RTH aufgebaut wird."""
+    entry_row = OrderRow(
+        order_id=21,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="1528_TwoPercent_QQQ",
+        account_id="ACC1",
+        bracket_role="ENTRY",
+        symbol="MNQZ6",
         sec_type="FUT",
         exchange="CME",
         action="BUY",
         quantity=1,
         order_type="LMT",
-        target_price=Decimal("5500.25"),
-        tif="GTC",
-        strategy_name="SpxTrend",
+        target_price=Decimal("714.24"),
+        tif="DAY",
+        strategy_name="TwoPercent",
+        status="Created",
+    )
+    ib_order = build_order(entry_row)
+
+    assert ib_order.action == "BUY"
+    assert ib_order.orderType == "MKT"
+    assert ib_order.totalQuantity == 1.0
+    assert ib_order.outsideRth is True
+    assert "08:30:00 US/Central" in ib_order.goodAfterTime
+    assert len(ib_order.conditions) == 2
+
+    pc = ib_order.conditions[0]
+    assert isinstance(pc, PriceCondition)
+    assert pc.conId == QQQ_CON_ID
+    assert pc.price == 714.24
+    assert pc.isMore is False  # Kaufen wenn QQQ <= 714.24
+
+    tc = ib_order.conditions[1]
+    assert isinstance(tc, TimeCondition)
+    assert "15:00:00 US/Central" in tc.time
+    assert tc.isMore is False
+
+
+def test_build_order_two_percent_sxrv_stock_unaffected() -> None:
+    """Prüft, dass TwoPercent mit SXRV.DE (Aktie/ETF) unverändert als reguläre STK LMT-Order mit Xetra-Tick ausgeführt wird."""
+    entry_row = OrderRow(
+        order_id=22,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="1527_TwoPercent_SXRV.DE",
+        account_id="ACC1",
+        bracket_role="ENTRY",
+        symbol="SXRV.DE",
+        sec_type="STK",
+        exchange="SMART",
+        action="BUY",
+        quantity=5,
+        order_type="LMT",
+        target_price=Decimal("1460.45"),
+        tif="DAY",
+        strategy_name="TwoPercent",
         status="Created",
     )
     ib_order = build_order(entry_row)
 
     assert ib_order.action == "BUY"
     assert ib_order.orderType == "LMT"
-    assert ib_order.lmtPrice == 5500.25
-    assert ib_order.totalQuantity == 1.0
-    assert ib_order.goodAfterTime == ""
+    assert ib_order.lmtPrice == 1460.40  # 1460.45 gerundet auf 0.20 Xetra Tick
+    assert ib_order.totalQuantity == 5.0
     assert ib_order.conditions == []
+
+
+def test_build_order_unmapped_future_without_etf_conditions() -> None:
+    """Prüft, dass nicht gemappte Futures ohne PriceCondition mit TimeCondition aufgebaut werden."""
+    entry_row = OrderRow(
+        order_id=23,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG_CUSTOM_FUT",
+        account_id="ACC1",
+        bracket_role="ENTRY",
+        symbol="XYZU6",
+        sec_type="FUT",
+        exchange="CME",
+        action="BUY",
+        quantity=1,
+        order_type="LMT",
+        target_price=Decimal("100.00"),
+        tif="DAY",
+        strategy_name="CustomStrategy",
+        status="Created",
+    )
+    ib_order = build_order(entry_row)
+
+    assert ib_order.action == "BUY"
+    assert ib_order.orderType == "MKT"
+    assert len(ib_order.conditions) == 1
+    assert isinstance(ib_order.conditions[0], TimeCondition)
 
 
 def test_build_order_bounce_bandit_forces_tif_day_even_if_row_has_opg() -> None:

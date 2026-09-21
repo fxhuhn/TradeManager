@@ -12,14 +12,40 @@ from typing import Final
 from zoneinfo import ZoneInfo
 
 import structlog
-from ib_async import Contract, Future, Order, PriceCondition, Stock, TimeCondition
+from ib_async import (
+    Contract,
+    Future,
+    Order,
+    OrderCondition,
+    PriceCondition,
+    Stock,
+    TimeCondition,
+)
 
 from app.core.models import OrderRow
 
 logger = structlog.get_logger()
 
-# Permanente IBKR Contract ID für QQQ STK SMART USD
+# Permanente IBKR Contract IDs für US-Basiswert-ETFs (SMART / ARCA / NASDAQ)
 QQQ_CON_ID: Final[int] = 320227571
+SPY_CON_ID: Final[int] = 756733
+IWM_CON_ID: Final[int] = 13317
+DIA_CON_ID: Final[int] = 4391
+
+UNDERLYING_ETF_CON_IDS: Final[dict[str, int]] = {
+    "QQQ": QQQ_CON_ID,
+    "SPY": SPY_CON_ID,
+    "IWM": IWM_CON_ID,
+    "DIA": DIA_CON_ID,
+}
+
+FUTURE_TO_ETF_PREFIX: Final[dict[str, str]] = {
+    "MNQ": "QQQ",
+    "MES": "SPY",
+    "M2K": "IWM",
+    "MYM": "DIA",
+}
+
 CME_TIMEZONE: Final[ZoneInfo] = ZoneInfo("America/Chicago")
 
 
@@ -136,11 +162,30 @@ _XETRA_TICK_TABLE: list[tuple[Decimal, Decimal]] = [
 ]
 
 _DEFAULT_US_TICK_SIZE: Decimal = Decimal("0.01")
+_FUTURES_CME_TICK_SIZE: Decimal = Decimal("0.25")
 _XETRA_MIN_TICK_SIZE: Decimal = Decimal("0.0001")
 
 
-def get_tick_size(symbol: str, price: Decimal | float) -> Decimal:
+def get_underlying_etf_info(future_symbol: str) -> tuple[str, int] | None:
+    """Ermittelt Basiswert-Symbol und ConID für ein CME-Future-Symbol."""
+    clean_sym = normalize_symbol(future_symbol).upper()
+    for fut_prefix, etf_sym in FUTURE_TO_ETF_PREFIX.items():
+        if clean_sym.startswith(fut_prefix):
+            con_id = UNDERLYING_ETF_CON_IDS.get(etf_sym)
+            if con_id is not None:
+                return etf_sym, con_id
+    return None
+
+
+def get_tick_size(
+    symbol: str, price: Decimal | float, sec_type: str = "STK"
+) -> Decimal:
     """Ermittelt die minimale Preisänderung (Tick Size) als Decimal für ein Symbol."""
+    if sec_type.upper() == "FUT" or any(
+        symbol.upper().startswith(prefix) for prefix in ("MNQ", "MES", "M2K", "MYM")
+    ):
+        return _FUTURES_CME_TICK_SIZE
+
     price_decimal = price if isinstance(price, Decimal) else Decimal(str(price))
     if not symbol.upper().endswith(".DE"):
         return _DEFAULT_US_TICK_SIZE
@@ -163,36 +208,77 @@ def round_to_tick(price: Decimal | float, tick_size: Decimal | float) -> Decimal
     ) * tick_decimal
 
 
-def _apply_bounce_bandit_conditions(
+def apply_conditioned_future_order(
     order: Order, order_row: OrderRow, today_string: str
 ) -> None:
-    """Wendet die spezifischen Handelszeit- und Preistrigger-Bedingungen für BounceBandit an."""
+    """Wendet die universellen Handelszeit- und Preistrigger-Bedingungen für Future-Orders an.
+
+    Transformiert die Order in eine MKT-Order auf den Future mit Ausführung außerhalb der RTH,
+    gesteuert über Price- und Time-Conditions auf den zugrunde liegenden US-ETF.
+    """
     order.orderType = "MKT"
     order.outsideRth = True
     order.tif = "DAY"
+    order.conditionsIgnoreRth = False
+    order.conditionsCancelOrder = False
 
-    if order_row.bracket_role == "ENTRY":
-        order.goodAfterTime = f"{today_string} 08:30:00 US/Central"
-    elif order_row.bracket_role in ("TP", "EXIT"):
+    raw_order_type = order_row.order_type.upper() if order_row.order_type else "MKT"
+    conditions: list[OrderCondition] = []
+
+    # 1. Handelszeitfenster festlegen (goodAfterTime & TimeCondition)
+    if raw_order_type in ("LOC", "MOC"):
+        # Schlussauktion: Aktivierung 1 Minute vor US-RTH-Close (14:59 Central / 15:59 Eastern)
         order.goodAfterTime = f"{today_string} 14:59:00 US/Central"
-        order.conditionsIgnoreRth = False
-        order.conditionsCancelOrder = False
+        time_cond = TimeCondition()
+        time_cond.isMore = False  # Gültig bis zum Ende der RTH (15:00 Central)
+        time_cond.time = f"{today_string} 15:00:00 US/Central"
+        time_cond.conjunction = "a"
+        conditions.append(time_cond)
+    elif raw_order_type in ("LMT", "STP"):
+        # Intraday-Limit: Aktivierung zur Markteröffnung (08:30 Central / 09:30 Eastern)
+        order.goodAfterTime = f"{today_string} 08:30:00 US/Central"
+        time_cond = TimeCondition()
+        time_cond.isMore = False  # Gültig bis zum Ende der RTH (15:00 Central)
+        time_cond.time = f"{today_string} 15:00:00 US/Central"
+        time_cond.conjunction = "a"
+        conditions.append(time_cond)
+    elif raw_order_type == "MKT":
+        # Reguläre Market-Eröffnung
+        order.goodAfterTime = f"{today_string} 08:30:00 US/Central"
 
-        if order_row.target_price is not None:
-            price_condition = PriceCondition()
-            price_condition.conId = QQQ_CON_ID
-            price_condition.exch = "SMART"
-            price_condition.isMore = True  # QQQ Kurs >= target_price
-            price_condition.price = float(order_row.target_price)
-            price_condition.triggerMethod = 2  # Last Price
-            price_condition.conjunction = "a"
+    # 2. Preistrigger auf Basiswert-ETF definieren (falls target_price vorhanden)
+    if order_row.target_price is not None and raw_order_type in ("LMT", "LOC", "STP"):
+        etf_info = get_underlying_etf_info(order_row.symbol)
+        if etf_info is not None:
+            _, con_id = etf_info
+            price_cond = PriceCondition()
+            price_cond.conId = con_id
+            price_cond.exch = "SMART"
+            price_cond.price = float(order_row.target_price)
+            price_cond.triggerMethod = 2  # Last Price
+            price_cond.conjunction = "a"
 
-            time_condition = TimeCondition()
-            time_condition.isMore = False  # Zeit <= 15:00:00 US/Central
-            time_condition.time = f"{today_string} 15:00:00 US/Central"
-            time_condition.conjunction = "a"
+            # Trigger-Richtung (isMore):
+            # Bei BUY (LMT/LOC): Kaufen, wenn Kurs fällt auf/unter Ziel (isMore = False)
+            # Bei BUY STP (Breakout): Kaufen, wenn Kurs steigt auf/über Stop (isMore = True)
+            # Bei SELL TP/EXIT: Verkaufen, wenn Kurs steigt auf/über Ziel (isMore = True)
+            # Bei SELL SL: Verkaufen, wenn Kurs fällt auf/unter Stop (isMore = False)
+            if order_row.action.upper() == "BUY":
+                price_cond.isMore = raw_order_type == "STP"
+            else:  # SELL
+                price_cond.isMore = (
+                    order_row.bracket_role not in ("SL",) and raw_order_type != "STP"
+                )
 
-            order.conditions = [price_condition, time_condition]
+            # Preiskondition vor TimeCondition einfügen
+            conditions.insert(0, price_cond)
+        else:
+            logger.warning(
+                "Kein Basiswert-ETF für Future-Symbol gefunden. Keine Preiskondition gesetzt.",
+                symbol=order_row.symbol,
+            )
+
+    order.conditions = conditions
 
 
 def build_order(order_row: OrderRow) -> Order:
@@ -211,9 +297,13 @@ def build_order(order_row: OrderRow) -> Order:
     if order_row.strategy_name:
         order.orderRef = order_row.strategy_name
 
-    # Preise setzen (Dezimal-zu-Float-Konvertierung an der API-Schnittstelle)
-    # Runden auf die minimale Tick-Größe des Zielmarkts
-    if order.orderType in ("LMT", "LOC"):
+    # Future-Orders: Universelle Behandlung via CME Globex MKT + ETF Conditions
+    if order_row.sec_type == "FUT":
+        today_string = datetime.now(CME_TIMEZONE).strftime("%Y%m%d")
+        apply_conditioned_future_order(order, order_row, today_string)
+    elif order.orderType in ("LMT", "LOC"):
+        # Standard Aktien/ETF-Orders (sec_type == "STK")
+        # Runden auf die minimale Tick-Größe des Zielmarkts
         target_price = order_row.target_price or Decimal("0.0")
         tick_size = get_tick_size(order_row.symbol, target_price)
         rounded_price = round_to_tick(target_price, tick_size)
@@ -231,15 +321,6 @@ def build_order(order_row: OrderRow) -> Order:
             "Unbekannter Order-Typ. Keinen Preis zugewiesen.",
             order_type=order.orderType,
         )
-
-    # Spezifische Behandlung für BounceBandit Future-Orders (MNQ @ CME)
-    if (
-        order_row.sec_type == "FUT"
-        and order_row.strategy_name is not None
-        and order_row.strategy_name.lower() == "bouncebandit"
-    ):
-        today_string = datetime.now(CME_TIMEZONE).strftime("%Y%m%d")
-        _apply_bounce_bandit_conditions(order, order_row, today_string)
 
     # Defensive Härtung für alle Futures: CME Globex unterstützt kein OPG
     if order_row.sec_type == "FUT" and order.tif == "OPG":

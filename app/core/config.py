@@ -85,6 +85,14 @@ class FuturesConfig:
     enabled_strategies: tuple[str, ...] = field(default_factory=tuple)
     min_days_to_expiration: int = 10
 
+    def is_strategy_enabled(self, strategy_name: str | None) -> bool:
+        """Prüft, ob eine Strategie für die Future-Transformation freigegeben ist."""
+        if "*" in self.enabled_strategies:
+            return True
+        if not strategy_name:
+            return False
+        return strategy_name.strip().lower() in self.enabled_strategies
+
 
 @dataclass(frozen=True)
 class Config:

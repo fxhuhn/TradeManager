@@ -491,9 +491,7 @@ async def _process_and_upsert_group(
     # ----------------------------------------
 
     # --- UNIVERSELLE TRANSFORMATION IN CME-FUTURES (z. B. QQQ -> MNQ, SPY -> MES) ---
-    is_future_strategy = (
-        strategy is not None and strategy.lower() in config.futures.enabled_strategies
-    )
+    is_future_strategy = config.futures.is_strategy_enabled(strategy)
     source_symbol = first_leg.symbol.strip().upper()
     target_future_symbol = config.futures.asset_mapping.get(source_symbol)
     is_future_transformed = bool(is_future_strategy and target_future_symbol)

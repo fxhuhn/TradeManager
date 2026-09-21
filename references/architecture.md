@@ -109,7 +109,7 @@ Daily files must follow the pattern `orders_YYYY_MM_DD.csv` and use UTF-8-sig en
 | `trade_group_id` | `TEXT` | `NOT NULL`, max length 64 | Unique ID linking ENTRY and exit orders of a trade setup. |
 | `bracket_role` | `TEXT` | `IN ('ENTRY', 'SL', 'TP', 'EXIT')` | Bracket execution classification role. Case-insensitive. |
 | `symbol` | `TEXT` | `NOT NULL`, uppercase letters | Asset symbol representing target trade instrument. |
-| `sec_type` | `TEXT` | `CHECK = 'STK'` | Asset type in CSV; must match 'STK' (Equities). BounceBandit QQQ is auto-transformed to 'FUT' internally. |
+| `sec_type` | `TEXT` | `CHECK = 'STK'` | Asset type in CSV; must match 'STK' (Equities). Mapped US ETF assets (e.g. QQQ -> MNQ, SPY -> MES) are automatically transformed to 'FUT' internally. |
 | `exchange` | `TEXT` | `CHECK = 'SMART'` | Trading exchange target; must match 'SMART'. |
 | `account_id` | `TEXT` | `NOT NULL` | Associated Interactive Brokers account identifier. |
 | `action` | `TEXT` | `IN ('BUY', 'SELL')` | Buying or selling trading side. Case-insensitive. |

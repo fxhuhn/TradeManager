@@ -244,6 +244,20 @@ def test_config_parsing_futures_sections(tmp_path: Path) -> None:
         assert config.futures.asset_mapping == {"QQQ": "MNQ", "SPY": "MES"}
         assert config.futures.enabled_strategies == ("bouncebandit", "spxtrend")
         assert config.futures.min_days_to_expiration == 10
+        assert config.futures.is_strategy_enabled("BounceBandit") is True
+        assert config.futures.is_strategy_enabled("SPXTrend") is True
+        assert config.futures.is_strategy_enabled("Other") is False
+        assert config.futures.is_strategy_enabled(None) is False
+
+
+def test_futures_config_wildcard_strategy_enabled() -> None:
+    """Verifies that FuturesConfig with wildcard '*' enables all strategies."""
+    from app.core.config import FuturesConfig
+
+    futures = FuturesConfig(enabled_strategies=("*",))
+    assert futures.is_strategy_enabled("AnyStrategy") is True
+    assert futures.is_strategy_enabled("TwoPercent") is True
+    assert futures.is_strategy_enabled("TGIM") is True
 
 
 def test_config_parsing_futures_min_days_to_expiration(tmp_path: Path) -> None:

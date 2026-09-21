@@ -128,6 +128,7 @@ This section provides a detailed reference of all public classes and functions i
 - `AccountConfig` (Class): Account limits, margins, and cushion thresholds.
 - `TelegramConfig` (Class): Telegram credentials and target chat settings.
 - `FuturesConfig` (Class): Configuration for automatic signal transformation into CME futures.
+  - `is_strategy_enabled` (Method): Evaluates whether a strategy is permitted to transform into futures, supporting wildcard declarations.
 - `Config` (Class): Parent configuration object nesting TWS, App, Account, Telegram, and Futures configs.
 - `load_env` (Function): Loads environment variables from the given environment path.
 - `load_config` (Function): Parses and constructs the type-safe configuration object.
@@ -250,6 +251,8 @@ This section provides a detailed reference of all public classes and functions i
 - `round_to_tick` (Function): Snaps limit prices to valid tick offsets.
 - `build_order` (Function): Constructs raw `Order` models with stop/limit brackets or conditional parameters.
 - `extract_transmitted_price` (Function): Extracts actual tick-rounded price from a constructed `Order`.
+- `get_underlying_etf_info` (Function): Resolves the underlying ETF symbol and IBKR contract ID for a given CME future contract symbol.
+- `apply_conditioned_future_order` (Function): Configures execution timing and underlying ETF price conditions on CME future orders.
 - `should_apply_loc_gtd` (Function): Evaluates whether an LMT child order must expire via GTD due to a sibling LOC/MOC order.
 - `compute_loc_gtd_cutoff` (Function): Calculates and formats the market-specific GTD expiry timestamp (15:48 US/Eastern or 17:18 Europe/Berlin).
 - `is_past_loc_gtd_cutoff` (Function): Checks if the current time has reached or passed the GTD cutoff window for a symbol.
