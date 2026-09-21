@@ -209,7 +209,10 @@ def round_to_tick(price: Decimal | float, tick_size: Decimal | float) -> Decimal
 
 
 def apply_conditioned_future_order(
-    order: Order, order_row: OrderRow, today_string: str
+    order: Order,
+    order_row: OrderRow,
+    today_string: str,
+    now: datetime | None = None,
 ) -> None:
     """Wendet die universellen Handelszeit- und Preistrigger-Bedingungen für Future-Orders an.
 
@@ -224,27 +227,43 @@ def apply_conditioned_future_order(
 
     raw_order_type = order_row.order_type.upper() if order_row.order_type else "MKT"
     conditions: list[OrderCondition] = []
+    current_time = now if now is not None else datetime.now(CME_TIMEZONE)
 
     # 1. Handelszeitfenster festlegen (goodAfterTime & TimeCondition)
+    # WICHTIG: goodAfterTime darf NUR gesetzt werden, wenn der Zeitpunkt in der Zukunft liegt!
+    # Liegt der Zeitpunkt in der Vergangenheit, lehnt IBKR die Order mit Error 201 'Invalid effective time' ab.
+    rth_close = current_time.replace(hour=15, minute=0, second=0, microsecond=0)
     if raw_order_type in ("LOC", "MOC"):
         # Schlussauktion: Aktivierung 1 Minute vor US-RTH-Close (14:59 Central / 15:59 Eastern)
-        order.goodAfterTime = f"{today_string} 14:59:00 US/Central"
-        time_cond = TimeCondition()
-        time_cond.isMore = False  # Gültig bis zum Ende der RTH (15:00 Central)
-        time_cond.time = f"{today_string} 15:00:00 US/Central"
-        time_cond.conjunction = "a"
-        conditions.append(time_cond)
+        loc_activation = current_time.replace(
+            hour=14, minute=59, second=0, microsecond=0
+        )
+        if current_time < loc_activation:
+            order.goodAfterTime = f"{today_string} 14:59:00 US/Central"
+
+        if current_time < rth_close:
+            time_cond = TimeCondition()
+            time_cond.isMore = False  # Gültig bis zum Ende der RTH (15:00 Central)
+            time_cond.time = f"{today_string} 15:00:00 US/Central"
+            time_cond.conjunction = "a"
+            conditions.append(time_cond)
     elif raw_order_type in ("LMT", "STP"):
         # Intraday-Limit: Aktivierung zur Markteröffnung (08:30 Central / 09:30 Eastern)
-        order.goodAfterTime = f"{today_string} 08:30:00 US/Central"
-        time_cond = TimeCondition()
-        time_cond.isMore = False  # Gültig bis zum Ende der RTH (15:00 Central)
-        time_cond.time = f"{today_string} 15:00:00 US/Central"
-        time_cond.conjunction = "a"
-        conditions.append(time_cond)
+        rth_open = current_time.replace(hour=8, minute=30, second=0, microsecond=0)
+        if current_time < rth_open:
+            order.goodAfterTime = f"{today_string} 08:30:00 US/Central"
+
+        if current_time < rth_close:
+            time_cond = TimeCondition()
+            time_cond.isMore = False  # Gültig bis zum Ende der RTH (15:00 Central)
+            time_cond.time = f"{today_string} 15:00:00 US/Central"
+            time_cond.conjunction = "a"
+            conditions.append(time_cond)
     elif raw_order_type == "MKT":
         # Reguläre Market-Eröffnung
-        order.goodAfterTime = f"{today_string} 08:30:00 US/Central"
+        rth_open = current_time.replace(hour=8, minute=30, second=0, microsecond=0)
+        if current_time < rth_open:
+            order.goodAfterTime = f"{today_string} 08:30:00 US/Central"
 
     # 2. Preistrigger auf Basiswert-ETF definieren (falls target_price vorhanden)
     if order_row.target_price is not None and raw_order_type in ("LMT", "LOC", "STP"):
@@ -281,7 +300,7 @@ def apply_conditioned_future_order(
     order.conditions = conditions
 
 
-def build_order(order_row: OrderRow) -> Order:
+def build_order(order_row: OrderRow, now: datetime | None = None) -> Order:
     """
     Konstruiert ein ib_async Order-Objekt aus den DB-Orderzeilen.
     Berücksichtigt Order-Typen und OCA-Konfigurationen für Stop-Loss (SL) und Take-Profit (TP).
@@ -299,8 +318,9 @@ def build_order(order_row: OrderRow) -> Order:
 
     # Future-Orders: Universelle Behandlung via CME Globex MKT + ETF Conditions
     if order_row.sec_type == "FUT":
-        today_string = datetime.now(CME_TIMEZONE).strftime("%Y%m%d")
-        apply_conditioned_future_order(order, order_row, today_string)
+        ref_time = now if now is not None else datetime.now(CME_TIMEZONE)
+        today_string = ref_time.strftime("%Y%m%d")
+        apply_conditioned_future_order(order, order_row, today_string, now=ref_time)
     elif order.orderType in ("LMT", "LOC"):
         # Standard Aktien/ETF-Orders (sec_type == "STK")
         # Runden auf die minimale Tick-Größe des Zielmarkts

@@ -2,17 +2,30 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from ib_async import OrderStatus, Trade
 
+from app.trading.order_builder import CME_TIMEZONE
 from app.trading.worker import process_trade_group
 
 
 @pytest.mark.asyncio
-async def test_worker_process_bounce_bandit_futures_bracket(db, test_config) -> None:
+async def test_worker_process_bounce_bandit_futures_bracket(
+    db, test_config, monkeypatch
+) -> None:
     """Verifiziert, dass der Worker BounceBandit Future-Orders als atomaren Bracket übermittelt."""
+    fixed_morning = datetime(2026, 9, 21, 7, 0, 0, tzinfo=CME_TIMEZONE)
+
+    class MockDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_morning
+
+    monkeypatch.setattr("app.trading.order_builder.datetime", MockDatetime)
+
     # 1. Orders in DB anlegen
     await db.execute(
         """

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 
 from ib_async import Future, PriceCondition, Stock, TimeCondition
 
 from app.core.models import OrderRow
 from app.trading.order_builder import (
+    CME_TIMEZONE,
     QQQ_CON_ID,
     SPY_CON_ID,
     build_order,
@@ -105,7 +107,9 @@ def test_build_order_bounce_bandit_entry() -> None:
         strategy_name="BounceBandit",
         status="Created",
     )
-    ib_order = build_order(entry_row)
+    # Vor Markteröffnung (07:00 Central): goodAfterTime wird auf 08:30 Central gesetzt
+    morning_time = datetime(2026, 9, 21, 7, 0, 0, tzinfo=CME_TIMEZONE)
+    ib_order = build_order(entry_row, now=morning_time)
 
     assert ib_order.action == "BUY"
     assert ib_order.orderType == "MKT"
@@ -134,7 +138,9 @@ def test_build_order_bounce_bandit_tp_with_conditions() -> None:
         strategy_name="BounceBandit",
         status="Created",
     )
-    ib_order = build_order(tp_row)
+    # Vor RTH Close (12:00 Central): goodAfterTime wird auf 14:59 Central gesetzt
+    noon_time = datetime(2026, 9, 21, 12, 0, 0, tzinfo=CME_TIMEZONE)
+    ib_order = build_order(tp_row, now=noon_time)
 
     assert ib_order.action == "SELL"
     assert ib_order.orderType == "MKT"
@@ -186,7 +192,9 @@ def test_build_order_tgim_spy_loc_entry_conditioned() -> None:
         strategy_name="TGIM",
         status="Created",
     )
-    ib_order = build_order(entry_row)
+    # Vor RTH Close (12:00 Central): goodAfterTime wird auf 14:59 Central gesetzt
+    noon_time = datetime(2026, 9, 21, 12, 0, 0, tzinfo=CME_TIMEZONE)
+    ib_order = build_order(entry_row, now=noon_time)
 
     assert ib_order.action == "BUY"
     assert ib_order.orderType == "MKT"
@@ -227,7 +235,9 @@ def test_build_order_two_percent_qqq_lmt_entry_conditioned() -> None:
         strategy_name="TwoPercent",
         status="Created",
     )
-    ib_order = build_order(entry_row)
+    # Vor Markteröffnung (07:00 Central): goodAfterTime wird auf 08:30 Central gesetzt
+    morning_time = datetime(2026, 9, 21, 7, 0, 0, tzinfo=CME_TIMEZONE)
+    ib_order = build_order(entry_row, now=morning_time)
 
     assert ib_order.action == "BUY"
     assert ib_order.orderType == "MKT"
@@ -246,6 +256,37 @@ def test_build_order_two_percent_qqq_lmt_entry_conditioned() -> None:
     assert isinstance(tc, TimeCondition)
     assert "15:00:00 US/Central" in tc.time
     assert tc.isMore is False
+
+
+def test_build_order_future_lmt_omits_good_after_time_if_past_open() -> None:
+    """Prüft, dass goodAfterTime weggelassen wird, wenn die Order nach 08:30 Central (Market Open) gesendet wird."""
+    entry_row = OrderRow(
+        order_id=25,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="1528_TwoPercent_QQQ",
+        account_id="ACC1",
+        bracket_role="ENTRY",
+        symbol="MNQZ6",
+        sec_type="FUT",
+        exchange="CME",
+        action="BUY",
+        quantity=1,
+        order_type="LMT",
+        target_price=Decimal("714.24"),
+        tif="DAY",
+        strategy_name="TwoPercent",
+        status="Created",
+    )
+    # 12:47:34 US/Central (wie im heutigen Prod-Fehler nach Eröffnung)
+    now_past_open = datetime(2026, 9, 21, 12, 47, 34, tzinfo=CME_TIMEZONE)
+    ib_order = build_order(entry_row, now=now_past_open)
+
+    assert ib_order.orderType == "MKT"
+    assert (
+        ib_order.goodAfterTime == ""
+    )  # Darf NICHT gesetzt werden, um 'Invalid effective time' zu verhindern
+    assert len(ib_order.conditions) == 2
 
 
 def test_build_order_two_percent_sxrv_stock_unaffected() -> None:
