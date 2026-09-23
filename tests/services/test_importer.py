@@ -883,7 +883,7 @@ async def test_process_and_upsert_group_validation_error(
 async def test_dipbuyer_filtering_on_wednesday(
     tmp_path: Path, mock_config: Config, db
 ) -> None:
-    """Verifies DipBuyer strategy filtering when current_weekday > 1 (Wednesday=2)."""
+    """Verifies DipBuyer strategy filtering on Wednesday (weekday=2 not in allowed weekdays)."""
     csv_file = tmp_path / "orders_2026_07_08.csv"  # Wednesday
     csv_content = (
         "trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name\n"
@@ -903,6 +903,115 @@ async def test_dipbuyer_filtering_on_wednesday(
     async with db.execute("SELECT COUNT(*) FROM orders") as cursor:
         count = (await cursor.fetchone())[0]
         assert count == 0
+
+
+@pytest.mark.asyncio
+async def test_dipbuyer_allowed_on_thursday(
+    tmp_path: Path, mock_config: Config, db
+) -> None:
+    """Verifies DipBuyer strategy entry is allowed when current_weekday == 3 (Thursday)."""
+    csv_file = tmp_path / "orders_2026_07_09.csv"  # Thursday
+    csv_content = (
+        "trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name\n"
+        "201_DipBuyer_MSFT,ENTRY,MSFT,STK,SMART,U12345,BUY,10,LMT,300.00,DAY,DipBuyer\n"
+    )
+    csv_file.write_text(csv_content, encoding="utf-8")
+
+    mock_ib = MagicMock()
+    mock_ib.managedAccounts.return_value = ["U12345"]
+    mock_ib.isConnected.return_value = True
+    mock_ib.accountValues.return_value = [
+        AccountValue(
+            account="U12345",
+            tag="NetLiquidation",
+            value="100000.00",
+            currency="EUR",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U12345",
+            tag="AvailableFunds",
+            value="100000.00",
+            currency="EUR",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U12345",
+            tag="TotalCashValue",
+            value="100000.00",
+            currency="EUR",
+            modelCode="",
+        ),
+    ]
+    mock_notifier = MagicMock()
+    mock_notifier.send_importer_info = AsyncMock(return_value=True)
+    mock_queue = asyncio.Queue()
+
+    imported_ids = await run_csv_import(
+        db, mock_ib, csv_file, mock_queue, mock_notifier, mock_config
+    )
+
+    assert imported_ids == ["201_DipBuyer_MSFT"]
+    assert mock_queue.qsize() == 1
+    async with db.execute("SELECT COUNT(*) FROM orders") as cursor:
+        count = (await cursor.fetchone())[0]
+        assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_dipbuyer_bracket_allowed_on_thursday(
+    tmp_path: Path, mock_config: Config, db
+) -> None:
+    """Verifies DipBuyer full bracket (ENTRY + TP) is allowed on Thursday."""
+    csv_file = tmp_path / "orders_2026_07_09.csv"  # Thursday
+    csv_content = (
+        "trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name\n"
+        "202_DipBuyer_NVDA,ENTRY,NVDA,STK,SMART,U12345,BUY,15,LMT,120.00,DAY,DipBuyer\n"
+        "202_DipBuyer_NVDA,TP,NVDA,STK,SMART,U12345,SELL,15,LOC,130.00,DAY,DipBuyer\n"
+    )
+    csv_file.write_text(csv_content, encoding="utf-8")
+
+    mock_ib = MagicMock()
+    mock_ib.managedAccounts.return_value = ["U12345"]
+    mock_ib.isConnected.return_value = True
+    mock_ib.accountValues.return_value = [
+        AccountValue(
+            account="U12345",
+            tag="NetLiquidation",
+            value="100000.00",
+            currency="EUR",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U12345",
+            tag="AvailableFunds",
+            value="100000.00",
+            currency="EUR",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U12345",
+            tag="TotalCashValue",
+            value="100000.00",
+            currency="EUR",
+            modelCode="",
+        ),
+    ]
+    mock_notifier = MagicMock()
+    mock_notifier.send_importer_info = AsyncMock(return_value=True)
+    mock_queue = asyncio.Queue()
+
+    imported_ids = await run_csv_import(
+        db, mock_ib, csv_file, mock_queue, mock_notifier, mock_config
+    )
+
+    assert imported_ids == ["202_DipBuyer_NVDA"]
+    assert mock_queue.qsize() == 1
+    async with db.execute(
+        "SELECT COUNT(*) FROM orders WHERE trade_group_id = '202_DipBuyer_NVDA'"
+    ) as cursor:
+        count = (await cursor.fetchone())[0]
+        assert count == 2
 
 
 @pytest.mark.asyncio

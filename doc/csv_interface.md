@@ -90,7 +90,7 @@ Eine CSV-Datei wird vor der Ausführung vollständig validiert. Schlägt die Val
 ### 4.2 Reiner Exit (ohne ENTRY in der Datei)
 Enthält eine Gruppe keinen `ENTRY`, sondern nur Exit-Legs (`SL`, `TP` oder `EXIT`), gilt dies als **Positionsschließung**:
 - Der zugehörige Trade muss bereits mit derselben `trade_group_id` und `account_id` in der lokalen Datenbank existieren.
-- Ausnahmeregelung für `DipBuyer`: Montags und dienstags werden DipBuyer-Exits auch dann akzeptiert, wenn noch kein ENTRY in der lokalen DB vorliegt (Wochenend-Holdings).
+- Ausnahmeregelung für `DipBuyer`: Montags, dienstags und donnerstags werden DipBuyer-Orders (Entries und Exits) zugelassen. An anderen Wochentagen (Mittwoch, Freitag) werden reine Exits gegen die lokale Datenbank abgeglichen und neue Entries herausgefiltert.
 
 ### 4.3 Multi-Exit-Unterstützung
 Seit Migration `002` können pro Gruppe **mehrere Exit-Orders** definiert werden (Composite Key `account_id, trade_group_id, bracket_role, order_type`):

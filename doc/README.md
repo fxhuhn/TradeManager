@@ -483,7 +483,7 @@ Dieses Kapitel beschreibt die Vereinbarung zur Erstellung der täglichen CSV-Dat
 
 * **BounceBandit (Automatische QQQ ➔ MNQ Future Transformation):**  
   Der Signal-Generator übergibt `symbol = QQQ`, `sec_type = STK`, `exchange = SMART`, `strategy_name = BounceBandit`. Der TradeManager transformiert dies beim Einlesen vollautomatisch in den liquidesten CME Micro E-mini Nasdaq Future (`MNQ`, `sec_type = FUT`, `exchange = CME`, `quantity = 1`) über den [future_resolver.py](file:///Users/produktmanagement/Python/github/TradeManager/app/trading/future_resolver.py).
-* **DipBuyer:** Reine Exits werden gegen die Datenbank abgeglichen und montags/dienstags bei Wochenend-Holdings durchgelassen.
+* **DipBuyer:** Entries sind an Montagen, Dienstagen und Donnerstagen zugelassen. An anderen Wochentagen (Mittwoch, Freitag) werden neue Entries herausgefiltert und reine Exits gegen die Datenbank abgeglichen.
 
 ### 5.5 Verarbeitungs- & Archivierungs-Lifecycle
 

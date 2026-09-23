@@ -30,6 +30,9 @@ from app.trading.future_resolver import resolve_active_future_contract
 
 logger = structlog.get_logger()
 
+# Erlaubte Wochentage für DipBuyer-Entries: Montag (0), Dienstag (1), Donnerstag (3)
+DIPBUYER_ALLOWED_WEEKDAYS: tuple[int, ...] = (0, 1, 3)
+
 
 @dataclass(frozen=True)
 class AccountBalanceMetrics:
@@ -454,13 +457,17 @@ async def _process_and_upsert_group(
     entry_leg = next((leg for leg in raw_legs if leg.bracket_role == "ENTRY"), None)
     first_leg = raw_legs[0]
 
-    # --- TESTWEISE ANPASSUNG FÜR DIPBUYER ---
-    # Entries für DipBuyer nur an Montag (0) und Dienstag (1) erlauben
+    # --- ANPASSUNG FÜR DIPBUYER ---
+    # Entries für DipBuyer nur an Montag (0), Dienstag (1) und Donnerstag (3) erlauben
     strategy = entry_leg.strategy_name if entry_leg else first_leg.strategy_name
     weekday = (
         current_weekday if current_weekday is not None else datetime.now().weekday()
     )
-    if strategy and strategy.lower() == "dipbuyer" and weekday > 1:
+    if (
+        strategy
+        and strategy.lower() == "dipbuyer"
+        and weekday not in DIPBUYER_ALLOWED_WEEKDAYS
+    ):
         # Entry-Leg entfernen, damit keine neue Position aufgebaut wird
         raw_legs = [leg for leg in raw_legs if leg.bracket_role != "ENTRY"]
         entry_leg = None
@@ -472,7 +479,7 @@ async def _process_and_upsert_group(
             return False
 
         # Sicherstellen, dass die verbleibenden Exits keine Short-Positionen erzeugen
-        # Wir prüfen, ob der Entry bereits in der Datenbank existiert (z.B. von Montag/Dienstag).
+        # Wir prüfen, ob der Entry bereits in der Datenbank existiert (z.B. von Montag/Dienstag/Donnerstag).
         # Falls nicht, ignorieren wir die Exits komplett.
         temp_account = first_leg.account_id
         temp_account = resolve_account_id(interactive_brokers, temp_account)
@@ -483,7 +490,7 @@ async def _process_and_upsert_group(
             row = await cursor.fetchone()
             if not row or row["status"] in ("Error", "Cancelled"):
                 logger.info(
-                    "Skipping DipBuyer exits because no active ENTRY exists in DB and today is not Mon/Tue.",
+                    "Skipping DipBuyer exits because no active ENTRY exists in DB and today is not Mon/Tue/Thu.",
                     trade_group_id=trade_group_id,
                     entry_status=row["status"] if row else "None",
                 )
