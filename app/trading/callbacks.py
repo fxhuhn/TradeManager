@@ -131,6 +131,44 @@ def handle_unassigned_execution(trade: object, fill: object) -> dict[str, object
     return details
 
 
+def is_loc_anomaly_check_warranted(
+    order_type: str | None,
+    target_price: Decimal | None,
+    bracket_role: str | None,
+    is_entry_filled: bool,
+    has_filled_sibling: bool,
+) -> bool:
+    """Prüft seiteneffektfrei, ob für eine stornierte Order eine LOC-Schlusskursprüfung gerechtfertigt ist.
+
+    Verhindert False Positives (Fehlalarme) bei mehrbeinigen Order-Brackets (OCA-Gruppen):
+    - Wenn die Order nicht vom Typ LOC ist oder keinen Zielpreis hat -> False.
+    - Wenn ein Geschwister-Exit-Leg bereits ausgeführt wurde (OCA-Stornierung) -> False.
+    - Wenn die Order ein Exit-Leg ist ('SL', 'TP', 'EXIT') und das ENTRY-Leg der Gruppe
+      nicht ausgeführt wurde (keine Position vorhanden) -> False.
+    - Andernfalls -> True.
+
+    Args:
+        order_type: Der Ordertyp (z. B. 'LOC', 'LMT').
+        target_price: Der definierte Limit-/Zielpreis der Order.
+        bracket_role: Die Rolle im Bracket (z. B. 'ENTRY', 'EXIT', 'TP', 'SL').
+        is_entry_filled: Gibt an, ob das ENTRY-Leg der Gruppe gefüllt wurde.
+        has_filled_sibling: Gibt an, ob ein anderes Exit-Leg derselben Gruppe gefüllt wurde.
+
+    Returns:
+        True, falls eine Anomalie-Prüfung für die LOC-Order durchgeführt werden soll, sonst False.
+    """
+    if not order_type or order_type.upper() != "LOC":
+        return False
+    if target_price is None:
+        return False
+    if has_filled_sibling:
+        return False
+    role_upper = bracket_role.upper() if bracket_role else ""
+    if role_upper in ("SL", "TP", "EXIT") and not is_entry_filled:
+        return False
+    return True
+
+
 class TwsCallbacksManager:
     """
     Registriert und verwaltet alle asynchronen TWS-Callbacks (Events)
@@ -595,7 +633,7 @@ class TwsCallbacksManager:
     ) -> tuple[Any, bool, bool]:
         """Lädt Order-Attribute, markiert ggf. als storniert und prüft Geschwister-Exit-Orders."""
         query = """
-            SELECT symbol, bracket_role, action, quantity, order_type, target_price
+            SELECT symbol, bracket_role, action, quantity, order_type, target_price, trade_group_id
             FROM orders
             WHERE order_id = ?
         """
@@ -865,6 +903,39 @@ class TwsCallbacksManager:
         """
         try:
             async with db.execute(query, (order_id, order_id)) as cursor:
+                exec_row = await cursor.fetchone()
+                return bool(exec_row and exec_row["exec_count"] > 0)
+        except Exception:
+            return False
+
+    @staticmethod
+    async def _check_trade_group_entry_filled(
+        db: aiosqlite.Connection, trade_group_id: str
+    ) -> bool:
+        """Prüft in orders und executions, ob das ENTRY-Leg der Gruppe ausgeführt wurde."""
+        if not trade_group_id:
+            return True
+
+        query_orders = """
+            SELECT status FROM orders
+            WHERE trade_group_id = ? AND bracket_role = 'ENTRY'
+            LIMIT 1
+        """
+        async with db.execute(query_orders, (trade_group_id,)) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return True
+            if row["status"] == "Filled":
+                return True
+
+        query_executions = """
+            SELECT COUNT(*) AS exec_count
+            FROM executions AS e
+            JOIN orders AS o ON e.order_id = o.order_id
+            WHERE o.trade_group_id = ? AND o.bracket_role = 'ENTRY'
+        """
+        try:
+            async with db.execute(query_executions, (trade_group_id,)) as cursor:
                 exec_row = await cursor.fetchone()
                 return bool(exec_row and exec_row["exec_count"] > 0)
         except Exception:
@@ -1322,23 +1393,53 @@ class TwsCallbacksManager:
         ).strip()
 
     def _trigger_loc_verification_if_needed(
-        self, order_id: int, order_row: Any, symbol: str
+        self,
+        order_id: int,
+        order_row: Any,
+        symbol: str,
+        is_entry_filled: bool = True,
+        has_filled_sibling: bool = False,
     ) -> None:
-        """Triggert asynchrone LOC-Schlusskursprüfung, falls es sich um eine stornierte LOC-Order handelt."""
-        if (
-            order_row
-            and order_row["order_type"] == "LOC"
-            and order_row["target_price"] is not None
+        """Triggert asynchrone LOC-Schlusskursprüfung nur, wenn die Order-Kriterien erfüllt sind."""
+        if not order_row:
+            return
+
+        order_type = order_row["order_type"] if "order_type" in order_row.keys() else ""
+        raw_target_price = (
+            order_row["target_price"] if "target_price" in order_row.keys() else None
+        )
+        target_price = parse_positive_decimal(raw_target_price)
+        bracket_role = (
+            order_row["bracket_role"] if "bracket_role" in order_row.keys() else None
+        )
+
+        if not is_loc_anomaly_check_warranted(
+            order_type=order_type,
+            target_price=target_price,
+            bracket_role=bracket_role,
+            is_entry_filled=is_entry_filled,
+            has_filled_sibling=has_filled_sibling,
         ):
-            asyncio.create_task(
-                self._check_loc_execution_price(
+            if order_type == "LOC":
+                logger.info(
+                    "LOC anomaly check skipped: Trade group entry not filled or sibling exit executed",
                     order_id=order_id,
                     symbol=symbol,
-                    action=order_row["action"],
-                    limit_price=Decimal(str(order_row["target_price"])),
-                    quantity=Decimal(str(order_row["quantity"])),
+                    bracket_role=bracket_role,
+                    is_entry_filled=is_entry_filled,
+                    has_filled_sibling=has_filled_sibling,
                 )
+            return
+
+        asyncio.create_task(
+            self._check_loc_execution_price(
+                order_id=order_id,
+                symbol=symbol,
+                action=order_row["action"],
+                limit_price=Decimal(str(order_row["target_price"])),
+                quantity=Decimal(str(order_row["quantity"])),
             )
+        )
 
     async def _cancel_order_in_db(
         self, request_id: int, error_code: int, error_string: str
@@ -1355,6 +1456,7 @@ class TwsCallbacksManager:
             order_row = None
             has_filled_sibling = False
             has_siblings = False
+            is_entry_filled = True
             try:
                 (
                     order_row,
@@ -1363,6 +1465,14 @@ class TwsCallbacksManager:
                 ) = await self._fetch_cancellation_context(
                     request_id, db, update_cancelled=True
                 )
+                if (
+                    order_row
+                    and "trade_group_id" in order_row.keys()
+                    and order_row["trade_group_id"]
+                ):
+                    is_entry_filled = await self._check_trade_group_entry_filled(
+                        db, order_row["trade_group_id"]
+                    )
             except Exception as exception:
                 logger.error(
                     "Error updating DB for cancelled order",
@@ -1388,7 +1498,13 @@ class TwsCallbacksManager:
                 log_prefix="Order cancellation notification",
             )
 
-        self._trigger_loc_verification_if_needed(request_id, order_row, symbol)
+        self._trigger_loc_verification_if_needed(
+            request_id,
+            order_row,
+            symbol,
+            is_entry_filled=is_entry_filled,
+            has_filled_sibling=has_filled_sibling,
+        )
 
     @staticmethod
     def _evaluate_loc_eligibility(

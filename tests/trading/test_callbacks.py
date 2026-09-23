@@ -16,6 +16,7 @@ from app.trading.callbacks import (
     TwsCallbacksManager,
     extract_unassigned_execution_details,
     handle_unassigned_execution,
+    is_loc_anomaly_check_warranted,
 )
 from app.trading.error_codes import ErrorClass
 
@@ -2858,3 +2859,287 @@ async def test_oca_cancellation_error_202_grace_window_suppressed(
         mock_notifier.send_order_failed.assert_not_called()
     finally:
         db.close = original_close
+
+
+# =========================================================================
+# Tests: LOC Anomaly Check Warranted & Bracket Entry State Verification
+# =========================================================================
+
+
+@pytest.mark.parametrize(
+    (
+        "order_type",
+        "target_price",
+        "bracket_role",
+        "is_entry_filled",
+        "has_filled_sibling",
+        "expected_warranted",
+    ),
+    [
+        # Standard valid case: LOC Exit with open position and no sibling filled
+        ("LOC", Decimal("150.00"), "EXIT", True, False, True),
+        ("LOC", Decimal("150.00"), "TP", True, False, True),
+        ("LOC", Decimal("150.00"), "SL", True, False, True),
+        # False-Positive prevention 1: Entry was NOT filled (position never opened)
+        ("LOC", Decimal("150.00"), "EXIT", False, False, False),
+        ("LOC", Decimal("150.00"), "TP", False, False, False),
+        ("LOC", Decimal("150.00"), "SL", False, False, False),
+        # False-Positive prevention 2: Sibling exit filled (OCA cancellation)
+        ("LOC", Decimal("150.00"), "EXIT", True, True, False),
+        ("LOC", Decimal("150.00"), "EXIT", False, True, False),
+        # Standalone or non-bracket role with LOC: Anomaly check remains active
+        ("LOC", Decimal("150.00"), "ENTRY", False, False, True),
+        ("LOC", Decimal("150.00"), None, True, False, True),
+        # Missing target price: Cannot check limit against close price
+        ("LOC", None, "EXIT", True, False, False),
+        # Non-LOC orders: Never eligible for LOC check
+        ("LMT", Decimal("150.00"), "EXIT", True, False, False),
+        ("MKT", None, "EXIT", True, False, False),
+        ("STP", Decimal("150.00"), "SL", True, False, False),
+        ("", Decimal("150.00"), "EXIT", True, False, False),
+        (None, Decimal("150.00"), "EXIT", True, False, False),
+    ],
+)
+def test_is_loc_anomaly_check_warranted_matrix(
+    order_type: str | None,
+    target_price: Decimal | None,
+    bracket_role: str | None,
+    is_entry_filled: bool,
+    has_filled_sibling: bool,
+    expected_warranted: bool,
+) -> None:
+    """Verifies that LOC anomaly checks are only warranted when strict criteria are satisfied."""
+    # Arrange & Act
+    result = is_loc_anomaly_check_warranted(
+        order_type=order_type,
+        target_price=target_price,
+        bracket_role=bracket_role,
+        is_entry_filled=is_entry_filled,
+        has_filled_sibling=has_filled_sibling,
+    )
+
+    # Assert
+    assert result is expected_warranted
+
+
+@pytest.mark.asyncio
+async def test_check_trade_group_entry_filled_states(db: aiosqlite.Connection) -> None:
+    """Verifies entry filled checks for orders table and executions fallback."""
+    # Arrange
+    # Group 1: Entry filled in orders
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, status)
+        VALUES (2001, 'TG_FILLED', 'U1', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 10, 'LMT', 'Filled')
+        """
+    )
+    # Group 2: Entry cancelled in orders, no executions
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, status)
+        VALUES (2002, 'TG_CANCELLED', 'U1', 'ENTRY', 'MSFT', 'STK', 'SMART', 'BUY', 10, 'LMT', 'Cancelled')
+        """
+    )
+    # Group 3: Entry created in orders, no executions
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, status)
+        VALUES (2003, 'TG_CREATED', 'U1', 'ENTRY', 'NVDA', 'STK', 'SMART', 'BUY', 10, 'LMT', 'Created')
+        """
+    )
+    # Group 4: Entry cancelled in orders, BUT fill exists in executions table
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, status)
+        VALUES (2004, 'TG_EXEC_FALLBACK', 'U1', 'ENTRY', 'GOOG', 'STK', 'SMART', 'BUY', 10, 'LMT', 'Cancelled')
+        """
+    )
+    await db.execute(
+        """
+        INSERT INTO executions (exec_id, order_id, price, qty)
+        VALUES ('EXEC_2004', 2004, 150.0, 10.0)
+        """
+    )
+    await db.commit()
+
+    # Act & Assert
+    assert (
+        await TwsCallbacksManager._check_trade_group_entry_filled(db, "TG_FILLED")
+        is True
+    )
+    assert (
+        await TwsCallbacksManager._check_trade_group_entry_filled(db, "TG_CANCELLED")
+        is False
+    )
+    assert (
+        await TwsCallbacksManager._check_trade_group_entry_filled(db, "TG_CREATED")
+        is False
+    )
+    assert (
+        await TwsCallbacksManager._check_trade_group_entry_filled(
+            db, "TG_EXEC_FALLBACK"
+        )
+        is True
+    )
+    assert (
+        await TwsCallbacksManager._check_trade_group_entry_filled(db, "TG_NON_EXISTENT")
+        is True
+    )
+    assert await TwsCallbacksManager._check_trade_group_entry_filled(db, "") is True
+
+
+@pytest.mark.asyncio
+async def test_loc_exit_order_cancel_skipped_when_entry_not_filled(
+    db: aiosqlite.Connection, mock_config: Config
+) -> None:
+    """Verifies that an anomaly check and alert are suppressed when the bracket ENTRY was not filled."""
+    # Arrange
+    # Bracket setup with unfulfilled ENTRY and cancelled LOC EXIT
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name, status
+        ) VALUES (3001, 0, NULL, 'TG_UNFILLED_BRACKET', 'A1', 'ENTRY', 'QCOM', 'STK', 'SMART', 'BUY', 35, 'LMT', 185.00, 'DAY', 'DipBuyer', 'Cancelled')
+        """
+    )
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name, status
+        ) VALUES (3002, 0, 3001, 'TG_UNFILLED_BRACKET', 'A1', 'EXIT', 'QCOM', 'STK', 'SMART', 'SELL', 35, 'LOC', 192.13, 'DAY', 'DipBuyer', 'Submitted')
+        """
+    )
+    await db.commit()
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+    mock_notifier.send_loc_execution_anomaly = AsyncMock()
+
+    mock_ib = MagicMock()
+    mock_bar = MagicMock()
+    mock_bar.close = 194.23
+    mock_bar.date = date(2026, 7, 8)
+    mock_ib.reqHistoricalDataAsync = AsyncMock(return_value=[mock_bar])
+
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=mock_ib,
+        notifier=mock_notifier,
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    # Act
+    with (
+        patch.object(manager, "_is_near_or_after_market_close", return_value=True),
+        patch.object(manager, "_is_bar_from_today", return_value=True),
+        patch("asyncio.sleep", AsyncMock()),
+    ):
+        try:
+            await manager._cancel_order_in_db(3002, 202, "Order Canceled")
+            await asyncio.gather(
+                *[
+                    task
+                    for task in asyncio.all_tasks()
+                    if task is not asyncio.current_task()
+                ]
+            )
+        finally:
+            db.close = original_close
+
+    # Assert: Both cancellation alarm (EOD) and LOC anomaly alarm must be suppressed
+    mock_notifier.send_order_failed.assert_not_called()
+    mock_notifier.send_loc_execution_anomaly.assert_not_called()
+    mock_ib.reqHistoricalDataAsync.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_loc_exit_order_cancel_triggers_anomaly_when_entry_was_filled(
+    db: aiosqlite.Connection, mock_config: Config
+) -> None:
+    """Verifies that an anomaly check IS triggered when the bracket ENTRY was actually filled."""
+    # Arrange
+    # Bracket setup with filled ENTRY and cancelled LOC EXIT
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name, status
+        ) VALUES (3101, 0, NULL, 'TG_FILLED_BRACKET', 'A1', 'ENTRY', 'QCOM', 'STK', 'SMART', 'BUY', 35, 'LMT', 185.00, 'DAY', 'DipBuyer', 'Filled')
+        """
+    )
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name, status
+        ) VALUES (3102, 0, 3101, 'TG_FILLED_BRACKET', 'A1', 'EXIT', 'QCOM', 'STK', 'SMART', 'SELL', 35, 'LOC', 192.13, 'DAY', 'DipBuyer', 'Submitted')
+        """
+    )
+    await db.commit()
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+    mock_notifier.send_loc_execution_anomaly = AsyncMock()
+
+    mock_bar = MagicMock()
+    mock_bar.close = 194.23
+    mock_bar.date = date(2026, 7, 8)
+    mock_ib = MagicMock()
+    mock_ib.reqHistoricalDataAsync = AsyncMock(return_value=[mock_bar])
+
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=mock_ib,
+        notifier=mock_notifier,
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    # Act
+    with (
+        patch.object(manager, "_is_near_or_after_market_close", return_value=True),
+        patch.object(manager, "_is_bar_from_today", return_value=True),
+        patch("asyncio.sleep", AsyncMock()),
+    ):
+        try:
+            await manager._cancel_order_in_db(3102, 202, "Order Canceled")
+            await asyncio.gather(
+                *[
+                    task
+                    for task in asyncio.all_tasks()
+                    if task is not asyncio.current_task()
+                ]
+            )
+        finally:
+            db.close = original_close
+
+    # Assert: LOC anomaly alarm MUST be dispatched because entry was filled and close >= limit
+    mock_notifier.send_loc_execution_anomaly.assert_called_once_with(
+        order_id=3102,
+        symbol="QCOM",
+        action="SELL",
+        limit_price=Decimal("192.13"),
+        close_price=Decimal("194.23"),
+        quantity=Decimal("35"),
+    )

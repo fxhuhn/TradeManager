@@ -231,6 +231,7 @@ This section provides a detailed reference of all public classes and functions i
 - `on_disconnected` (Function/Method): Handles disconnection events from the Gateway.
 - `extract_unassigned_execution_details` (Function): Extracts complete contract and execution attributes from unassigned TWS fill objects.
 - `handle_unassigned_execution` (Function): Logs detailed warnings for execution events not matching any local order in SQLite.
+- `is_loc_anomaly_check_warranted` (Function): Pure evaluation checking if a cancelled LOC order warrants an anomaly check based on bracket role, entry fill state, and sibling exit fills.
 
 
 ### 4.12 Module: `app.trading.error_codes`
