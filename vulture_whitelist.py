@@ -59,3 +59,7 @@ AccountMetricsReport
 # Container Manager public models and attributes
 ContainerStatusReport
 name_or_id
+
+# Worker public models and execution contexts
+WorkerExecutionContext
+_.database

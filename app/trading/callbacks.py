@@ -12,11 +12,12 @@ Siehe Datenfluss- und Architekturzusammenhang in app.core.models.
 from __future__ import annotations
 
 import asyncio
+import datetime as datetime_module
 import re
 from collections.abc import Awaitable, Callable, Coroutine
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, TypedDict
 from zoneinfo import ZoneInfo
 
 import aiosqlite
@@ -31,6 +32,7 @@ from app.trading.error_codes import (
     ErrorClass,
     classify_error_code,
     is_pre_market_hold_notice,
+    is_read_only_error,
     is_trade_pre_market_held,
 )
 from app.trading.order_builder import (
@@ -42,72 +44,125 @@ from app.trading.order_builder import (
 logger = structlog.get_logger()
 
 
+class UnassignedExecutionDetails(TypedDict):
+    """Container für extrahierte Attribute einer unzugeordneten Ausführung."""
+
+    symbol: str
+    sec_type: str
+    exchange: str
+    currency: str
+    side: str
+    qty: Decimal | None
+    price: Decimal | None
+    account_id: str
+    order_id: int
+    perm_id: int | None
+    exec_id: str
+    executed_at: object
+    order_ref: str
+
+
+def _resolve_contract_attributes(
+    trade: object, fill: object
+) -> tuple[str, str, str, str]:
+    """Ermittelt Symbol, Wertpapiertyp, Börse und Währung aus Fill oder Trade."""
+    contract = getattr(fill, "contract", None)
+    if contract is None and trade is not None:
+        contract = getattr(trade, "contract", None)
+
+    if not contract:
+        return "", "", "", ""
+
+    symbol = getattr(contract, "symbol", "") or ""
+    sec_type = getattr(contract, "secType", "") or ""
+    primary_exchange = getattr(contract, "primaryExchange", "")
+    exchange = primary_exchange or getattr(contract, "exchange", "") or ""
+    currency = getattr(contract, "currency", "") or ""
+    return symbol, sec_type, exchange, currency
+
+
+def _resolve_execution_attributes(
+    execution: object,
+) -> tuple[
+    Decimal | None,
+    Decimal | None,
+    int,
+    int | None,
+    str,
+    object,
+    str,
+    str,
+]:
+    """Ermittelt Menge, Preis, Order-IDs, Ausführungszeit und Seite aus dem Execution-Objekt."""
+    if not execution:
+        return None, None, 0, None, "", None, "", ""
+
+    qty_raw = getattr(execution, "shares", None)
+    qty = Decimal(str(qty_raw)) if qty_raw is not None else None
+
+    price_raw = getattr(execution, "price", None)
+    price = Decimal(str(price_raw)) if price_raw is not None else None
+
+    order_id = getattr(execution, "orderId", 0) or 0
+    perm_id = getattr(execution, "permId", None)
+    exec_id = getattr(execution, "execId", "") or ""
+    executed_at = getattr(execution, "time", None)
+    side = getattr(execution, "side", "") or ""
+    account_id = getattr(execution, "acctNumber", "") or ""
+
+    return qty, price, order_id, perm_id, exec_id, executed_at, side, account_id
+
+
 def extract_unassigned_execution_details(
     trade: object, fill: object
-) -> dict[str, object]:
-    """
-    Extrahiert alle verfügbaren Vertrags- und Ausführungsdetails aus einem TWS Trade- & Fill-Objekt.
+) -> UnassignedExecutionDetails:
+    """Extrahiert alle verfügbaren Vertrags- und Ausführungsdetails aus einem TWS Trade- & Fill-Objekt.
 
     Wird verwendet, um bei unzugeordneten/unbekannten Orders alle Attribute (Symbol, Stückzahl,
     Preis, Börse, Konto etc.) vollständig zu erfassen.
     """
-    contract = getattr(fill, "contract", None) or (
-        getattr(trade, "contract", None) if trade else None
-    )
+    symbol, sec_type, exchange, currency = _resolve_contract_attributes(trade, fill)
     execution = getattr(fill, "execution", None) if fill else None
     order = getattr(trade, "order", None) if trade else None
 
-    symbol = getattr(contract, "symbol", "") if contract else ""
-    sec_type = getattr(contract, "secType", "") if contract else ""
-    exchange = (
-        getattr(contract, "primaryExchange", "") or getattr(contract, "exchange", "")
-        if contract or execution
-        else ""
-    )
-    currency = getattr(contract, "currency", "") if contract else ""
+    (
+        qty,
+        price,
+        order_id,
+        perm_id,
+        exec_id,
+        executed_at,
+        execution_side,
+        execution_account_id,
+    ) = _resolve_execution_attributes(execution)
 
-    side = (
-        getattr(execution, "side", "") or getattr(order, "action", "")
-        if execution or order
-        else ""
+    side = execution_side or (getattr(order, "action", "") if order else "")
+    account_id = execution_account_id or (
+        getattr(order, "account", "") if order else ""
     )
-    qty_raw = getattr(execution, "shares", None) if execution else None
-    qty = Decimal(str(qty_raw)) if qty_raw is not None else None
-
-    price_raw = getattr(execution, "price", None) if execution else None
-    price = Decimal(str(price_raw)) if price_raw is not None else None
-
-    account_id = (
-        getattr(execution, "acctNumber", "") or getattr(order, "account", "")
-        if execution or order
-        else ""
-    )
-    order_id = getattr(execution, "orderId", 0) if execution else 0
-    perm_id = getattr(execution, "permId", None) if execution else None
-    exec_id = getattr(execution, "execId", "") if execution else ""
-    executed_at = getattr(execution, "time", None) if execution else None
     order_ref = getattr(order, "orderRef", "") if order else ""
 
-    return {
-        "symbol": symbol,
-        "sec_type": sec_type,
-        "exchange": exchange,
-        "currency": currency,
-        "side": side,
-        "qty": qty,
-        "price": price,
-        "account_id": account_id,
-        "order_id": order_id,
-        "perm_id": perm_id,
-        "exec_id": exec_id,
-        "executed_at": executed_at,
-        "order_ref": order_ref,
-    }
+    return UnassignedExecutionDetails(
+        symbol=symbol,
+        sec_type=sec_type,
+        exchange=exchange,
+        currency=currency,
+        side=side,
+        qty=qty,
+        price=price,
+        account_id=account_id,
+        order_id=order_id,
+        perm_id=perm_id,
+        exec_id=exec_id,
+        executed_at=executed_at,
+        order_ref=order_ref,
+    )
 
 
-def handle_unassigned_execution(trade: object, fill: object) -> dict[str, object]:
-    """
-    Protokolliert eine Ausführung, die keiner bekannten Order in der lokalen DB zugewiesen werden kann.
+def handle_unassigned_execution(
+    trade: object, fill: object
+) -> UnassignedExecutionDetails:
+    """Protokolliert eine Ausführung, die keiner bekannten Order in der lokalen DB zugewiesen werden kann.
 
     Schreibt eine ausführliche Warnung mit allen ausgelesenen Vertragsdaten in das Log.
     """
@@ -202,6 +257,7 @@ class TwsCallbacksManager:
         self._broker_connected: bool = True
         self._notified_cancelled_order_ids: set[int] = set()
         self._orders_with_warning_399: set[int] = set()
+        self._read_only_alerted: bool = False
 
     def register_all(self) -> None:
         """Verknüpft die Event-Methoden mit den ib_async Signalen."""
@@ -218,6 +274,7 @@ class TwsCallbacksManager:
     def on_connected(self) -> None:
         """Setzt den Broker-Verbindungsstatus bei erfolgreichem Socket-Aufbau auf aktiv."""
         self._broker_connected = True
+        self._read_only_alerted = False
         logger.info(
             "TWS/Gateway connection established: broker status marked connected"
         )
@@ -630,7 +687,7 @@ class TwsCallbacksManager:
 
     async def _fetch_cancellation_context(
         self, order_id: int, db: aiosqlite.Connection, update_cancelled: bool = False
-    ) -> tuple[Any, bool, bool]:
+    ) -> tuple[aiosqlite.Row | None, bool, bool]:
         """Lädt Order-Attribute, markiert ggf. als storniert und prüft Geschwister-Exit-Orders."""
         query = """
             SELECT symbol, bracket_role, action, quantity, order_type, target_price, trade_group_id
@@ -1237,7 +1294,7 @@ class TwsCallbacksManager:
         request_id: int,
         error_code: int,
         error_string: str,
-        contract: Any = None,
+        contract: object = None,
     ) -> None:
         """Klassifiziert alle von TWS gemeldeten Error-Codes und reagiert strukturiert.
 
@@ -1259,7 +1316,7 @@ class TwsCallbacksManager:
                 )
                 return
 
-            error_class = classify_error_code(error_code)
+            error_class = classify_error_code(error_code, error_string)
             logger.warning(
                 "TWS error message received",
                 request_id=request_id,
@@ -1323,6 +1380,52 @@ class TwsCallbacksManager:
 
         return False
 
+    async def _handle_read_only_error(
+        self, request_id: int, error_code: int, error_string: str
+    ) -> None:
+        """Behandelt Read-Only-API-Fehler durch Telegram-Alarm und Markierung der betroffenen Order."""
+        if not self._read_only_alerted:
+            self._read_only_alerted = True
+            await self.notifier.send_read_only_alert(details=error_string)
+        if request_id > 0:
+            await self._fail_order_in_db(request_id, error_code, error_string)
+
+    async def _dispatch_classified_order_error(
+        self,
+        request_id: int,
+        error_code: int,
+        error_string: str,
+        error_class: ErrorClass,
+    ) -> None:
+        """Führt aktionsbasierte Fehlerbehandlung für RETRIABLE, CANCEL oder FATAL durch."""
+        if error_class == ErrorClass.RETRIABLE:
+            if request_id > 0:
+                asyncio.create_task(self.handle_retriable_error_callback(request_id))
+            return
+
+        if error_class == ErrorClass.CANCEL:
+            if request_id > 0:
+                await self._cancel_order_in_db(request_id, error_code, error_string)
+            else:
+                logger.info(
+                    "Broadcast cancel message ignored for system-level request_id",
+                    request_id=request_id,
+                    code=error_code,
+                    message=error_string,
+                )
+            return
+
+        if error_class == ErrorClass.FATAL:
+            if request_id > 0:
+                await self._fail_order_in_db(request_id, error_code, error_string)
+            else:
+                logger.warning(
+                    "Broadcast fatal error received without associated order (request_id <= 0)",
+                    request_id=request_id,
+                    code=error_code,
+                    message=error_string,
+                )
+
     async def _process_error(
         self,
         request_id: int,
@@ -1332,6 +1435,10 @@ class TwsCallbacksManager:
     ) -> None:
         """Verarbeitet klassifizierten API-Fehler."""
         try:
+            if is_read_only_error(error_code, error_string):
+                await self._handle_read_only_error(request_id, error_code, error_string)
+                return
+
             if error_class == ErrorClass.INFO:
                 return
 
@@ -1340,36 +1447,9 @@ class TwsCallbacksManager:
             ):
                 return
 
-            if error_class == ErrorClass.RETRIABLE:
-                if request_id > 0:
-                    asyncio.create_task(
-                        self.handle_retriable_error_callback(request_id)
-                    )
-                return
-
-            if error_class == ErrorClass.CANCEL:
-                if request_id > 0:
-                    await self._cancel_order_in_db(request_id, error_code, error_string)
-                else:
-                    logger.info(
-                        "Broadcast cancel message ignored for system-level request_id",
-                        request_id=request_id,
-                        code=error_code,
-                        message=error_string,
-                    )
-                return
-
-            if error_class == ErrorClass.FATAL:
-                if request_id > 0:
-                    await self._fail_order_in_db(request_id, error_code, error_string)
-                else:
-                    logger.warning(
-                        "Broadcast fatal error received without associated order (request_id <= 0)",
-                        request_id=request_id,
-                        code=error_code,
-                        message=error_string,
-                    )
-                return
+            await self._dispatch_classified_order_error(
+                request_id, error_code, error_string, error_class
+            )
         except Exception as unhandled:
             logger.exception(
                 "CRITICAL: Unhandled exception in _process_error",
@@ -1395,7 +1475,7 @@ class TwsCallbacksManager:
     def _trigger_loc_verification_if_needed(
         self,
         order_id: int,
-        order_row: Any,
+        order_row: aiosqlite.Row | None,
         symbol: str,
         is_entry_filled: bool = True,
         has_filled_sibling: bool = False,
@@ -1752,13 +1832,24 @@ class TwsCallbacksManager:
             reason=error_string,
         )
 
+    @staticmethod
+    def _is_planned_weekly_gateway_restart(
+        current_time: datetime | None = None,
+    ) -> bool:
+        """Prüft, ob der Zeitpunkt dem wöchentlichen IBKR-Gateway-Neustart (Sonntag 12:00-12:05) entspricht."""
+        time_to_check = (
+            current_time if current_time is not None else datetime_module.datetime.now()
+        )
+        return (
+            time_to_check.weekday() == 6
+            and time_to_check.hour == 12
+            and 0 <= time_to_check.minute < 5
+        )
+
     def on_disconnected(self) -> None:
         """Loggt Verbindungsverlust zu TWS und alarmiert den Betreiber."""
         self._broker_connected = False
-        import datetime as datetime_module
-
-        now = datetime_module.datetime.now()
-        is_planned = now.weekday() == 6 and now.hour == 12 and 0 <= now.minute < 5
+        is_planned = self._is_planned_weekly_gateway_restart()
 
         if is_planned:
             logger.info(

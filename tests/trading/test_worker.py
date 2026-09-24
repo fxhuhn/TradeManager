@@ -948,6 +948,73 @@ async def test_verify_margin_and_cushion_whatif_failure(
 
 
 @pytest.mark.asyncio
+async def test_verify_margin_and_cushion_read_only_failure(
+    db, test_config: Config
+) -> None:
+    """Verifies that _verify_margin_and_cushion detects Read-Only mode from errorEvent and alerts accordingly."""
+    from app.trading.worker import _verify_margin_and_cushion
+
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status)
+        VALUES (89, 'TG_READONLY_ERR', 'ACC1', 'ENTRY', 'NVDA', 'STK', 'SMART', 'BUY', 10, 'LMT', 120.0, 'Created')
+        """
+    )
+    await db.commit()
+
+    entry_order = OrderRow(
+        order_id=89,
+        perm_id=0,
+        parent_id=None,
+        trade_group_id="TG_READONLY_ERR",
+        account_id="ACC1",
+        bracket_role="ENTRY",
+        symbol="NVDA",
+        sec_type="STK",
+        exchange="SMART",
+        action="BUY",
+        quantity=10,
+        order_type="LMT",
+        target_price=Decimal("120.0"),
+        tif="DAY",
+        strategy_name="S1",
+        status="Created",
+    )
+
+    mock_ib = MagicMock()
+    mock_ib.accountValues.return_value = []
+
+    async def fake_whatif(*_args, **_kwargs):
+        for call in mock_ib.errorEvent.connect.call_args_list:
+            callback_fn = call[0][0]
+            callback_fn(
+                5,
+                321,
+                "Error validating request.-'bC' : cause - The API interface is currently in Read-Only mode.",
+            )
+        raise TimeoutError()
+
+    mock_ib.whatIfOrderAsync = AsyncMock(side_effect=fake_whatif)
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+
+    passed, updated_order = await _verify_margin_and_cushion(
+        db, mock_ib, entry_order, test_config, mock_notifier
+    )
+
+    assert passed is False
+    assert updated_order.status == "Error"
+    mock_notifier.send_order_failed.assert_called_once()
+    assert mock_notifier.send_order_failed.call_args[1]["tws_code"] == 321
+    assert "READ-ONLY" in mock_notifier.send_order_failed.call_args[1]["reason"].upper()
+    assert (
+        "The API interface is currently in Read-Only mode"
+        in mock_notifier.send_order_failed.call_args[1]["reason"]
+    )
+
+
+@pytest.mark.asyncio
 async def test_transmit_entry_and_child_orders_tick_rounding_and_rejections(
     db, test_config: Config
 ) -> None:
@@ -1918,3 +1985,453 @@ async def test_process_trade_group_unhandled_exception_handles_notifier_failure(
                 notifier=mock_notifier,
                 config=test_config,
             )
+
+
+@pytest.mark.asyncio
+async def test_evaluate_margin_warnings_zero_equity() -> None:
+    """Verifies _evaluate_margin_warnings handles zero equity without ZeroDivisionError."""
+    from app.trading.worker import _evaluate_margin_warnings
+
+    mock_ib = MagicMock()
+    mock_ib.accountValues.return_value = []
+    order_row = OrderRow(
+        order_id=1,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG_ZERO_EQ",
+        account_id="U12345",
+        bracket_role="ENTRY",
+        symbol="AAPL",
+        sec_type="STK",
+        exchange="SMART",
+        action="BUY",
+        quantity=10,
+        order_type="LMT",
+        target_price=Decimal("150.0"),
+        tif="DAY",
+        strategy_name="Test",
+        status="Created",
+    )
+    mock_notifier = MagicMock()
+    mock_notifier.send_margin_utilization_warning = AsyncMock()
+    mock_notifier.send_high_margin_usage_warning = AsyncMock()
+
+    # Act
+    await _evaluate_margin_warnings(
+        interactive_brokers=mock_ib,
+        entry_order=order_row,
+        init_margin_after=Decimal("500.0"),
+        equity_with_loan=Decimal("0.0"),
+        notifier=mock_notifier,
+    )
+
+    # Assert: zero equity does not calculate >50% usage or throw ZeroDivisionError
+    mock_notifier.send_high_margin_usage_warning.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handle_reauthorization_wait_reconnects_when_disconnected(
+    db, test_config
+) -> None:
+    """Verifies handle_reauthorization_wait waits for reconnect when TWS is disconnected."""
+    from app.trading.worker import handle_reauthorization_wait
+
+    order_row = OrderRow(
+        order_id=201,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG_REAUTH_DISC",
+        account_id="U12345",
+        bracket_role="ENTRY",
+        symbol="AAPL",
+        sec_type="STK",
+        exchange="SMART",
+        action="BUY",
+        quantity=10,
+        order_type="LMT",
+        target_price=Decimal("150.0"),
+        tif="DAY",
+        strategy_name="Test",
+        status="Created",
+    )
+    async with db.execute(
+        "INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, status) "
+        "VALUES (201, 'TG_REAUTH_DISC', 'U12345', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 10, 'LMT', '150.0', 'DAY', 'Created')"
+    ):
+        pass
+    await db.commit()
+
+    mock_ib = MagicMock()
+    # First isConnected check is in loop: False, then True
+    connection_states = [True, False, True]
+
+    def mock_is_connected():
+        if connection_states:
+            return connection_states.pop(0)
+        return True
+
+    mock_ib.isConnected.side_effect = mock_is_connected
+    mock_ib.whatIfOrderAsync = AsyncMock(return_value=MagicMock())
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_message = AsyncMock()
+
+    with (
+        patch("app.trading.worker.is_market_closed_for_symbol", return_value=False),
+        patch("app.trading.worker.asyncio.sleep", AsyncMock()),
+    ):
+        result = await handle_reauthorization_wait(
+            db=db,
+            interactive_brokers=mock_ib,
+            contract=MagicMock(),
+            simulated_order=MagicMock(),
+            entry_order=order_row,
+            config=test_config,
+            notifier=mock_notifier,
+            slice_sleep_s=1.0,
+        )
+
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_handle_reauthorization_wait_unexpected_retry_exception(
+    db, test_config
+) -> None:
+    """Verifies handle_reauthorization_wait logs and notifies on unexpected non-reauth exception during retry."""
+    from app.trading.worker import handle_reauthorization_wait
+
+    order_row = OrderRow(
+        order_id=202,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG_REAUTH_UNEXP",
+        account_id="U12345",
+        bracket_role="ENTRY",
+        symbol="AAPL",
+        sec_type="STK",
+        exchange="SMART",
+        action="BUY",
+        quantity=10,
+        order_type="LMT",
+        target_price=Decimal("150.0"),
+        tif="DAY",
+        strategy_name="Test",
+        status="Created",
+    )
+    async with db.execute(
+        "INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, status) "
+        "VALUES (202, 'TG_REAUTH_UNEXP', 'U12345', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 10, 'LMT', '150.0', 'DAY', 'Created')"
+    ):
+        pass
+    await db.commit()
+
+    mock_ib = MagicMock()
+    mock_ib.isConnected.return_value = True
+    # First retry raises unexpected error
+    mock_ib.whatIfOrderAsync = AsyncMock(side_effect=RuntimeError("Gateway timeout"))
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_message = AsyncMock()
+
+    # Need False for:
+    # 1. Start of loop
+    # 2. Inside slice loop
+    # 3. Next iteration start of loop: True (market closed)
+    market_closed_sequence = [False, False, True]
+
+    def mock_market_closed(_symbol: str) -> bool:
+        if market_closed_sequence:
+            return market_closed_sequence.pop(0)
+        return True
+
+    # Use a large slice_sleep_s so the inner while elapsed < reauth_interval finishes in 1 step
+    with (
+        patch(
+            "app.trading.worker.is_market_closed_for_symbol",
+            side_effect=mock_market_closed,
+        ),
+        patch("app.trading.worker.asyncio.sleep", AsyncMock()),
+    ):
+        result = await handle_reauthorization_wait(
+            db=db,
+            interactive_brokers=mock_ib,
+            contract=MagicMock(),
+            simulated_order=MagicMock(),
+            entry_order=order_row,
+            config=test_config,
+            notifier=mock_notifier,
+            slice_sleep_s=100000.0,
+        )
+
+    assert result is False
+    # Check that the unexpected error message was sent via notifier
+    sent_texts = [call[0][0] for call in mock_notifier.send_message.call_args_list]
+    assert any("Gateway timeout" in text for text in sent_texts)
+
+
+@pytest.mark.asyncio
+async def test_verify_margin_and_cushion_error_event_connect_failure(
+    db, test_config
+) -> None:
+    """Verifies _verify_margin_and_cushion handles exception in errorEvent.connect."""
+    from app.trading.worker import _verify_margin_and_cushion
+
+    order_row = OrderRow(
+        order_id=203,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG_ERR_CONN",
+        account_id="U12345",
+        bracket_role="ENTRY",
+        symbol="AAPL",
+        sec_type="STK",
+        exchange="SMART",
+        action="BUY",
+        quantity=10,
+        order_type="LMT",
+        target_price=Decimal("150.0"),
+        tif="DAY",
+        strategy_name="Test",
+        status="Created",
+    )
+    mock_ib = MagicMock()
+    mock_ib.accountValues.return_value = []
+    mock_error_event = MagicMock()
+    mock_error_event.connect.side_effect = RuntimeError(
+        "Event listener registration failed"
+    )
+    mock_ib.errorEvent = mock_error_event
+
+    mock_order_state = MagicMock()
+    mock_order_state.initMarginAfter = "100.0"
+    mock_order_state.equityWithLoanAfter = "10000.0"
+    mock_ib.whatIfOrderAsync = AsyncMock(return_value=mock_order_state)
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_margin_utilization_warning = AsyncMock()
+    mock_notifier.send_high_margin_usage_warning = AsyncMock()
+
+    success, _ = await _verify_margin_and_cushion(
+        db=db,
+        interactive_brokers=mock_ib,
+        entry_order=order_row,
+        config=test_config,
+        notifier=mock_notifier,
+    )
+    assert success is True
+
+
+@pytest.mark.asyncio
+async def test_verify_margin_and_cushion_whatif_timeout_raises_timeout_error(
+    db, test_config
+) -> None:
+    """Verifies _verify_margin_and_cushion fails closed when whatIf times out completely."""
+    from app.trading.worker import _verify_margin_and_cushion
+
+    order_row = OrderRow(
+        order_id=204,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG_WIF_TIMEOUT",
+        account_id="U12345",
+        bracket_role="ENTRY",
+        symbol="AAPL",
+        sec_type="STK",
+        exchange="SMART",
+        action="BUY",
+        quantity=10,
+        order_type="LMT",
+        target_price=Decimal("150.0"),
+        tif="DAY",
+        strategy_name="Test",
+        status="Created",
+    )
+    async with db.execute(
+        "INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, status) "
+        "VALUES (204, 'TG_WIF_TIMEOUT', 'U12345', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 10, 'LMT', '150.0', 'DAY', 'Created')"
+    ):
+        pass
+    await db.commit()
+
+    mock_ib = MagicMock()
+    mock_ib.accountValues.return_value = []
+    del mock_ib.errorEvent  # No errorEvent
+
+    # Mock whatIf to return a future that never resolves
+    never_done_future: asyncio.Future = asyncio.Future()
+    mock_ib.whatIfOrderAsync.return_value = never_done_future
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+
+    with patch(
+        "app.trading.worker.asyncio.wait", return_value=(set(), {never_done_future})
+    ):
+        success, updated_order = await _verify_margin_and_cushion(
+            db=db,
+            interactive_brokers=mock_ib,
+            entry_order=order_row,
+            config=test_config,
+            notifier=mock_notifier,
+        )
+
+    assert success is False
+    assert updated_order.status == "Error"
+    mock_notifier.send_order_failed.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_verify_margin_and_cushion_reauth_retry_failure(db, test_config) -> None:
+    """Verifies _verify_margin_and_cushion marks order Error when What-If fails after successful reauth."""
+    from app.trading.worker import _verify_margin_and_cushion
+
+    order_row = OrderRow(
+        order_id=205,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG_REAUTH_FAIL",
+        account_id="U12345",
+        bracket_role="ENTRY",
+        symbol="AAPL",
+        sec_type="STK",
+        exchange="SMART",
+        action="BUY",
+        quantity=10,
+        order_type="LMT",
+        target_price=Decimal("150.0"),
+        tif="DAY",
+        strategy_name="Test",
+        status="Created",
+    )
+    async with db.execute(
+        "INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, status) "
+        "VALUES (205, 'TG_REAUTH_FAIL', 'U12345', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 10, 'LMT', '150.0', 'DAY', 'Created')"
+    ):
+        pass
+    await db.commit()
+
+    mock_ib = MagicMock()
+    mock_ib.accountValues.return_value = []
+    del mock_ib.errorEvent
+
+    # First call triggers reauthorization error, second call (after reauth) raises exception
+    mock_ib.whatIfOrderAsync.side_effect = [
+        RuntimeError("201 Token verification required in Client Portal"),
+        RuntimeError("Post-reauth simulation rejected"),
+    ]
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+
+    with patch(
+        "app.trading.worker.handle_reauthorization_wait", AsyncMock(return_value=True)
+    ):
+        success, updated_order = await _verify_margin_and_cushion(
+            db=db,
+            interactive_brokers=mock_ib,
+            entry_order=order_row,
+            config=test_config,
+            notifier=mock_notifier,
+        )
+
+    assert success is False
+    assert updated_order.status == "Error"
+
+
+@pytest.mark.asyncio
+async def test_wait_for_order_submission_timeout_loop() -> None:
+    """Verifies _wait_for_order_submission completes bounded 20 iterations when status remains PendingSubmit."""
+    from app.trading.worker import _wait_for_order_submission
+
+    mock_trade = MagicMock()
+    mock_trade.orderStatus.status = "PendingSubmit"
+
+    with patch("app.trading.worker.asyncio.sleep", AsyncMock()) as mock_sleep:
+        await _wait_for_order_submission(mock_trade)
+        assert mock_sleep.await_count == 20
+
+
+@pytest.mark.asyncio
+async def test_handle_order_rejection_reauthorization_wait_flow(
+    db, test_config
+) -> None:
+    """Verifies _handle_order_rejection triggers reauth wait and re-submits order when successful."""
+    from app.trading.worker import _handle_order_rejection
+
+    order_row = OrderRow(
+        order_id=206,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG_REAUTH_RETRY",
+        account_id="U12345",
+        bracket_role="ENTRY",
+        symbol="AAPL",
+        sec_type="STK",
+        exchange="SMART",
+        action="BUY",
+        quantity=10,
+        order_type="LMT",
+        target_price=Decimal("150.0"),
+        tif="DAY",
+        strategy_name="Test",
+        status="Submitted",
+    )
+    mock_trade = MagicMock()
+    mock_trade.orderStatus.status = "Inactive"
+    mock_entry = MagicMock()
+    mock_entry.errorCode = 201
+    mock_entry.message = "Please login to Client Portal to verify using token"
+    mock_entry.status = "Inactive"
+    mock_trade.log = [mock_entry]
+
+    mock_ib = MagicMock()
+    retry_trade = MagicMock()
+    retry_trade.orderStatus.status = "Submitted"
+    mock_ib.placeOrder.return_value = retry_trade
+
+    mock_notifier = MagicMock()
+
+    with (
+        patch("app.trading.worker.asyncio.sleep", AsyncMock()),
+        patch(
+            "app.trading.worker.handle_reauthorization_wait",
+            AsyncMock(return_value=True),
+        ),
+        patch("app.trading.worker._wait_for_order_submission", AsyncMock()),
+    ):
+        result = await _handle_order_rejection(
+            db=db,
+            trade=mock_trade,
+            order_row=order_row,
+            tws_order_id=206,
+            notifier=mock_notifier,
+            interactive_brokers=mock_ib,
+            config=test_config,
+        )
+
+    assert result is True
+    mock_ib.placeOrder.assert_called_once()
+
+
+def test_get_live_position_quantity_filters_account_and_symbols() -> None:
+    """Verifies _get_live_position_quantity only considers matching accounts and symbols."""
+    from app.trading.worker import _get_live_position_quantity
+
+    mock_ib = MagicMock()
+    pos_other_account = MagicMock(account="OTHER_ACC", position=100)
+    pos_other_account.contract.symbol = "AAPL"
+    pos_other_account.contract.localSymbol = "AAPL"
+
+    pos_other_symbol = MagicMock(account="U12345", position=50)
+    pos_other_symbol.contract.symbol = "MSFT"
+    pos_other_symbol.contract.localSymbol = "MSFT"
+
+    pos_target = MagicMock(account="U12345", position=25)
+    pos_target.contract.symbol = "AAPL"
+    pos_target.contract.localSymbol = "AAPL"
+
+    mock_ib.positions.return_value = [pos_other_account, pos_other_symbol, pos_target]
+
+    qty = _get_live_position_quantity(mock_ib, "U12345", "AAPL")
+    assert qty == Decimal("25")

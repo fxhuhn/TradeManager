@@ -174,3 +174,39 @@ def test_is_trade_pre_market_held() -> None:
     trade4.orderStatus.whyHeld = ""
     trade4.log = []
     assert is_trade_pre_market_held(trade4) is False
+
+
+@pytest.mark.parametrize(
+    "code,message,expected",
+    [
+        (
+            321,
+            "Error validating request.-'bC' : cause - The API interface is currently in Read-Only mode.",
+            True,
+        ),
+        (321, "API in Read-Only mode", True),
+        (0, "The API interface is currently in Read-Only mode.", True),
+        (0, "API read only mode active", True),
+        (321, "Please enter a local symbol or an expiry", False),
+        (201, "insufficient margin", False),
+        (0, "", False),
+    ],
+)
+def test_is_read_only_error(code: int, message: str, expected: bool) -> None:
+    """Verifies that is_read_only_error identifies Read-Only error strings correctly."""
+    from app.trading.error_codes import is_read_only_error
+
+    assert is_read_only_error(code, message) is expected
+
+
+def test_classify_error_code_with_read_only_message() -> None:
+    """Verifies that code 321 or any code with Read-Only cause is classified as FATAL."""
+    read_only_msg = "Error validating request.-'bC' : cause - The API interface is currently in Read-Only mode."
+    assert classify_error_code(321, read_only_msg) == ErrorClass.FATAL
+    assert classify_error_code(0, "API in Read-Only mode") == ErrorClass.FATAL
+    # Backward compatibility: without message, 321 remains INFO
+    assert classify_error_code(321) == ErrorClass.INFO
+    assert (
+        classify_error_code(321, "Please enter a local symbol or an expiry")
+        == ErrorClass.INFO
+    )

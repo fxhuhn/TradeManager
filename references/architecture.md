@@ -201,12 +201,12 @@ Governed by [app/trading/error_codes.py](app/trading/error_codes.py), IBKR API e
 
 | Error Class | Associated Codes | System Action / Response |
 | :--- | :--- | :--- |
-| **`INFO`** | `2100`, `2103`, `2104`, `2105`, `2106`, `2107`, `2108`, `2109`, `2119`, `2157`, `2158`, `2182`, `321`, `322`, `399`, `10167` | Log warning/info. No execution actions are taken. System execution continues undisturbed. |
+| **`INFO`** | `2100`, `2103`, `2104`, `2105`, `2106`, `2107`, `2108`, `2109`, `2119`, `2157`, `2158`, `2182`, `321` (benign parameter validation), `322`, `399`, `10167` | Log warning/info. No execution actions are taken. System execution continues undisturbed. |
 | **`RECONNECT`**| `1101`, `1102` | Pause outgoing transmissions. Block queue consumption. Gateway disconnect check logic starts. Resume once connection events clear. |
 | **`RETRIABLE`**| `1100`, `1300`, `10148`, `502`, `504`, `162` | Queue worker backs off exponentially. Status reverts to `Created`. Order is queued again for retry (up to max configured retries limit). |
 | **`CANCEL`** | `202`, `10147`, `10149`, `10268` | Order marked as `Cancelled` in database. Stop execution of remaining bracket elements if necessary to prevent exposure. |
 | **`REAUTH`** | `201` (with token/client portal verification text) | Execution paused. Order kept in `Created`. Retry loop every 30m via What-If simulation. Telegram alert on each attempt. If market closes without reauth, transition to `Cancelled` and archive CSV as `.err`. |
-| **`FATAL`** | *All other codes* (default) | Halt order transmission. Mark status as `Error`. Alert administrator immediately via Telegram message (Critical notification). |
+| **`FATAL`** | `321` (when cause indicates Read-Only mode), *All other codes* (default) | Halt order transmission. Mark status as `Error`. Alert administrator immediately via Telegram message (Critical notification with restart button for Read-Only). |
 
 ---
 

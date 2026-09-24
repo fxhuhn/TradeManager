@@ -722,3 +722,90 @@ async def test_error_202_oca_sibling_unfilled_sends_alert(
 
     # Assert: Alarm MUSS gesendet werden
     mock_notifier.send_order_failed.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_read_only_error_broadcast_triggers_alert_and_debounces(
+    callbacks_manager: TwsCallbacksManager,
+    mock_notifier: MagicMock,
+) -> None:
+    """Verifiziert, dass Read-Only Fehler über on_error send_read_only_alert auslösen und entprellt werden."""
+    mock_notifier.send_read_only_alert = AsyncMock()
+
+    # Erster Broadcast-Fehler (z. B. aus Recovery-Loop oder TWS-Startup)
+    callbacks_manager.on_error(
+        -1,
+        321,
+        "Error validating request.-'cp' : cause - The API interface is currently in Read-Only mode.",
+    )
+    await asyncio.sleep(0.05)
+
+    mock_notifier.send_read_only_alert.assert_awaited_once()
+    assert (
+        "Read-Only mode" in mock_notifier.send_read_only_alert.call_args[1]["details"]
+    )
+
+    # Zweiter Aufruf innerhalb derselben Session: Keine erneute Meldung
+    callbacks_manager.on_error(
+        -1,
+        321,
+        "Error validating request.-'bZ' : cause - The API interface is currently in Read-Only mode.",
+    )
+    await asyncio.sleep(0.05)
+    mock_notifier.send_read_only_alert.assert_awaited_once()
+
+    # Reconnect setzt das Flag zurück
+    callbacks_manager.on_connected()
+    assert callbacks_manager._read_only_alerted is False
+
+    # Neuer Aufruf nach Reconnect löst erneut Alarm aus
+    callbacks_manager.on_error(
+        -1,
+        321,
+        "The API interface is currently in Read-Only mode.",
+    )
+    await asyncio.sleep(0.05)
+    assert mock_notifier.send_read_only_alert.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_read_only_error_with_order_id_fails_order(
+    callbacks_manager: TwsCallbacksManager,
+    in_memory_db: aiosqlite.Connection,
+    mock_notifier: MagicMock,
+) -> None:
+    """Verifiziert, dass ein Read-Only Fehler mit Order-ID die Order auf Error setzt."""
+    mock_notifier.send_read_only_alert = AsyncMock()
+    mock_notifier.send_order_failed = AsyncMock()
+
+    real_close = in_memory_db.close
+    in_memory_db.close = AsyncMock()
+
+    try:
+        await in_memory_db.execute(
+            """
+            INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status)
+            VALUES (4001, 'TG_RO_ORDER', 'U12345', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 10, 'MKT', NULL, 'Submitted')
+            """
+        )
+        await in_memory_db.commit()
+
+        callbacks_manager.on_error(
+            4001,
+            321,
+            "Error validating request.-'bC' : cause - The API interface is currently in Read-Only mode.",
+        )
+        await asyncio.sleep(0.05)
+
+        # Status in DB prüfen
+        async with in_memory_db.execute(
+            "SELECT status FROM orders WHERE order_id = 4001"
+        ) as cursor:
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row["status"] == "Error"
+
+        mock_notifier.send_read_only_alert.assert_awaited_once()
+        mock_notifier.send_order_failed.assert_awaited_once()
+    finally:
+        in_memory_db.close = real_close

@@ -3143,3 +3143,151 @@ async def test_loc_exit_order_cancel_triggers_anomaly_when_entry_was_filled(
         close_price=Decimal("194.23"),
         quantity=Decimal("35"),
     )
+
+
+@pytest.mark.asyncio
+async def test_update_order_status_db_order_not_found(
+    db: aiosqlite.Connection, mock_config: Config
+) -> None:
+    """Verifies that updating status for non-existent order returns False."""
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=MagicMock(),
+        notifier=MagicMock(),
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+    try:
+        updated = await manager._update_order_status_db(99999, "Submitted", 0)
+        assert updated is False
+    finally:
+        db.close = original_close
+
+
+@pytest.mark.asyncio
+async def test_has_sibling_exit_legs_standalone_db_and_error(
+    db: aiosqlite.Connection, mock_config: Config
+) -> None:
+    """Verifies _has_sibling_exit_legs handles db=None and db exceptions gracefully."""
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=MagicMock(),
+        notifier=MagicMock(),
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+    try:
+        # Call with db=None
+        has_siblings = await manager._has_sibling_exit_legs(12345, db=None)
+        assert has_siblings is False
+
+        # Simulate DB exception
+        broken_db = MagicMock()
+        broken_db.execute = MagicMock(side_effect=Exception("Database error"))
+        has_siblings_error = await manager._has_sibling_exit_legs(12345, db=broken_db)
+        assert has_siblings_error is False
+    finally:
+        db.close = original_close
+
+
+@pytest.mark.asyncio
+async def test_cancellation_and_error_suppressed_for_warning_399_and_duplicate(
+    db: aiosqlite.Connection, mock_config: Config
+) -> None:
+    """Verifies that cancellation and error alerts are suppressed for warning 399 or duplicate notifications."""
+    mock_notifier = MagicMock()
+    mock_notifier.send_order_failed = AsyncMock()
+
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=MagicMock(),
+        notifier=mock_notifier,
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+    try:
+        # 1. Warning 399 pre-market hold suppression for cancelled
+        manager._orders_with_warning_399.add(5001)
+        await manager._handle_cancelled_status(5001, reason="Order held pre-market")
+        mock_notifier.send_order_failed.assert_not_called()
+
+        # 2. Duplicate cancelled notification suppression
+        manager._notified_cancelled_order_ids.add(5002)
+        await manager._handle_cancelled_status(5002, reason="Normal cancel")
+        mock_notifier.send_order_failed.assert_not_called()
+
+        # 3. Warning 399 suppression for error
+        await manager._handle_error_status(5001, reason="Held pre-market")
+        mock_notifier.send_order_failed.assert_not_called()
+
+        # 4. Duplicate error suppression
+        manager._notified_cancelled_order_ids.add(5003)
+        await manager._handle_error_status(5003, reason="Error")
+        mock_notifier.send_order_failed.assert_not_called()
+    finally:
+        db.close = original_close
+
+
+@pytest.mark.asyncio
+async def test_on_error_records_pre_market_warning_and_ignores_broadcast_retriable(
+    db: aiosqlite.Connection, mock_config: Config
+) -> None:
+    """Verifies on_error records 399 warning and handles broadcast retriable errors without crashing."""
+    mock_notifier = MagicMock()
+    mock_retriable_cb = AsyncMock()
+
+    manager = TwsCallbacksManager(
+        db_factory=AsyncMock(),
+        interactive_brokers=MagicMock(),
+        notifier=mock_notifier,
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=mock_retriable_cb,
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    # 1. Error with code 399
+    manager.on_error(
+        request_id=777, error_code=399, error_string="Order held until market open"
+    )
+    assert 777 in manager._orders_with_warning_399
+
+    # 2. Retriable error with broadcast request_id <= 0
+    await manager._process_error(
+        request_id=-1,
+        error_code=1100,
+        error_string="Connectivity lost",
+        error_class=ErrorClass.RETRIABLE,
+    )
+    mock_retriable_cb.assert_not_called()
+
+    # 3. Trigger LOC verification with None order_row
+    manager._trigger_loc_verification_if_needed(888, None, "AAPL")

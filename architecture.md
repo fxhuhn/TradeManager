@@ -185,6 +185,8 @@ This section provides a detailed reference of all public classes and functions i
 - `get_next_temp_id` (Function): Queries DB to increment temporary execution sequence.
 
 ### 4.8 Module: `app.services.notifier`
+- `BracketOrderDict` (Class): TypedDict representing order details for bracket or OCA submissions.
+- `DailySummaryReport` (Class): Immutable parameter container encapsulating EOD summary metrics.
 - `build_tree_message` (Function): Formats standardized Telegram tree messages with box-drawing glyphs, strictly separating structure from content.
 - `AsyncTelegramRateLimiter` (Class): Implements message throttling for the Telegram API.
   - `wait` (Method)
@@ -204,6 +206,7 @@ This section provides a detailed reference of all public classes and functions i
   - `send_high_margin_usage_warning` (Method)
   - `send_unassigned_position_recovered` (Method)
   - `send_broker_connection_status` (Method)
+  - `send_read_only_alert` (Method)
   - `send_archived_error_alert` (Method)
   - `send_daily_summary` (Method)
 
@@ -221,6 +224,7 @@ This section provides a detailed reference of all public classes and functions i
   - `stop_polling` (Method): Signals the polling loop to stop.
 
 ### 4.11 Module: `app.trading.callbacks`
+- `UnassignedExecutionDetails` (Class): TypedDict encapsulating extracted contract and execution attributes of an unassigned fill.
 - `register_all` (Function/Method): Binds TwsCallbacksManager event handlers to TWS.
 - `on_connected` (Function/Method): Callback invoked when the socket connects to Gateway, resetting broker connection status to active.
 - `is_broker_connected` (Property): Indicates whether the WAN connection between TWS/Gateway and IBKR broker servers is active.
@@ -237,6 +241,7 @@ This section provides a detailed reference of all public classes and functions i
 ### 4.12 Module: `app.trading.error_codes`
 - `ErrorClass` (Class): Enumeration classifying IBKR error severity.
 - `classify_error_code` (Function): Categorizes error codes into actionable retry/fail classes.
+- `is_read_only_error` (Function): Evaluates whether a TWS error code or message indicates that the API interface is in Read-Only mode.
 - `is_reauthorization_error` (Function): Evaluates whether a TWS error code or message indicates a 2FA/token reauthorization requirement in the Client Portal.
 - `is_pre_market_hold_notice` (Function): Checks whether an error code, message or whyHeld indicates a pre-market order hold notice (399/2109).
 - `is_trade_pre_market_held` (Function): Evaluates whether an ib_async Trade is held pre-market without real fatal errors.
@@ -282,6 +287,8 @@ This section provides a detailed reference of all public classes and functions i
 - `calculate_settlement` (Function): Resolves net price, profit, and commissions.
 
 ### 4.18 Module: `app.trading.worker`
+- `WorkerExecutionContext` (Class): Immutable parameter container encapsulating database, TWS client, notifier, and configuration dependencies.
+- `execution_worker` (Function): Asynchronous background consumer service processing trade group placement requests from the queue.
 - `process_trade_group` (Function): Core worker loop evaluating a single trade group sequence.
 - `handle_reauthorization_wait` (Function): Pauses order execution upon a token/reauthorization requirement, performs periodic What-If probes, sends Telegram alerts, and cancels expired orders upon market close.
 

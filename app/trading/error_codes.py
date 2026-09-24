@@ -21,11 +21,34 @@ class ErrorClass(Enum):
     FATAL = auto()  # Schwerer Fehler, Order fehlgeschlagen
 
 
-def classify_error_code(code: int) -> ErrorClass:
+def is_read_only_error(error_code: int = 0, message: str = "") -> bool:
+    """Prüft, ob ein Fehlercode oder eine Nachricht auf den TWS/Gateway Read-Only Modus hinweist.
+
+    Erkennt TWS-Meldungen wie 'The API interface is currently in Read-Only mode'
+    oder 'API in Read-Only mode' (typischerweise in Verbindung mit TWS-Code 321).
+
+    Args:
+        error_code: Numerischer TWS-Fehlercode (optional).
+        message: Fehlertext von TWS/Gateway.
+
+    Returns:
+        True, wenn ein Read-Only-Zustand vorliegt, sonst False.
     """
-    Klassifiziert TWS-Fehlercodes in funktionale Reaktionsklassen.
+    clean_message = re.sub(
+        r"[ \t]+", " ", re.sub(r"(?i)<br\s*/?>", " ", message)
+    ).strip()
+    reason_upper = clean_message.upper()
+    return "READ-ONLY" in reason_upper or "READ ONLY" in reason_upper
+
+
+def classify_error_code(code: int, message: str = "") -> ErrorClass:
+    """Klassifiziert TWS-Fehlercodes in funktionale Reaktionsklassen.
+
     Reagiert gemäß Abschnitt 5 (Error-Code-Klassifikation).
     """
+    if is_read_only_error(code, message):
+        return ErrorClass.FATAL
+
     # 1. Informative Codes
     if code in (
         2100,

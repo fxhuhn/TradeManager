@@ -7,6 +7,7 @@ import pytest
 from app.services.notifier import (
     AsyncTelegramRateLimiter,
     TelegramNotifier,
+    _format_slippage_line,
     _strip_html,
     build_tree_message,
 )
@@ -867,3 +868,310 @@ async def test_answer_callback_query_inactive() -> None:
     notifier = TelegramNotifier(config)
     result = await notifier.answer_callback_query("query_123", "OK Text")
     assert result is True
+
+
+@pytest.mark.asyncio
+async def test_send_read_only_alert(mock_config: MagicMock) -> None:
+    """Verifiziert send_read_only_alert mit formatiertem Text und Inline-Keyboard."""
+    notifier = TelegramNotifier(mock_config)
+
+    with patch.object(notifier, "send_message", new_callable=AsyncMock) as mock_send:
+        mock_send.return_value = True
+        result = await notifier.send_read_only_alert(
+            details="The API interface is currently in Read-Only mode."
+        )
+
+        assert result is True
+        mock_send.assert_called_once()
+        message_arg = mock_send.call_args[0][0]
+        reply_markup = mock_send.call_args[1]["reply_markup"]
+
+        assert "READ-ONLY MODUS" in message_arg
+        assert "The API interface is currently in Read-Only mode." in message_arg
+        assert "inline_keyboard" in reply_markup
+        assert reply_markup["inline_keyboard"][0][0]["callback_data"] == "restart_ibkr"
+
+
+def test_build_tree_message_empty_valid_rows_returns_header_line_only() -> None:
+    """Verifies that build_tree_message returns only header_line when all rows are filtered out."""
+    # Arrange
+    rows = [None, ("", ""), ("  ", "  "), "   ", 12345]  # type: ignore[list-item]
+
+    # Act
+    result = build_tree_message("SYSTEM INFO", rows, emoji="ℹ️", context="main.py")
+
+    # Assert
+    assert result == "ℹ️ <b>SYSTEM INFO</b> | <code>main.py</code>"
+
+
+def test_build_tree_message_strips_existing_tree_and_bullet_prefixes() -> None:
+    """Verifies that build_tree_message cleans up existing prefixes like ├─, └─, •, and -."""
+    # Arrange
+    rows = [
+        "├─ Line One",
+        "└─ Line Two",
+        "• Bullet Three",
+        "- Dash Four",
+    ]
+
+    # Act
+    result = build_tree_message("PREFIX TEST", rows)
+
+    # Assert
+    assert result == (
+        "<b>PREFIX TEST</b>\n├─ Line One\n├─ Line Two\n├─ Bullet Three\n└─ Dash Four"
+    )
+
+
+def test_format_slippage_line_returns_empty_when_price_difference_is_zero() -> None:
+    """Verifies that _format_slippage_line returns an empty string when limit_price equals execution_price."""
+    # Arrange
+    limit = Decimal("150.00")
+    execution = Decimal("150.00")
+
+    # Act
+    slippage_text = _format_slippage_line(
+        limit, execution, action="BUY", sec_type="STK"
+    )
+
+    # Assert
+    assert slippage_text == ""
+
+
+@pytest.mark.asyncio
+async def test_send_message_plain_text_fallback_fails(mock_config: MagicMock) -> None:
+    """Verifies that send_message returns False when plain-text retry also fails with non-200."""
+    # Arrange
+    notifier = TelegramNotifier(mock_config)
+
+    # First response: 400 with "can't parse entities"
+    mock_first_response = AsyncMock()
+    mock_first_response.status = 400
+    mock_first_response.text = AsyncMock(
+        return_value="Bad Request: can't parse entities in message"
+    )
+
+    mock_first_post = MagicMock()
+    mock_first_post.__aenter__ = AsyncMock(return_value=mock_first_response)
+    mock_first_post.__aexit__ = AsyncMock(return_value=False)
+
+    # Second response (retry): 500 server error
+    mock_second_response = AsyncMock()
+    mock_second_response.status = 500
+    mock_second_response.text = AsyncMock(return_value="Internal Server Error")
+
+    mock_second_post = MagicMock()
+    mock_second_post.__aenter__ = AsyncMock(return_value=mock_second_response)
+    mock_second_post.__aexit__ = AsyncMock(return_value=False)
+
+    mock_session = MagicMock()
+    mock_session.post = MagicMock(side_effect=[mock_first_post, mock_second_post])
+
+    mock_client_session_context = MagicMock()
+    mock_client_session_context.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_client_session_context.__aexit__ = AsyncMock(return_value=False)
+
+    # Act
+    with (
+        patch("aiohttp.ClientSession", return_value=mock_client_session_context),
+        patch.object(notifier.limiter, "wait", new_callable=AsyncMock),
+    ):
+        result = await notifier.send_message(
+            "<b>Broken HTML", reply_markup={"inline_keyboard": []}
+        )
+
+    # Assert
+    assert result is False
+    assert mock_session.post.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_answer_callback_query_handles_non_200_status(
+    mock_config: MagicMock,
+) -> None:
+    """Verifies answer_callback_query returns False when status != 200."""
+    # Arrange
+    notifier = TelegramNotifier(mock_config)
+    mock_response = AsyncMock()
+    mock_response.status = 400
+
+    mock_post_context = MagicMock()
+    mock_post_context.__aenter__ = AsyncMock(return_value=mock_response)
+    mock_post_context.__aexit__ = AsyncMock(return_value=False)
+
+    mock_session = MagicMock()
+    mock_session.post = MagicMock(return_value=mock_post_context)
+
+    mock_client_session_context = MagicMock()
+    mock_client_session_context.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_client_session_context.__aexit__ = AsyncMock(return_value=False)
+
+    # Act
+    with patch("aiohttp.ClientSession", return_value=mock_client_session_context):
+        result = await notifier.answer_callback_query("query_err", "Some Error Text")
+
+    # Assert
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_answer_callback_query_handles_exception(mock_config: MagicMock) -> None:
+    """Verifies answer_callback_query catches exceptions and returns False."""
+    # Arrange
+    notifier = TelegramNotifier(mock_config)
+
+    # Act
+    with patch("aiohttp.ClientSession", side_effect=RuntimeError("Connection timeout")):
+        result = await notifier.answer_callback_query("query_exc", "Fail Text")
+
+    # Assert
+    assert result is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "action, expected_glyph", [("BUY", "🟢 BUY"), ("SELL", "🔴 SELL")]
+)
+async def test_send_loc_execution_anomaly(
+    mock_config: MagicMock, action: str, expected_glyph: str
+) -> None:
+    """Verifies send_loc_execution_anomaly formats anomaly warnings correctly for BUY and SELL."""
+    # Arrange
+    notifier = TelegramNotifier(mock_config)
+
+    with patch.object(notifier, "send_message", new_callable=AsyncMock) as mock_send:
+        mock_send.return_value = True
+
+        # Act
+        result = await notifier.send_loc_execution_anomaly(
+            order_id=4567,
+            symbol="MSFT",
+            action=action,
+            limit_price=Decimal("410.50"),
+            close_price=Decimal("409.00"),
+            quantity=Decimal("50"),
+        )
+
+        # Assert
+        assert result is True
+        mock_send.assert_called_once()
+        message_arg = mock_send.call_args[0][0]
+        assert "LOC ANOMALIE: NICHT AUSGEFÜHRT" in message_arg
+        assert "MSFT" in message_arg
+        assert expected_glyph in message_arg
+        assert "$ 410.50" in message_arg
+        assert "$ 409.00" in message_arg
+
+
+@pytest.mark.asyncio
+async def test_send_unassigned_position_recovered(mock_config: MagicMock) -> None:
+    """Verifies send_unassigned_position_recovered formats synchronization details."""
+    # Arrange
+    notifier = TelegramNotifier(mock_config)
+
+    with patch.object(notifier, "send_message", new_callable=AsyncMock) as mock_send:
+        mock_send.return_value = True
+
+        # Act
+        result = await notifier.send_unassigned_position_recovered(
+            symbol="NVDA",
+            quantity=Decimal("100"),
+            avg_cost=Decimal("120.50"),
+            account_id="U123456",
+        )
+
+        # Assert
+        assert result is True
+        mock_send.assert_called_once()
+        message_arg = mock_send.call_args[0][0]
+        assert "UNASSIGNED POSITION RECOVERED" in message_arg
+        assert "NVDA" in message_arg
+        assert "U123456" in message_arg
+        assert "$ 120.50" in message_arg
+
+
+@pytest.mark.asyncio
+async def test_send_archived_error_alert(mock_config: MagicMock) -> None:
+    """Verifies send_archived_error_alert formats archived error file alerts."""
+    # Arrange
+    notifier = TelegramNotifier(mock_config)
+
+    with patch.object(notifier, "send_message", new_callable=AsyncMock) as mock_send:
+        mock_send.return_value = True
+
+        # Act
+        result = await notifier.send_archived_error_alert(
+            file_name="orders_2026_09_24.csv.err",
+            details="Syntax error on line 4<br>Invalid order type",
+        )
+
+        # Assert
+        assert result is True
+        mock_send.assert_called_once()
+        message_arg = mock_send.call_args[0][0]
+        assert "ARCHIVIERTE FEHLERDATEI ENTDECKT" in message_arg
+        assert "orders_2026_09_24.csv.err" in message_arg
+        assert "Syntax error on line 4 Invalid order type" in message_arg
+
+
+@pytest.mark.asyncio
+async def test_send_daily_summary_with_equity_and_negative_pnl(
+    mock_config: MagicMock,
+) -> None:
+    """Verifies send_daily_summary formats equity, cushion, and negative PnL with red emoji."""
+    # Arrange
+    notifier = TelegramNotifier(mock_config)
+
+    with patch.object(notifier, "send_message", new_callable=AsyncMock) as mock_send:
+        mock_send.return_value = True
+
+        # Act
+        result = await notifier.send_daily_summary(
+            date_str="2026-09-24",
+            total_orders=5,
+            filled_orders=3,
+            cancelled_orders=2,
+            net_pnl=Decimal("-1250.75"),
+            commissions=Decimal("12.50"),
+            file_status="Erledigt",
+            equity=Decimal("250000.00"),
+            cushion_pct=Decimal("48.5"),
+        )
+
+        # Assert
+        assert result is True
+        mock_send.assert_called_once()
+        message_arg = mock_send.call_args[0][0]
+        assert "TAGESABSCHLUSS-BERICHT" in message_arg
+        assert "2026-09-24" in message_arg
+        assert "🔴" in message_arg
+        assert "$ -1,250.75" in message_arg
+        assert "Equity:</b> <code>$ 250,000.00</code> • Cushion: 48.5%" in message_arg
+
+
+@pytest.mark.asyncio
+async def test_send_daily_summary_without_equity(mock_config: MagicMock) -> None:
+    """Verifies send_daily_summary formats correctly when equity is omitted."""
+    # Arrange
+    notifier = TelegramNotifier(mock_config)
+
+    with patch.object(notifier, "send_message", new_callable=AsyncMock) as mock_send:
+        mock_send.return_value = True
+
+        # Act
+        result = await notifier.send_daily_summary(
+            date_str="2026-09-24",
+            total_orders=2,
+            filled_orders=2,
+            cancelled_orders=0,
+            net_pnl=Decimal("150.00"),
+            commissions=Decimal("2.00"),
+            file_status="Erledigt",
+        )
+
+        # Assert
+        assert result is True
+        mock_send.assert_called_once()
+        message_arg = mock_send.call_args[0][0]
+        assert "Equity" not in message_arg
+        assert "🟢" in message_arg
