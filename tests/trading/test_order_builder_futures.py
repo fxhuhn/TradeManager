@@ -396,3 +396,168 @@ def test_build_order_future_with_opg_defensively_corrected_to_day() -> None:
     ib_order = build_order(future_row)
 
     assert ib_order.tif == "DAY"
+
+
+def test_conditioned_future_order_after_hours_and_boundaries() -> None:
+    """Verifies that goodAfterTime and TimeConditions are omitted when current_time is past the thresholds."""
+    from ib_async import Order
+
+    from app.trading.order_builder import apply_conditioned_future_order
+
+    # 1. Past RTH close (15:30 Central) for LMT
+    late_time = datetime(2026, 9, 21, 15, 30, 0, tzinfo=CME_TIMEZONE)
+    lmt_row = OrderRow(
+        order_id=50,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG_LATE",
+        account_id="ACC1",
+        bracket_role="ENTRY",
+        symbol="MNQU6",
+        sec_type="FUT",
+        exchange="CME",
+        action="BUY",
+        quantity=1,
+        order_type="LMT",
+        target_price=Decimal("700.0"),
+        tif="DAY",
+        strategy_name="Strat",
+        status="Created",
+    )
+    late_order = Order()
+    apply_conditioned_future_order(late_order, lmt_row, "20260921", now=late_time)
+    assert late_order.goodAfterTime == ""
+    # Should only have price condition, no time condition
+    assert len(late_order.conditions) == 1
+    assert isinstance(late_order.conditions[0], PriceCondition)
+
+    # 2. LOC order right at 14:59:30 (past loc_activation, but before 15:00 close)
+    near_close = datetime(2026, 9, 21, 14, 59, 30, tzinfo=CME_TIMEZONE)
+    loc_row = OrderRow(
+        order_id=51,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG_LOC",
+        account_id="ACC1",
+        bracket_role="TP",
+        symbol="MNQU6",
+        sec_type="FUT",
+        exchange="CME",
+        action="SELL",
+        quantity=1,
+        order_type="LOC",
+        target_price=Decimal("710.0"),
+        tif="DAY",
+        strategy_name="Strat",
+        status="Created",
+    )
+    loc_order = Order()
+    apply_conditioned_future_order(loc_order, loc_row, "20260921", now=near_close)
+    assert loc_order.goodAfterTime == ""
+    assert any(isinstance(c, TimeCondition) for c in loc_order.conditions)
+
+    # 3. MKT order during regular hours (10:00 Central)
+    mid_day = datetime(2026, 9, 21, 10, 0, 0, tzinfo=CME_TIMEZONE)
+    mkt_row = OrderRow(
+        order_id=52,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG_MKT",
+        account_id="ACC1",
+        bracket_role="ENTRY",
+        symbol="MNQU6",
+        sec_type="FUT",
+        exchange="CME",
+        action="BUY",
+        quantity=1,
+        order_type="MKT",
+        target_price=None,
+        tif="DAY",
+        strategy_name="Strat",
+        status="Created",
+    )
+    mkt_order = Order()
+    apply_conditioned_future_order(mkt_order, mkt_row, "20260921", now=mid_day)
+    assert mkt_order.goodAfterTime == ""
+    assert len(mkt_order.conditions) == 0
+
+    # 4. Unknown future symbol with target price -> no price condition added
+    unknown_fut_row = OrderRow(
+        order_id=53,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG_UNK",
+        account_id="ACC1",
+        bracket_role="ENTRY",
+        symbol="CLZ6",
+        sec_type="FUT",
+        exchange="CME",
+        action="BUY",
+        quantity=1,
+        order_type="LMT",
+        target_price=Decimal("75.0"),
+        tif="DAY",
+        strategy_name="Strat",
+        status="Created",
+    )
+    unk_order = Order()
+    morning_time = datetime(2026, 9, 21, 8, 0, 0, tzinfo=CME_TIMEZONE)
+    apply_conditioned_future_order(
+        unk_order, unknown_fut_row, "20260921", now=morning_time
+    )
+    assert not any(isinstance(c, PriceCondition) for c in unk_order.conditions)
+
+
+def test_conditioned_future_order_price_condition_directions() -> None:
+    """Verifies isMore logic for BUY STP, BUY LMT, SELL SL, and SELL TP."""
+    from ib_async import Order
+
+    from app.trading.order_builder import apply_conditioned_future_order
+
+    morning_time = datetime(2026, 9, 21, 8, 0, 0, tzinfo=CME_TIMEZONE)
+
+    # BUY STP (Breakout): isMore == True
+    buy_stp = OrderRow(
+        order_id=60,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG_STP",
+        account_id="ACC1",
+        bracket_role="ENTRY",
+        symbol="MESZ6",
+        sec_type="FUT",
+        exchange="CME",
+        action="BUY",
+        quantity=1,
+        order_type="STP",
+        target_price=Decimal("500.0"),
+        tif="DAY",
+        strategy_name="Strat",
+        status="Created",
+    )
+    order_buy_stp = Order()
+    apply_conditioned_future_order(order_buy_stp, buy_stp, "20260921", now=morning_time)
+    assert order_buy_stp.conditions[0].isMore is True
+
+    # SELL SL: isMore == False
+    sell_sl = OrderRow(
+        order_id=61,
+        perm_id=None,
+        parent_id=60,
+        trade_group_id="TG_STP",
+        account_id="ACC1",
+        bracket_role="SL",
+        symbol="MESZ6",
+        sec_type="FUT",
+        exchange="CME",
+        action="SELL",
+        quantity=1,
+        order_type="STP",
+        target_price=Decimal("490.0"),
+        tif="DAY",
+        strategy_name="Strat",
+        status="Created",
+    )
+    order_sell_sl = Order()
+    apply_conditioned_future_order(order_sell_sl, sell_sl, "20260921", now=morning_time)
+    assert order_sell_sl.conditions[0].isMore is False

@@ -3291,3 +3291,67 @@ async def test_on_error_records_pre_market_warning_and_ignores_broadcast_retriab
 
     # 3. Trigger LOC verification with None order_row
     manager._trigger_loc_verification_if_needed(888, None, "AAPL")
+
+
+@pytest.mark.asyncio
+async def test_loc_verification_with_futures_contract(
+    db: aiosqlite.Connection, mock_config: Config
+) -> None:
+    """Verifies that LOC verification correctly identifies FUT sec_type and creates Future contract."""
+    from ib_async import Future
+
+    mock_ib = MagicMock()
+    mock_notifier = MagicMock()
+
+    manager = TwsCallbacksManager(
+        db_factory=AsyncMock(return_value=db),
+        interactive_brokers=mock_ib,
+        notifier=mock_notifier,
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    # Insert a future LOC order into SQLite
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, status)
+        VALUES (9991, 12345, NULL, 'TG_FUT_LOC', 'U19605236', 'ENTRY', 'MNQU6', 'FUT', 'CME', 'BUY', 1, 'LOC', 700.0, 'DAY', 'PreSubmitted')
+        """
+    )
+    await db.commit()
+
+    # 1. Verify _fetch_cancellation_context fetches sec_type and exchange
+    (
+        order_row,
+        has_filled_sibling,
+        has_siblings,
+    ) = await manager._fetch_cancellation_context(9991, db)
+    assert order_row is not None
+    assert order_row["sec_type"] == "FUT"
+    assert order_row["exchange"] == "CME"
+    assert order_row["symbol"] == "MNQU6"
+
+    # 2. Verify _fetch_loc_closing_bar requests historical data using a Future contract
+    mock_bar = MagicMock()
+    mock_bar.date = "20260708"
+    mock_ib.reqHistoricalDataAsync = AsyncMock(return_value=[mock_bar])
+    with (
+        patch("asyncio.sleep", AsyncMock()),
+        patch.object(manager, "_is_bar_from_today", return_value=True),
+    ):
+        result_bar = await manager._fetch_loc_closing_bar(
+            symbol="MNQU6",
+            order_id=9991,
+            sec_type="FUT",
+            exchange="CME",
+        )
+    assert result_bar is mock_bar
+    mock_ib.reqHistoricalDataAsync.assert_called_once()
+    called_contract = mock_ib.reqHistoricalDataAsync.call_args.kwargs["contract"]
+    assert isinstance(called_contract, Future)
+    assert called_contract.localSymbol == "MNQU6"
+    assert called_contract.exchange == "CME"
+    assert called_contract.currency == "USD"

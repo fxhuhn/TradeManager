@@ -37,7 +37,7 @@ from app.trading.error_codes import (
 )
 from app.trading.order_builder import (
     is_past_loc_gtd_cutoff,
-    make_stock_contract,
+    make_contract_by_type,
     symbols_match,
 )
 
@@ -690,7 +690,7 @@ class TwsCallbacksManager:
     ) -> tuple[aiosqlite.Row | None, bool, bool]:
         """Lädt Order-Attribute, markiert ggf. als storniert und prüft Geschwister-Exit-Orders."""
         query = """
-            SELECT symbol, bracket_role, action, quantity, order_type, target_price, trade_group_id
+            SELECT symbol, bracket_role, action, quantity, order_type, target_price, trade_group_id, sec_type, exchange
             FROM orders
             WHERE order_id = ?
         """
@@ -1492,6 +1492,16 @@ class TwsCallbacksManager:
         bracket_role = (
             order_row["bracket_role"] if "bracket_role" in order_row.keys() else None
         )
+        sec_type = (
+            order_row["sec_type"]
+            if "sec_type" in order_row.keys() and order_row["sec_type"]
+            else "STK"
+        )
+        exchange = (
+            order_row["exchange"]
+            if "exchange" in order_row.keys() and order_row["exchange"]
+            else "SMART"
+        )
 
         if not is_loc_anomaly_check_warranted(
             order_type=order_type,
@@ -1518,6 +1528,8 @@ class TwsCallbacksManager:
                 action=order_row["action"],
                 limit_price=Decimal(str(order_row["target_price"])),
                 quantity=Decimal(str(order_row["quantity"])),
+                sec_type=sec_type,
+                exchange=exchange,
             )
         )
 
@@ -1598,10 +1610,18 @@ class TwsCallbacksManager:
         return False
 
     async def _fetch_loc_closing_bar(
-        self, symbol: str, order_id: int
+        self,
+        symbol: str,
+        order_id: int,
+        sec_type: str = "STK",
+        exchange: str = "SMART",
     ) -> BarData | None:
         """Fragt die täglichen historischen Bars ab und validiert das heutige Datum."""
-        contract = make_stock_contract(symbol)
+        contract = make_contract_by_type(
+            symbol=symbol,
+            sec_type=sec_type,
+            exchange=exchange,
+        )
 
         # Kurz warten, bis IBKR-Server den Schlusskurs finalisiert haben
         await asyncio.sleep(5)
@@ -1657,6 +1677,8 @@ class TwsCallbacksManager:
         action: str,
         limit_price: Decimal,
         quantity: Decimal,
+        sec_type: str = "STK",
+        exchange: str = "SMART",
     ) -> None:
         """Prüft nach Marktschluss, ob der Schlusskurs den Limitpreis einer stornierten LOC-Order erreicht hat."""
         if not self._is_near_or_after_market_close(symbol):
@@ -1676,7 +1698,12 @@ class TwsCallbacksManager:
         )
 
         try:
-            last_bar = await self._fetch_loc_closing_bar(symbol, order_id)
+            last_bar = await self._fetch_loc_closing_bar(
+                symbol=symbol,
+                order_id=order_id,
+                sec_type=sec_type,
+                exchange=exchange,
+            )
             if not last_bar:
                 return
 

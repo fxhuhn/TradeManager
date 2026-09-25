@@ -48,6 +48,27 @@ FUTURE_TO_ETF_PREFIX: Final[dict[str, str]] = {
 
 CME_TIMEZONE: Final[ZoneInfo] = ZoneInfo("America/Chicago")
 
+_CME_RTH_CLOSE_HOUR: Final[int] = 15
+_CME_RTH_CLOSE_MINUTE: Final[int] = 0
+
+_CME_LOC_ACTIVATION_HOUR: Final[int] = 14
+_CME_LOC_ACTIVATION_MINUTE: Final[int] = 59
+
+_CME_RTH_OPEN_HOUR: Final[int] = 8
+_CME_RTH_OPEN_MINUTE: Final[int] = 30
+
+_US_GTD_CUTOFF_HOUR: Final[int] = 15
+_US_GTD_CUTOFF_MINUTE: Final[int] = 48
+
+_XETRA_GTD_CUTOFF_HOUR: Final[int] = 17
+_XETRA_GTD_CUTOFF_MINUTE: Final[int] = 18
+
+_PRICE_TRIGGER_METHOD_LAST: Final[int] = 2
+
+_OCA_TYPE_CANCEL_ALL: Final[int] = 1
+_OCA_TYPE_REDUCE_WITH_NO_BLOCK: Final[int] = 3
+_OCA_GROUP_VERSION_SUFFIX: Final[str] = "_v4"
+
 
 def normalize_symbol(symbol: str) -> str:
     """Normalisiert ein Aktiensymbol durch Entfernung von Börsensuffixen
@@ -130,15 +151,39 @@ def make_future_contract(
     )
 
 
+def make_contract_by_type(
+    symbol: str,
+    sec_type: str = "STK",
+    exchange: str = "SMART",
+    currency: str = "USD",
+) -> Contract:
+    """Erstellt ein passendes Contract-Objekt (Stock oder Future) anhand von sec_type und Symbol.
+
+    Args:
+        symbol: Ticker-Symbol oder Future LocalSymbol (z. B. 'AAPL', 'MNQU6').
+        sec_type: Wertpapiertyp ('STK' oder 'FUT').
+        exchange: Zielbörse (z. B. 'SMART' oder 'CME').
+        currency: Kontraktwährung (Standard: 'USD').
+
+    Returns:
+        Ein konfiguriertes Stock- oder Future-Objekt für die IBKR API.
+    """
+    if (sec_type or "STK").upper() == "FUT":
+        return make_future_contract(
+            symbol=symbol,
+            exchange=exchange or "CME",
+            currency=currency,
+        )
+    return make_stock_contract(symbol)
+
+
 def make_contract_for_order(order_row: OrderRow) -> Contract:
     """Erstellt ein passendes Contract-Objekt (Stock oder Future) für die gegebene OrderRow."""
-    if order_row.sec_type == "FUT":
-        return make_future_contract(
-            symbol=order_row.symbol,
-            exchange=order_row.exchange or "CME",
-            currency="USD",
-        )
-    return make_stock_contract(order_row.symbol)
+    return make_contract_by_type(
+        symbol=order_row.symbol,
+        sec_type=order_row.sec_type,
+        exchange=order_row.exchange,
+    )
 
 
 # Xetra tick-size table: (lower_bound, tick_size)
@@ -208,6 +253,107 @@ def round_to_tick(price: Decimal | float, tick_size: Decimal | float) -> Decimal
     ) * tick_decimal
 
 
+def _build_future_time_window(
+    raw_order_type: str,
+    today_string: str,
+    current_time: datetime,
+) -> tuple[str | None, TimeCondition | None]:
+    """Ermittelt goodAfterTime und TimeCondition für eine CME-Future-Order.
+
+    WICHTIG: goodAfterTime darf NUR gesetzt werden, wenn der Zeitpunkt in der Zukunft liegt!
+    Liegt der Zeitpunkt in der Vergangenheit, lehnt IBKR die Order mit Error 201 'Invalid effective time' ab.
+    """
+    good_after_time: str | None = None
+    time_condition: TimeCondition | None = None
+    rth_close = current_time.replace(
+        hour=_CME_RTH_CLOSE_HOUR,
+        minute=_CME_RTH_CLOSE_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+
+    if raw_order_type in ("LOC", "MOC"):
+        loc_activation = current_time.replace(
+            hour=_CME_LOC_ACTIVATION_HOUR,
+            minute=_CME_LOC_ACTIVATION_MINUTE,
+            second=0,
+            microsecond=0,
+        )
+        if current_time < loc_activation:
+            good_after_time = f"{today_string} 14:59:00 US/Central"
+
+        if current_time < rth_close:
+            time_condition = TimeCondition()
+            time_condition.isMore = False  # Gültig bis zum Ende der RTH (15:00 Central)
+            time_condition.time = f"{today_string} 15:00:00 US/Central"
+            time_condition.conjunction = "a"
+    elif raw_order_type in ("LMT", "STP"):
+        rth_open = current_time.replace(
+            hour=_CME_RTH_OPEN_HOUR,
+            minute=_CME_RTH_OPEN_MINUTE,
+            second=0,
+            microsecond=0,
+        )
+        if current_time < rth_open:
+            good_after_time = f"{today_string} 08:30:00 US/Central"
+
+        if current_time < rth_close:
+            time_condition = TimeCondition()
+            time_condition.isMore = False  # Gültig bis zum Ende der RTH (15:00 Central)
+            time_condition.time = f"{today_string} 15:00:00 US/Central"
+            time_condition.conjunction = "a"
+    elif raw_order_type == "MKT":
+        rth_open = current_time.replace(
+            hour=_CME_RTH_OPEN_HOUR,
+            minute=_CME_RTH_OPEN_MINUTE,
+            second=0,
+            microsecond=0,
+        )
+        if current_time < rth_open:
+            good_after_time = f"{today_string} 08:30:00 US/Central"
+
+    return good_after_time, time_condition
+
+
+def _build_future_price_condition(
+    order_row: OrderRow,
+    raw_order_type: str,
+) -> PriceCondition | None:
+    """Erstellt eine PriceCondition auf den Basiswert-ETF für eine CME-Future-Order."""
+    if order_row.target_price is None or raw_order_type not in ("LMT", "LOC", "STP"):
+        return None
+
+    etf_info = get_underlying_etf_info(order_row.symbol)
+    if etf_info is None:
+        logger.warning(
+            "Kein Basiswert-ETF für Future-Symbol gefunden. Keine Preiskondition gesetzt.",
+            symbol=order_row.symbol,
+        )
+        return None
+
+    _, con_id = etf_info
+    price_cond = PriceCondition()
+    price_cond.conId = con_id
+    price_cond.exch = "SMART"
+    price_cond.price = float(order_row.target_price)
+    price_cond.triggerMethod = _PRICE_TRIGGER_METHOD_LAST
+    price_cond.conjunction = "a"
+
+    # Trigger-Richtung (isMore):
+    # Bei BUY (LMT/LOC): Kaufen, wenn Kurs fällt auf/unter Ziel (isMore = False)
+    # Bei BUY STP (Breakout): Kaufen, wenn Kurs steigt auf/über Stop (isMore = True)
+    # Bei SELL TP/EXIT: Verkaufen, wenn Kurs steigt auf/über Ziel (isMore = True)
+    # Bei SELL SL: Verkaufen, wenn Kurs fällt auf/unter Stop (isMore = False)
+    if order_row.action.upper() == "BUY":
+        price_cond.isMore = raw_order_type == "STP"
+    else:  # SELL
+        price_cond.isMore = (
+            order_row.bracket_role not in ("SL",) and raw_order_type != "STP"
+        )
+
+    return price_cond
+
+
 def apply_conditioned_future_order(
     order: Order,
     order_row: OrderRow,
@@ -226,102 +372,27 @@ def apply_conditioned_future_order(
     order.conditionsCancelOrder = False
 
     raw_order_type = order_row.order_type.upper() if order_row.order_type else "MKT"
-    conditions: list[OrderCondition] = []
     current_time = now if now is not None else datetime.now(CME_TIMEZONE)
 
-    # 1. Handelszeitfenster festlegen (goodAfterTime & TimeCondition)
-    # WICHTIG: goodAfterTime darf NUR gesetzt werden, wenn der Zeitpunkt in der Zukunft liegt!
-    # Liegt der Zeitpunkt in der Vergangenheit, lehnt IBKR die Order mit Error 201 'Invalid effective time' ab.
-    rth_close = current_time.replace(hour=15, minute=0, second=0, microsecond=0)
-    if raw_order_type in ("LOC", "MOC"):
-        # Schlussauktion: Aktivierung 1 Minute vor US-RTH-Close (14:59 Central / 15:59 Eastern)
-        loc_activation = current_time.replace(
-            hour=14, minute=59, second=0, microsecond=0
-        )
-        if current_time < loc_activation:
-            order.goodAfterTime = f"{today_string} 14:59:00 US/Central"
+    good_after_time, time_condition = _build_future_time_window(
+        raw_order_type, today_string, current_time
+    )
+    if good_after_time:
+        order.goodAfterTime = good_after_time
 
-        if current_time < rth_close:
-            time_cond = TimeCondition()
-            time_cond.isMore = False  # Gültig bis zum Ende der RTH (15:00 Central)
-            time_cond.time = f"{today_string} 15:00:00 US/Central"
-            time_cond.conjunction = "a"
-            conditions.append(time_cond)
-    elif raw_order_type in ("LMT", "STP"):
-        # Intraday-Limit: Aktivierung zur Markteröffnung (08:30 Central / 09:30 Eastern)
-        rth_open = current_time.replace(hour=8, minute=30, second=0, microsecond=0)
-        if current_time < rth_open:
-            order.goodAfterTime = f"{today_string} 08:30:00 US/Central"
-
-        if current_time < rth_close:
-            time_cond = TimeCondition()
-            time_cond.isMore = False  # Gültig bis zum Ende der RTH (15:00 Central)
-            time_cond.time = f"{today_string} 15:00:00 US/Central"
-            time_cond.conjunction = "a"
-            conditions.append(time_cond)
-    elif raw_order_type == "MKT":
-        # Reguläre Market-Eröffnung
-        rth_open = current_time.replace(hour=8, minute=30, second=0, microsecond=0)
-        if current_time < rth_open:
-            order.goodAfterTime = f"{today_string} 08:30:00 US/Central"
-
-    # 2. Preistrigger auf Basiswert-ETF definieren (falls target_price vorhanden)
-    if order_row.target_price is not None and raw_order_type in ("LMT", "LOC", "STP"):
-        etf_info = get_underlying_etf_info(order_row.symbol)
-        if etf_info is not None:
-            _, con_id = etf_info
-            price_cond = PriceCondition()
-            price_cond.conId = con_id
-            price_cond.exch = "SMART"
-            price_cond.price = float(order_row.target_price)
-            price_cond.triggerMethod = 2  # Last Price
-            price_cond.conjunction = "a"
-
-            # Trigger-Richtung (isMore):
-            # Bei BUY (LMT/LOC): Kaufen, wenn Kurs fällt auf/unter Ziel (isMore = False)
-            # Bei BUY STP (Breakout): Kaufen, wenn Kurs steigt auf/über Stop (isMore = True)
-            # Bei SELL TP/EXIT: Verkaufen, wenn Kurs steigt auf/über Ziel (isMore = True)
-            # Bei SELL SL: Verkaufen, wenn Kurs fällt auf/unter Stop (isMore = False)
-            if order_row.action.upper() == "BUY":
-                price_cond.isMore = raw_order_type == "STP"
-            else:  # SELL
-                price_cond.isMore = (
-                    order_row.bracket_role not in ("SL",) and raw_order_type != "STP"
-                )
-
-            # Preiskondition vor TimeCondition einfügen
-            conditions.insert(0, price_cond)
-        else:
-            logger.warning(
-                "Kein Basiswert-ETF für Future-Symbol gefunden. Keine Preiskondition gesetzt.",
-                symbol=order_row.symbol,
-            )
+    conditions: list[OrderCondition] = []
+    price_condition = _build_future_price_condition(order_row, raw_order_type)
+    if price_condition is not None:
+        conditions.append(price_condition)
+    if time_condition is not None:
+        conditions.append(time_condition)
 
     order.conditions = conditions
 
 
-def build_order(order_row: OrderRow, now: datetime | None = None) -> Order:
-    """
-    Konstruiert ein ib_async Order-Objekt aus den DB-Orderzeilen.
-    Berücksichtigt Order-Typen und OCA-Konfigurationen für Stop-Loss (SL) und Take-Profit (TP).
-    """
-    order = Order()
-    order.orderId = order_row.order_id
-    order.action = order_row.action.upper()
-    order.totalQuantity = float(order_row.quantity)
-    order.orderType = order_row.order_type.upper()
-    order.tif = order_row.tif.upper() if order_row.tif else "GTC"
-
-    # Strategie-Name im Order Reference-Feld fuer TWS hinterlegen
-    if order_row.strategy_name:
-        order.orderRef = order_row.strategy_name
-
-    # Future-Orders: Universelle Behandlung via CME Globex MKT + ETF Conditions
-    if order_row.sec_type == "FUT":
-        ref_time = now if now is not None else datetime.now(CME_TIMEZONE)
-        today_string = ref_time.strftime("%Y%m%d")
-        apply_conditioned_future_order(order, order_row, today_string, now=ref_time)
-    elif order.orderType in ("LMT", "LOC"):
+def _configure_order_prices(order: Order, order_row: OrderRow) -> None:
+    """Weist der Order je nach Order-Typ die tick-gerundeten Preise zu."""
+    if order.orderType in ("LMT", "LOC"):
         # Standard Aktien/ETF-Orders (sec_type == "STK")
         # Runden auf die minimale Tick-Größe des Zielmarkts
         target_price = order_row.target_price or Decimal("0.0")
@@ -342,28 +413,58 @@ def build_order(order_row: OrderRow, now: datetime | None = None) -> Order:
             order_type=order.orderType,
         )
 
-    # Defensive Härtung für alle Futures: CME Globex unterstützt kein OPG
-    if order_row.sec_type == "FUT" and order.tif == "OPG":
-        logger.warning(
-            "TIF 'OPG' ist für Futures unzulässig. Wird automatisch auf 'DAY' korrigiert.",
-            symbol=order_row.symbol,
-            order_id=order_row.order_id,
-        )
-        order.tif = "DAY"
 
-    # OCA (One-Cancels-All) Gruppe konfigurieren für SL, TP und EXIT
-    if order_row.bracket_role in ("SL", "TP", "EXIT"):
-        # Alle Legs derselben trade_group_id tragen denselben OCA-String.
-        # Wir haengen _v4 an, um Probleme mit dem TWS Session-Memory zu umgehen.
-        order.ocaGroup = f"OCA_{order_row.trade_group_id}_v4"
+def _configure_oca_group(order: Order, order_row: OrderRow) -> None:
+    """Konfiguriert die OCA-Gruppe (One-Cancels-All) für Stop-Loss, Take-Profit und Exits."""
+    if order_row.bracket_role not in ("SL", "TP", "EXIT"):
+        return
 
-        # LOC und MOC Orders duerfen laut IBKR nur mit ocaType = 3 (reduce with no block) in einer OCA Gruppe sein.
-        # Auch bei EXIT-Orders nutzen wir ocaType = 3, da sie standardmaessig aus LMT + LOC Exits bestehen.
-        if order.orderType in ("LOC", "MOC") or order_row.bracket_role == "EXIT":
-            order.ocaType = 3
-        else:
-            order.ocaType = 1
+    # Alle Legs derselben trade_group_id tragen denselben OCA-String.
+    # Wir hängen _v4 an, um Probleme mit dem TWS Session-Memory zu umgehen.
+    order.ocaGroup = f"OCA_{order_row.trade_group_id}{_OCA_GROUP_VERSION_SUFFIX}"
 
+    # LOC und MOC Orders dürfen laut IBKR nur mit ocaType = 3 (reduce with no block) in einer OCA Gruppe sein.
+    # Auch bei EXIT-Orders nutzen wir ocaType = 3, da sie standardmässig aus LMT + LOC Exits bestehen.
+    if order.orderType in ("LOC", "MOC") or order_row.bracket_role == "EXIT":
+        order.ocaType = _OCA_TYPE_REDUCE_WITH_NO_BLOCK
+    else:
+        order.ocaType = _OCA_TYPE_CANCEL_ALL
+
+
+def build_order(order_row: OrderRow, now: datetime | None = None) -> Order:
+    """Konstruiert ein ib_async Order-Objekt aus den DB-Orderzeilen.
+
+    Berücksichtigt Order-Typen und OCA-Konfigurationen für Stop-Loss (SL) und Take-Profit (TP).
+    """
+    order = Order()
+    order.orderId = order_row.order_id
+    order.action = order_row.action.upper()
+    order.totalQuantity = float(order_row.quantity)
+    order.orderType = order_row.order_type.upper()
+    order.tif = order_row.tif.upper() if order_row.tif else "GTC"
+
+    # Strategie-Name im Order Reference-Feld für TWS hinterlegen
+    if order_row.strategy_name:
+        order.orderRef = order_row.strategy_name
+
+    # Future-Orders: Universelle Behandlung via CME Globex MKT + ETF Conditions
+    if order_row.sec_type == "FUT":
+        ref_time = now if now is not None else datetime.now(CME_TIMEZONE)
+        today_string = ref_time.strftime("%Y%m%d")
+        apply_conditioned_future_order(order, order_row, today_string, now=ref_time)
+
+        # Defensive Härtung für alle Futures: CME Globex unterstützt kein OPG
+        if (order_row.tif or "").upper() == "OPG":
+            logger.warning(
+                "TIF 'OPG' ist für Futures unzulässig. Wird automatisch auf 'DAY' korrigiert.",
+                symbol=order_row.symbol,
+                order_id=order_row.order_id,
+            )
+            order.tif = "DAY"
+    else:
+        _configure_order_prices(order, order_row)
+
+    _configure_oca_group(order, order_row)
     return order
 
 
@@ -414,6 +515,46 @@ def should_apply_loc_gtd(child: OrderRow, sibling_orders: Sequence[OrderRow]) ->
     )
 
 
+def _calculate_loc_gtd_cutoff_datetime(
+    symbol: str, reference_time: datetime | None = None
+) -> tuple[datetime, datetime, str]:
+    """Berechnet den GTD-Cutoff-Zeitpunkt sowie den aktuellen Referenzzeitpunkt in der Zielzeitzone.
+
+    Args:
+        symbol: Das Ticker-Symbol des Wertpapiers.
+        reference_time: Optionaler Referenzzeitpunkt (für Tests). Falls None, wird die aktuelle Zeit verwendet.
+
+    Returns:
+        Ein Tupel aus (now_in_target_tz, cutoff_datetime, timezone_name).
+    """
+    symbol_upper = symbol.strip().upper()
+    if symbol_upper.endswith(".DE"):
+        target_timezone = ZoneInfo("Europe/Berlin")
+        cutoff_hour = _XETRA_GTD_CUTOFF_HOUR
+        cutoff_minute = _XETRA_GTD_CUTOFF_MINUTE
+        timezone_name = "Europe/Berlin"
+    else:
+        target_timezone = ZoneInfo("America/New_York")
+        cutoff_hour = _US_GTD_CUTOFF_HOUR
+        cutoff_minute = _US_GTD_CUTOFF_MINUTE
+        timezone_name = "US/Eastern"
+
+    if reference_time is None:
+        now_in_target_tz = datetime.now(target_timezone)
+    elif reference_time.tzinfo is None:
+        now_in_target_tz = reference_time.replace(tzinfo=target_timezone)
+    else:
+        now_in_target_tz = reference_time.astimezone(target_timezone)
+
+    cutoff_datetime = now_in_target_tz.replace(
+        hour=cutoff_hour,
+        minute=cutoff_minute,
+        second=0,
+        microsecond=0,
+    )
+    return now_in_target_tz, cutoff_datetime, timezone_name
+
+
 def compute_loc_gtd_cutoff(symbol: str, reference_time: datetime | None = None) -> str:
     """Berechnet den Good-Till-Date (GTD) Verfallszeitpunkt für Limit-Exit-Orders.
 
@@ -430,30 +571,8 @@ def compute_loc_gtd_cutoff(symbol: str, reference_time: datetime | None = None) 
     Returns:
         Formatierter TWS API GTD-String: 'YYYYMMDD HH:mm:ss {TZ}' (z. B. '20260910 15:48:00 US/Eastern').
     """
-    symbol_upper = symbol.strip().upper()
-    if symbol_upper.endswith(".DE"):
-        target_timezone = ZoneInfo("Europe/Berlin")
-        cutoff_hour = 17
-        cutoff_minute = 18
-        timezone_name = "Europe/Berlin"
-    else:
-        target_timezone = ZoneInfo("America/New_York")
-        cutoff_hour = 15
-        cutoff_minute = 48
-        timezone_name = "US/Eastern"
-
-    if reference_time is None:
-        now_in_target_tz = datetime.now(target_timezone)
-    elif reference_time.tzinfo is None:
-        now_in_target_tz = reference_time.replace(tzinfo=target_timezone)
-    else:
-        now_in_target_tz = reference_time.astimezone(target_timezone)
-
-    cutoff_datetime = now_in_target_tz.replace(
-        hour=cutoff_hour,
-        minute=cutoff_minute,
-        second=0,
-        microsecond=0,
+    _, cutoff_datetime, timezone_name = _calculate_loc_gtd_cutoff_datetime(
+        symbol, reference_time
     )
     return f"{cutoff_datetime.strftime('%Y%m%d %H:%M:%S')} {timezone_name}"
 
@@ -468,27 +587,7 @@ def is_past_loc_gtd_cutoff(symbol: str, current_time: datetime | None = None) ->
     Returns:
         True, wenn der aktuelle Zeitpunkt gleich oder nach dem GTD-Cutoff liegt.
     """
-    symbol_upper = symbol.strip().upper()
-    if symbol_upper.endswith(".DE"):
-        target_timezone = ZoneInfo("Europe/Berlin")
-        cutoff_hour = 17
-        cutoff_minute = 18
-    else:
-        target_timezone = ZoneInfo("America/New_York")
-        cutoff_hour = 15
-        cutoff_minute = 48
-
-    if current_time is None:
-        now_in_target_tz = datetime.now(target_timezone)
-    elif current_time.tzinfo is None:
-        now_in_target_tz = current_time.replace(tzinfo=target_timezone)
-    else:
-        now_in_target_tz = current_time.astimezone(target_timezone)
-
-    cutoff_datetime = now_in_target_tz.replace(
-        hour=cutoff_hour,
-        minute=cutoff_minute,
-        second=0,
-        microsecond=0,
+    now_in_target_tz, cutoff_datetime, _ = _calculate_loc_gtd_cutoff_datetime(
+        symbol, current_time
     )
     return now_in_target_tz >= cutoff_datetime

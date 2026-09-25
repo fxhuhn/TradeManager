@@ -10,6 +10,8 @@ from app.core.models import OrderRow
 from app.trading.order_builder import (
     build_order,
     get_tick_size,
+    make_contract_by_type,
+    make_contract_for_order,
     make_stock_contract,
     normalize_symbol,
     round_to_tick,
@@ -444,3 +446,150 @@ def test_build_order_mkt_moc_and_extract_none() -> None:
     # LMT order with lmtPrice = 0.0 returns None
     lmt_zero = Order(orderType="LMT", lmtPrice=0.0)
     assert extract_transmitted_price(lmt_zero) is None
+
+
+def test_make_contract_by_type_stock() -> None:
+    """Verifies that make_contract_by_type constructs Stock contract for STK sec_type."""
+    from ib_async import Stock
+
+    contract = make_contract_by_type("AAPL", sec_type="STK", exchange="SMART")
+    assert isinstance(contract, Stock)
+    assert contract.symbol == "AAPL"
+    assert contract.exchange == "SMART"
+    assert contract.currency == "USD"
+
+
+def test_make_contract_by_type_german_stock() -> None:
+    """Verifies that make_contract_by_type constructs Stock contract with IBIS2 for .DE ticker."""
+    from ib_async import Stock
+
+    contract = make_contract_by_type("SAP.DE", sec_type="STK", exchange="SMART")
+    assert isinstance(contract, Stock)
+    assert contract.symbol == "SAP"
+    assert contract.exchange == "SMART"
+    assert contract.currency == "EUR"
+    assert contract.primaryExchange == "IBIS2"
+
+
+def test_make_contract_by_type_future() -> None:
+    """Verifies that make_contract_by_type constructs Future contract for FUT sec_type."""
+    from ib_async import Future
+
+    contract = make_contract_by_type("MNQU6", sec_type="FUT", exchange="CME")
+    assert isinstance(contract, Future)
+    assert contract.localSymbol == "MNQU6"
+    assert contract.exchange == "CME"
+    assert contract.currency == "USD"
+
+
+def test_make_contract_for_order_delegates_to_make_contract_by_type() -> None:
+    """Verifies that make_contract_for_order delegates correctly for STK and FUT."""
+    from ib_async import Future, Stock
+
+    stk_order = OrderRow(
+        order_id=1,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG1",
+        account_id="A1",
+        bracket_role="ENTRY",
+        symbol="MSFT",
+        sec_type="STK",
+        exchange="SMART",
+        action="BUY",
+        quantity=5,
+        order_type="MKT",
+        target_price=None,
+        tif="DAY",
+        strategy_name="Strat",
+        status="Created",
+    )
+    fut_order = OrderRow(
+        order_id=2,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG2",
+        account_id="A1",
+        bracket_role="ENTRY",
+        symbol="MNQZ6",
+        sec_type="FUT",
+        exchange="CME",
+        action="BUY",
+        quantity=1,
+        order_type="MKT",
+        target_price=None,
+        tif="DAY",
+        strategy_name="Strat",
+        status="Created",
+    )
+    stk_contract = make_contract_for_order(stk_order)
+    fut_contract = make_contract_for_order(fut_order)
+    assert isinstance(stk_contract, Stock)
+    assert stk_contract.symbol == "MSFT"
+    assert isinstance(fut_contract, Future)
+    assert fut_contract.localSymbol == "MNQZ6"
+    assert fut_contract.exchange == "CME"
+
+
+def test_get_tick_size_futures_explicit_and_by_prefix() -> None:
+    """Verifies that get_tick_size returns 0.25 for FUT sec_type and CME futures prefixes."""
+    assert get_tick_size("UNKNOWN", Decimal("100.0"), sec_type="FUT") == Decimal("0.25")
+    assert get_tick_size("MNQU6", Decimal("100.0"), sec_type="STK") == Decimal("0.25")
+    assert get_tick_size("MESZ6", Decimal("100.0")) == Decimal("0.25")
+    assert get_tick_size("M2KZ6", Decimal("100.0")) == Decimal("0.25")
+    assert get_tick_size("MYMZ6", Decimal("100.0")) == Decimal("0.25")
+
+
+def test_get_tick_size_xetra_below_lowest_table_bound() -> None:
+    """Verifies that get_tick_size returns minimum tick size for German stocks below 1.0."""
+    assert get_tick_size("PENNY.DE", Decimal("0.50")) == Decimal("0.0001")
+    assert get_tick_size("PENNY.DE", 0.10) == Decimal("0.0001")
+
+
+def test_extract_transmitted_price_various_order_types() -> None:
+    """Verifies extract_transmitted_price extraction across LMT, STP, and MKT."""
+    from ib_async import Order
+
+    from app.trading.order_builder import extract_transmitted_price
+
+    lmt_order = Order(orderType="LMT", lmtPrice=123.45)
+    assert extract_transmitted_price(lmt_order) == Decimal("123.45")
+
+    stp_order = Order(orderType="STP", auxPrice=99.50)
+    assert extract_transmitted_price(stp_order) == Decimal("99.5")
+
+    mkt_order = Order(orderType="MKT")
+    assert extract_transmitted_price(mkt_order) is None
+
+    empty_lmt = Order(orderType="LMT", lmtPrice=0.0)
+    assert extract_transmitted_price(empty_lmt) is None
+
+
+def test_build_order_unknown_type_and_none_strategy_and_exit_role() -> None:
+    """Verifies build_order behavior for unknown order type, None strategy_name, and EXIT role."""
+    unknown_row = OrderRow(
+        order_id=99,
+        perm_id=None,
+        parent_id=None,
+        trade_group_id="TG_EXIT",
+        account_id="A1",
+        bracket_role="EXIT",
+        symbol="AAPL",
+        sec_type="STK",
+        exchange="SMART",
+        action="SELL",
+        quantity=10,
+        order_type="TRAIL",
+        target_price=Decimal("150.0"),
+        tif="DAY",
+        strategy_name=None,
+        status="Created",
+    )
+    order = build_order(unknown_row)
+    from ib_async.order import UNSET_DOUBLE
+
+    assert order.orderRef == ""
+    assert order.ocaGroup == "OCA_TG_EXIT_v4"
+    assert order.ocaType == 3
+    assert order.lmtPrice == UNSET_DOUBLE
+    assert order.auxPrice == UNSET_DOUBLE

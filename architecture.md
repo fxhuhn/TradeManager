@@ -252,6 +252,7 @@ This section provides a detailed reference of all public classes and functions i
 - `symbols_match` (Function): Robustly verifies whether two symbols match after normalization.
 - `make_stock_contract` (Function): Instantiates Stock contract structures for TWS.
 - `make_future_contract` (Function): Instantiates Future contract structures for CME (e.g., MNQ, MES).
+- `make_contract_by_type` (Function): Dynamically creates either a Stock or Future contract based on symbol, sec_type, and exchange.
 - `make_contract_for_order` (Function): Dynamically creates either a Stock or Future contract based on OrderRow.
 - `get_tick_size` (Function): Returns minimum tick movement of given stock asset.
 - `round_to_tick` (Function): Snaps limit prices to valid tick offsets.
