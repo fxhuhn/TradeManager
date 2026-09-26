@@ -63,3 +63,35 @@ name_or_id
 # Worker public models and execution contexts
 WorkerExecutionContext
 _.database
+
+# Cash Ledger and Flex Query public models and attributes
+CashLedgerRow
+SettledTradeAllInRow
+cash_ledger_row_from_db_row
+settled_trade_all_in_from_db_row
+_.ledger_id
+_.created_at
+_.trading_commissions
+_.trading_net_pnl
+_.reg_fees
+_.net_dividends
+_.syep_income
+_.all_in_net_pnl
+_.has_adjustments
+FlexTradeFeeRecord
+FlexBorrowFeeRecord
+FlexDividendAccrualRecord
+FlexCashTransactionRecord
+ParsedFlexStatement
+ReconciliationReport
+FlexReconciliationService
+FlexWebServiceClient
+_.total_commission
+_.broker_execution_charge
+_.broker_clearing_charge
+_.third_party_clearing_charge
+_.other
+_.borrow_fee_rate
+_.gross_rate
+_.fee
+_.net_amount

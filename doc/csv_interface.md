@@ -64,7 +64,7 @@ Jede Zeile in der CSV-Datei repräsentiert ein einzelnes **Order-Leg**. Die Date
 | `symbol` | Text | **Ja** | Tickersymbol (z. B. `AAPL`, `MSFT`, `QQQ`) | Basiswert der Order. Muss für **alle Legs derselben `trade_group_id` identisch** sein. |
 | `sec_type` | Text | **Ja** | `STK` | Wertpapierklasse. In der CSV **immer `STK`** eintragen (auch bei Strategien mit automatischer Futures-Wandlung wie BounceBandit). |
 | `exchange` | Text | **Ja** | `SMART` | Routing-Börsenplatz. In der CSV **immer `SMART`** eintragen. |
-| `account_id` | Text | **Ja** | IBKR-Kontonummer (z. B. `U19605236`) | Ziel-Handelskonto. Muss für **alle Legs derselben `trade_group_id` identisch** sein. |
+| `account_id` | Text | **Ja** | IBKR-Kontonummer (z. B. `DU123456`) | Ziel-Handelskonto. Muss für **alle Legs derselben `trade_group_id` identisch** sein. |
 | `action` | Enum | **Ja** | `BUY`, `SELL` | Handelsrichtung. |
 | `quantity` | Ganzzahl | **Ja** | Integer > 0 | Soll-Stückzahl. Bei Kapitalengpässen skaliert der TradeManager diese Menge symmetrisch herunter. |
 | `order_type` | Enum | **Ja** | `LMT`, `STP`, `MKT`, `MOC` | Ausführungstyp für die TWS (Limit, Stop, Market, Market-on-Close). |
@@ -145,27 +145,27 @@ orders_YYYY_MM_DD.csv.bak         orders_YYYY_MM_DD.csv.err
 ### 7.1 Vollständiges Bracket (ENTRY + Stop-Loss + Take-Profit)
 ```csv
 trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name
-20260905_Momentum_001,ENTRY,NVDA,STK,SMART,U19605236,BUY,10,LMT,208.50,DAY,Momentum
-20260905_Momentum_001,SL,NVDA,STK,SMART,U19605236,SELL,10,STP,195.00,GTC,Momentum
-20260905_Momentum_001,TP,NVDA,STK,SMART,U19605236,SELL,10,LMT,225.00,GTC,Momentum
+20260905_Momentum_001,ENTRY,NVDA,STK,SMART,DU123456,BUY,10,LMT,208.50,DAY,Momentum
+20260905_Momentum_001,SL,NVDA,STK,SMART,DU123456,SELL,10,STP,195.00,GTC,Momentum
+20260905_Momentum_001,TP,NVDA,STK,SMART,DU123456,SELL,10,LMT,225.00,GTC,Momentum
 ```
 
 ### 7.2 Reiner Einstieg (ENTRY ohne Schutzorders)
 ```csv
 trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name
-20260905_Turnover_001,ENTRY,MU,STK,SMART,U19605236,BUY,5,LMT,938.82,DAY,TurnoverTiming
+20260905_Turnover_001,ENTRY,MU,STK,SMART,DU123456,BUY,5,LMT,938.82,DAY,TurnoverTiming
 ```
 
 ### 7.3 Reiner Ausstieg (Position schließen via Market-on-Open)
 ```csv
 trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name
-20260905_Exit_001,EXIT,TSLA,STK,SMART,U19605236,SELL,10,MKT,0.00,OPG,Momentum
+20260905_Exit_001,EXIT,TSLA,STK,SMART,DU123456,SELL,10,MKT,0.00,OPG,Momentum
 ```
 
 ### 7.4 BounceBandit Einstieg (wird zu MNQ-Future konvertiert)
 ```csv
 trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name
-20260905_Bounce_001,ENTRY,QQQ,STK,SMART,U19605236,BUY,1,MKT,0.00,DAY,BounceBandit
+20260905_Bounce_001,ENTRY,QQQ,STK,SMART,DU123456,BUY,1,MKT,0.00,DAY,BounceBandit
 ```
 
 ---
@@ -191,7 +191,7 @@ orders = [
         "symbol": "AAPL",
         "sec_type": "STK",
         "exchange": "SMART",
-        "account_id": "U19605236",
+        "account_id": "DU123456",
         "action": "BUY",
         "quantity": 15,
         "order_type": "LMT",
@@ -205,7 +205,7 @@ orders = [
         "symbol": "AAPL",
         "sec_type": "STK",
         "exchange": "SMART",
-        "account_id": "U19605236",
+        "account_id": "DU123456",
         "action": "SELL",
         "quantity": 15,
         "order_type": "STP",
@@ -219,7 +219,7 @@ orders = [
         "symbol": "AAPL",
         "sec_type": "STK",
         "exchange": "SMART",
-        "account_id": "U19605236",
+        "account_id": "DU123456",
         "action": "SELL",
         "quantity": 15,
         "order_type": "LMT",

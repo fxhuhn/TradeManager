@@ -936,7 +936,7 @@ async def test_start_background_tasks(test_config: Config, tmp_path: Path) -> No
         side_effect=lambda coroutine: (coroutine.close(), MagicMock())[1],
     ):
         orchestrator.start_background_tasks()
-        assert len(orchestrator.tasks) == 7
+        assert len(orchestrator.tasks) == 8
 
 
 @pytest.mark.asyncio

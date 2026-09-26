@@ -94,6 +94,45 @@ Stores the latest snapshot of account balance metrics, margin usage, and cushion
 | `buying_power` | `REAL` | `NOT NULL` | Purchasing power under account leverage rules. |
 | `updated_at` | `TIMESTAMP` | `DEFAULT CURRENT_TIMESTAMP` | Timestamp of last metric synchronization. |
 
+### 1.6 Cash Ledger Table (`cash_ledger`)
+Tracks secondary trade costs (borrow fees, unbundled commission parts), dividends, taxes, interest, and account expenses.
+
+| Variable Name | Data Type | Validation Rules | Description |
+| :--- | :--- | :--- | :--- |
+| `ledger_id` | `INTEGER` | `PRIMARY KEY AUTOINCREMENT` | Internal unique ledger journal sequence ID. |
+| `account_id` | `TEXT` | `NOT NULL` | Brokerage account ID. |
+| `trade_group_id` | `TEXT` | `NULLABLE` | Optional group key connecting adjustment to a specific trade. |
+| `symbol` | `TEXT` | `NULLABLE` | Financial instrument symbol (if applicable). |
+| `category` | `TEXT` | `CHECK IN ('COMMISSION', 'EXCHANGE_FEE', 'CLEARING_FEE', 'REGULATORY_FEE', 'BORROW_FEE', 'DIVIDEND', 'WITHHOLDING_TAX', 'PAYMENT_IN_LIEU', 'INTEREST_DEBIT', 'INTEREST_CREDIT', 'SYEP_INCOME', 'MARKET_DATA', 'OTHER_FEE')` | Ledger expense/income category classification. |
+| `description` | `TEXT` | `NOT NULL` | Human-readable transaction description from broker. |
+| `amount` | `REAL`/`TEXT` | `NOT NULL` | Transaction amount in original currency (stored as stringified `Decimal`). |
+| `currency` | `TEXT` | `DEFAULT 'USD'` | Currency code of transaction amount. |
+| `fx_rate_to_base`| `REAL`/`TEXT` | `DEFAULT '1.0'` | FX multiplier to convert transaction amount into account base currency. |
+| `amount_in_base` | `REAL`/`TEXT` | `NOT NULL` | Normalized amount in account base currency (stored as stringified `Decimal`). |
+| `status` | `TEXT` | `CHECK IN ('PENDING', 'SETTLED', 'CANCELLED')` | Settlement status of entry. |
+| `effective_date` | `DATE` | `NOT NULL` | Date when the expense/accrual occurred. |
+| `settled_date` | `DATE` | `NULLABLE` | Date when the transaction settled to cash. |
+| `source` | `TEXT` | `CHECK IN ('REALTIME_CALLBACK', 'FLEX_QUERY')` | Data origin source. |
+| `external_reference_id` | `TEXT` | `NOT NULL` | Deterministic SHA-256 idempotency hash preventing duplicate bookings. |
+| `created_at` | `TIMESTAMP` | `DEFAULT CURRENT_TIMESTAMP` | Journal entry creation timestamp. |
+
+* **Constraints & Indexes**:
+  * `UNIQUE (account_id, external_reference_id, category, status)`
+  * `idx_ledger_group`: Index on `(account_id, trade_group_id)`.
+  * `idx_ledger_date`: Index on `effective_date`.
+  * `idx_ledger_status`: Index on `status`.
+* **Invariante**: Reine Eigenkapital-Transfers (Einzahlungen/Auszahlungen wie `CASH RECEIPTS / ELECTRONIC FUND TRANSFERS`, Deposits, Withdrawals) sind keine Handelskosten oder Betriebsausgaben und werden beim Flex-Query-Import strikt ignoriert (keine Speicherung im `cash_ledger`).
+
+### 1.7 All-In Trade Settlement View (`v_trade_settlement_all_in`)
+Dynamically aggregates core execution settlement results from `trades_settlement` with allocated secondary costs from `cash_ledger`:
+* `trading_commissions`: Execution commission from order fills.
+* `reg_fees`: Allocated SEC Section 31 and FINRA TAF regulatory fees.
+* `borrow_fees`: Hard-to-borrow fees accrued during short holding periods.
+* `net_dividends`: Gross dividends minus withholding taxes plus payments in lieu.
+* `syep_income`: Yield enhancement program income on lent shares.
+* `all_in_net_pnl`: Real economic PnL combining trading PnL with all secondary revenues and costs.
+* `has_adjustments`: Boolean indicator (1 or 0) whether any ledger entries exist for the trade group.
+
 ---
 
 ## 2. CSV Interface Specification
@@ -142,6 +181,13 @@ Mapping model classes in [app/core/models.py](app/core/models.py) are immutable 
 - `OrderRow`: Database-backed model representing a discrete order leg.
 - `ExecutionRow`: Logged record of an executed trade fill received from TWS.
 - `SettlementRow`: Final PnL and accounting record computed upon position closure.
+- `CashLedgerRow`: Database-backed model representing an entry in `cash_ledger`.
+- `SettledTradeAllInRow`: Aggregated all-in trade settlement combining core execution PnL with allocated secondary ledger costs.
+- `FlexTradeFeeRecord`: Unbundled execution fee record parsed from Flex Query statement.
+- `FlexBorrowFeeRecord`: Daily hard-to-borrow short fee record parsed from Flex Query statement.
+- `FlexDividendAccrualRecord`: Pending dividend accrual record parsed from Flex Query statement.
+- `FlexCashTransactionRecord`: Cash transaction record (dividends, interest, withholding taxes, market data) parsed from Flex Query statement.
+- `ParsedFlexStatement`: Complete structured container encapsulating all extracted sections of a Flex Query statement XML.
 
 ---
 

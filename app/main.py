@@ -11,6 +11,7 @@ import asyncio
 import signal
 import socket
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import aiosqlite
@@ -138,6 +139,7 @@ class TradingSystemOrchestrator:
                 container_manager=self.container_manager,
                 trigger_reconnect_callback=self.manual_reconnect_trigger,
                 status_provider_callback=self.provide_status_report,
+                flex_sync_callback=self.run_flex_sync_callback,
             )
         )
 
@@ -154,6 +156,30 @@ class TradingSystemOrchestrator:
         self.reconnect_event.set()
         if not self.is_reconnecting:
             asyncio.create_task(self.run_reconnect_callback())
+
+    async def run_flex_sync_callback(self) -> str:
+        """Führt eine manuelle oder geplante Flex-Query-Synchronisation aus."""
+        if not self.config.flex_query.token or not self.config.flex_query.query_id:
+            return "❌ IBKR Flex Token oder Query-ID ist in .env / config nicht hinterlegt."
+
+        db = await self.create_database_connection()
+        try:
+            from app.services.flex_query.service import FlexReconciliationService
+
+            service = FlexReconciliationService(
+                db=db,
+                config=self.config.flex_query,
+                notifier=self.notifier,
+            )
+            report = await service.sync_and_reconcile()
+            return (
+                f"✅ Flex-Sync erfolgreich:\n"
+                f"• {report.inserted_count} neue Buchungen ({report.skipped_duplicate_count} Duplikate)\n"
+                f"• {report.allocated_to_trades_count} Trades zugeordnet ($ {report.total_trade_adjustments_base:,.2f})\n"
+                f"• {report.account_level_count} Konto-Ausgaben ($ {report.total_account_expenses_base:,.2f})"
+            )
+        finally:
+            await db.close()
 
     async def provide_status_report(self) -> str:
         """Erstellt eine Statusübersicht für die Telegram-Antwort."""
@@ -382,6 +408,7 @@ class TradingSystemOrchestrator:
         heartbeat_task = asyncio.create_task(self.heartbeat_loop())
         backup_task = asyncio.create_task(self.database_backup_loop())
         bot_task = asyncio.create_task(self.telegram_bot.start_polling())
+        flex_task = asyncio.create_task(self.flex_query_sync_loop())
 
         self.tasks = (
             importer_task,
@@ -391,6 +418,7 @@ class TradingSystemOrchestrator:
             heartbeat_task,
             backup_task,
             bot_task,
+            flex_task,
         )
 
     async def graceful_shutdown(self) -> None:
@@ -636,6 +664,47 @@ class TradingSystemOrchestrator:
                 )
 
             await asyncio.sleep(self.config.app.db_backup_interval_s)
+
+    async def flex_query_sync_loop(self) -> None:
+        """Periodische Hintergrundaufgabe zum automatischen Abruf des Flex Query Statements.
+
+        Prüft periodisch, ob die aktuelle UTC-Zeit mit der konfigurierten sync_time_utc
+        übereinstimmt und für den heutigen Tag noch kein Sync durchgeführt wurde.
+        """
+        if not self.config.flex_query.enabled:
+            logger.info("Flex Query sync loop disabled in configuration")
+            return
+
+        logger.info(
+            "Starting Flex Query background sync loop",
+            scheduled_time_utc=self.config.flex_query.sync_time_utc,
+        )
+
+        last_synced_date = ""
+
+        while not self.shutdown_event.is_set():
+            try:
+                now_utc = datetime.now(UTC)
+                today_str = now_utc.strftime("%Y-%m-%d")
+                current_hm = now_utc.strftime("%H:%M")
+
+                if (
+                    current_hm >= self.config.flex_query.sync_time_utc
+                    and last_synced_date != today_str
+                ):
+                    logger.info(
+                        "Triggering scheduled Flex Query sync for %s", today_str
+                    )
+                    await self.run_flex_sync_callback()
+                    last_synced_date = today_str
+
+                await asyncio.sleep(60.0)
+            except asyncio.CancelledError:
+                logger.info("Flex Query sync loop cancelled.")
+                break
+            except Exception as loop_error:
+                logger.error("Error in Flex Query sync loop: %s", loop_error)
+                await asyncio.sleep(300.0)
 
     async def _execute_heartbeat_cycle(self) -> None:
         """Führt eine einzelne Ausführung des Heartbeat-Pings aus."""

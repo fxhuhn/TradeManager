@@ -36,6 +36,7 @@ class TelegramCommandListener:
         container_manager: DockerContainerManager,
         trigger_reconnect_callback: Callable[[], Coroutine[Any, Any, None]],
         status_provider_callback: Callable[[], Coroutine[Any, Any, str]] | None = None,
+        flex_sync_callback: Callable[[], Coroutine[Any, Any, str]] | None = None,
         polling_timeout_seconds: int = DEFAULT_POLLING_TIMEOUT_SECONDS,
         restart_debounce_seconds: float = DEFAULT_RESTART_DEBOUNCE_SECONDS,
     ) -> None:
@@ -47,6 +48,7 @@ class TelegramCommandListener:
             container_manager: Instanz für Docker-Container-Aktionen.
             trigger_reconnect_callback: Asynchrone Callback-Funktion zur Reconnect-Auslösung.
             status_provider_callback: Optionale Callback-Funktion für Statusberichte.
+            flex_sync_callback: Optionale Callback-Funktion für Flex-Query-Sync.
             polling_timeout_seconds: Long-Polling-Timeout für getUpdates.
             restart_debounce_seconds: Mindestabstand zwischen zwei Container-Neustarts in Sekunden.
         """
@@ -55,6 +57,7 @@ class TelegramCommandListener:
         self._container_manager = container_manager
         self._trigger_reconnect_callback = trigger_reconnect_callback
         self._status_provider_callback = status_provider_callback
+        self._flex_sync_callback = flex_sync_callback
         self._polling_timeout_seconds = polling_timeout_seconds
         self._restart_debounce_seconds = restart_debounce_seconds
         self._last_restart_timestamp: float = 0.0
@@ -133,6 +136,10 @@ class TelegramCommandListener:
                 {
                     "command": "reconnect",
                     "description": "🔄 Wiederverbindung zu IBKR neu anstoßen",
+                },
+                {
+                    "command": "sync_flex",
+                    "description": "📑 IBKR Flex Query synchronisieren",
                 },
                 {
                     "command": "help",
@@ -303,8 +310,53 @@ class TelegramCommandListener:
             await self._execute_reconnect_flow()
         elif clean_text in ("/status", "status", "📊 status"):
             await self._send_status_reply()
+        elif clean_text in ("/sync_flex", "sync_flex", "📑 sync flex", "/flex", "flex"):
+            await self._execute_flex_sync_flow()
         elif clean_text in ("/help", "/start", "help", "hilfe", "start"):
             await self._send_help_reply()
+
+    async def _execute_flex_sync_flow(self) -> None:
+        """Führt eine manuelle Flex-Query-Synchronisation via Callback aus."""
+        if self._flex_sync_callback is None:
+            await self._notifier.send_message(
+                build_tree_message(
+                    title="Flex-Sync nicht verfügbar",
+                    emoji="ℹ️",
+                    rows=[
+                        ("Hinweis", "Kein Flex-Sync-Handler aktiv oder konfiguriert")
+                    ],
+                ),
+                reply_markup=DEFAULT_BOT_KEYBOARD,
+            )
+            return
+
+        await self._notifier.send_message(
+            build_tree_message(
+                title="Flex-Sync gestartet",
+                emoji="⏳",
+                rows=[("Status", "Frage IBKR Flex Statement ab...")],
+            ),
+            reply_markup=DEFAULT_BOT_KEYBOARD,
+        )
+        try:
+            result_msg = await self._flex_sync_callback()
+            if result_msg:
+                await self._notifier.send_message(
+                    result_msg, reply_markup=DEFAULT_BOT_KEYBOARD
+                )
+        except Exception as exception:
+            logger.error(
+                "Error executing flex sync callback",
+                error=str(exception),
+            )
+            await self._notifier.send_message(
+                build_tree_message(
+                    title="Flex-Sync fehlgeschlagen",
+                    emoji="❌",
+                    rows=[("Fehler", str(exception)[:200])],
+                ),
+                reply_markup=DEFAULT_BOT_KEYBOARD,
+            )
 
     async def _execute_reconnect_flow(self) -> None:
         """Löst eine sofortige Wiederverbindung aus und startet die Reconnect-Überprüfung neu."""
@@ -472,6 +524,10 @@ class TelegramCommandListener:
                 (
                     "/reconnect",
                     "Wiederverbindung neu starten (ohne Container-Neustart)",
+                ),
+                (
+                    "/sync_flex",
+                    "IBKR Flex Query synchronisieren (Nebenkosten & Zinsen)",
                 ),
                 ("/help", "Diese Hilfemeldung anzeigen"),
             ],

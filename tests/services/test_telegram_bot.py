@@ -462,3 +462,28 @@ async def test_execute_reconnect_flow_handles_callback_exception(
     await listener._execute_reconnect_flow()
     notifier.send_message.assert_awaited_once()
     failing_cb.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_handle_sync_flex_command(mock_config: MagicMock) -> None:
+    """Verifiziert die Ausführung des /sync_flex-Befehls über Telegram."""
+    notifier = MagicMock()
+    notifier.send_message = AsyncMock(return_value=True)
+    flex_sync_cb = AsyncMock(
+        return_value="Reconciliation abgeschlossen: 5 neue Buchungen."
+    )
+
+    listener = TelegramCommandListener(
+        config=mock_config,
+        notifier=notifier,
+        container_manager=MagicMock(),
+        trigger_reconnect_callback=AsyncMock(),
+        flex_sync_callback=flex_sync_cb,
+    )
+
+    message = {"chat": {"id": 987654321}, "text": "/sync_flex"}
+    await listener._handle_text_message(message)
+
+    # 1. Start-Meldung, 2. Ergebnis-Meldung
+    assert notifier.send_message.await_count == 2
+    flex_sync_cb.assert_awaited_once()

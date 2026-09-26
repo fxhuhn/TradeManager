@@ -153,3 +153,91 @@ class SettlementRow:
     total_commissions: Decimal
     net_pnl: Decimal
     settled_at: str | None = None
+
+
+@dataclass(frozen=True)
+class CashLedgerRow:
+    """Repräsentiert einen Buchungssatz im Unified Cash Ledger (cash_ledger)."""
+
+    account_id: str
+    category: str
+    description: str
+    amount: Decimal
+    amount_in_base: Decimal
+    effective_date: str
+    source: str
+    external_reference_id: str
+    ledger_id: int | None = None
+    trade_group_id: str | None = None
+    symbol: str | None = None
+    currency: str = "USD"
+    fx_rate_to_base: Decimal = Decimal("1.0")
+    status: str = "SETTLED"
+    settled_date: str | None = None
+    created_at: str | None = None
+
+
+def cash_ledger_row_from_db_row(
+    row: Mapping[str, Any] | sqlite3.Row,
+) -> CashLedgerRow:
+    """Maps a DB mapping row to a CashLedgerRow instance."""
+    return CashLedgerRow(
+        ledger_id=row["ledger_id"],
+        account_id=row["account_id"],
+        trade_group_id=row["trade_group_id"],
+        symbol=row["symbol"],
+        category=row["category"],
+        description=row["description"],
+        amount=Decimal(str(row["amount"])),
+        currency=row["currency"],
+        fx_rate_to_base=Decimal(str(row["fx_rate_to_base"])),
+        amount_in_base=Decimal(str(row["amount_in_base"])),
+        status=row["status"],
+        effective_date=str(row["effective_date"]),
+        settled_date=str(row["settled_date"]) if row["settled_date"] else None,
+        source=row["source"],
+        external_reference_id=row["external_reference_id"],
+        created_at=str(row["created_at"]) if row["created_at"] else None,
+    )
+
+
+@dataclass(frozen=True)
+class SettledTradeAllInRow:
+    """Repräsentiert die konsolidierten All-in-Ergebnisse aus v_trade_settlement_all_in."""
+
+    account_id: str
+    trade_group_id: str
+    avg_entry_price: Decimal
+    avg_exit_price: Decimal
+    price_diff_slippage: Decimal
+    trading_commissions: Decimal
+    trading_net_pnl: Decimal
+    reg_fees: Decimal
+    borrow_fees: Decimal
+    net_dividends: Decimal
+    syep_income: Decimal
+    all_in_net_pnl: Decimal
+    has_adjustments: bool
+    settled_at: str | None = None
+
+
+def settled_trade_all_in_from_db_row(
+    row: Mapping[str, Any] | sqlite3.Row,
+) -> SettledTradeAllInRow:
+    """Maps a DB row from v_trade_settlement_all_in to a SettledTradeAllInRow instance."""
+    return SettledTradeAllInRow(
+        account_id=row["account_id"],
+        trade_group_id=row["trade_group_id"],
+        avg_entry_price=Decimal(str(row["avg_entry_price"])),
+        avg_exit_price=Decimal(str(row["avg_exit_price"])),
+        price_diff_slippage=Decimal(str(row["price_diff_slippage"])),
+        trading_commissions=Decimal(str(row["trading_commissions"])),
+        trading_net_pnl=Decimal(str(row["trading_net_pnl"])),
+        reg_fees=Decimal(str(row["reg_fees"])),
+        borrow_fees=Decimal(str(row["borrow_fees"])),
+        net_dividends=Decimal(str(row["net_dividends"])),
+        syep_income=Decimal(str(row["syep_income"])),
+        all_in_net_pnl=Decimal(str(row["all_in_net_pnl"])),
+        has_adjustments=bool(row["has_adjustments"]),
+        settled_at=str(row["settled_at"]) if row["settled_at"] else None,
+    )

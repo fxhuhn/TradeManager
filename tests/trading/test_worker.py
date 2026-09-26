@@ -1394,7 +1394,7 @@ async def test_handle_order_rejection_token_verification_with_br_tags(
         perm_id=0,
         parent_id=None,
         trade_group_id="1396_DipBuyer_UAL",
-        account_id="U19605236",
+        account_id="DU123456",
         bracket_role="ENTRY",
         symbol="UAL",
         sec_type="STK",

@@ -635,7 +635,7 @@ def test_extract_unassigned_execution_details() -> None:
     """Verifies that extract_unassigned_execution_details correctly pulls contract and execution fields."""
     mock_trade = MagicMock()
     mock_trade.order.action = "SELL"
-    mock_trade.order.account = "U19605236"
+    mock_trade.order.account = "DU123456"
     mock_trade.order.orderRef = "Ref123"
 
     mock_fill = MagicMock()
@@ -646,7 +646,7 @@ def test_extract_unassigned_execution_details() -> None:
     mock_fill.execution.side = "SLD"
     mock_fill.execution.shares = 51.0
     mock_fill.execution.price = 52.42
-    mock_fill.execution.acctNumber = "U19605236"
+    mock_fill.execution.acctNumber = "DU123456"
     mock_fill.execution.orderId = -6
     mock_fill.execution.permId = 123456
     mock_fill.execution.execId = "EXEC-999"
@@ -659,7 +659,7 @@ def test_extract_unassigned_execution_details() -> None:
     assert details["side"] == "SLD"
     assert details["qty"] == Decimal("51.0")
     assert details["price"] == Decimal("52.42")
-    assert details["account_id"] == "U19605236"
+    assert details["account_id"] == "DU123456"
     assert details["order_id"] == -6
     assert details["perm_id"] == 123456
     assert details["exec_id"] == "EXEC-999"
@@ -3318,7 +3318,7 @@ async def test_loc_verification_with_futures_contract(
     await db.execute(
         """
         INSERT INTO orders (order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, status)
-        VALUES (9991, 12345, NULL, 'TG_FUT_LOC', 'U19605236', 'ENTRY', 'MNQU6', 'FUT', 'CME', 'BUY', 1, 'LOC', 700.0, 'DAY', 'PreSubmitted')
+        VALUES (9991, 12345, NULL, 'TG_FUT_LOC', 'DU123456', 'ENTRY', 'MNQU6', 'FUT', 'CME', 'BUY', 1, 'LOC', 700.0, 'DAY', 'PreSubmitted')
         """
     )
     await db.commit()

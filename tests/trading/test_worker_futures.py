@@ -31,8 +31,8 @@ async def test_worker_process_bounce_bandit_futures_bracket(
         """
         INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status, strategy_name)
         VALUES
-            (5001, 'TG_BB_TEST', 'U19605236', 'ENTRY', 'MNQU6', 'FUT', 'CME', 'BUY', 1, 'MKT', NULL, 'Created', 'BounceBandit'),
-            (5002, 'TG_BB_TEST', 'U19605236', 'TP', 'MNQU6', 'FUT', 'CME', 'SELL', 1, 'LOC', 715.50, 'Created', 'BounceBandit')
+            (5001, 'TG_BB_TEST', 'DU123456', 'ENTRY', 'MNQU6', 'FUT', 'CME', 'BUY', 1, 'MKT', NULL, 'Created', 'BounceBandit'),
+            (5002, 'TG_BB_TEST', 'DU123456', 'TP', 'MNQU6', 'FUT', 'CME', 'SELL', 1, 'LOC', 715.50, 'Created', 'BounceBandit')
         """
     )
     await db.commit()
@@ -126,8 +126,8 @@ async def test_worker_futures_fail_closed_on_cushion_violation(db, test_config) 
         """
         INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status, strategy_name)
         VALUES
-            (5011, 'TG_BB_MARGIN_FAIL', 'U19605236', 'ENTRY', 'MNQU6', 'FUT', 'CME', 'BUY', 1, 'MKT', NULL, 'Created', 'BounceBandit'),
-            (5012, 'TG_BB_MARGIN_FAIL', 'U19605236', 'TP', 'MNQU6', 'FUT', 'CME', 'SELL', 1, 'LOC', 715.50, 'Created', 'BounceBandit')
+            (5011, 'TG_BB_MARGIN_FAIL', 'DU123456', 'ENTRY', 'MNQU6', 'FUT', 'CME', 'BUY', 1, 'MKT', NULL, 'Created', 'BounceBandit'),
+            (5012, 'TG_BB_MARGIN_FAIL', 'DU123456', 'TP', 'MNQU6', 'FUT', 'CME', 'SELL', 1, 'LOC', 715.50, 'Created', 'BounceBandit')
         """
     )
     await db.commit()
@@ -177,8 +177,8 @@ async def test_worker_process_futures_exit_order_with_matching_local_symbol(
         """
         INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status, strategy_name)
         VALUES
-            (6001, 'TG_BB_EXIT_TEST', 'U19605236', 'ENTRY', 'MNQU6', 'FUT', 'CME', 'BUY', 1, 'MKT', NULL, 'Filled', 'BounceBandit'),
-            (6002, 'TG_BB_EXIT_TEST', 'U19605236', 'EXIT', 'MNQU6', 'FUT', 'CME', 'SELL', 1, 'MKT', NULL, 'Created', 'BounceBandit')
+            (6001, 'TG_BB_EXIT_TEST', 'DU123456', 'ENTRY', 'MNQU6', 'FUT', 'CME', 'BUY', 1, 'MKT', NULL, 'Filled', 'BounceBandit'),
+            (6002, 'TG_BB_EXIT_TEST', 'DU123456', 'EXIT', 'MNQU6', 'FUT', 'CME', 'SELL', 1, 'MKT', NULL, 'Created', 'BounceBandit')
         """
     )
     await db.commit()
@@ -194,7 +194,7 @@ async def test_worker_process_futures_exit_order_with_matching_local_symbol(
 
     # IBKR Position hat contract.symbol = "MNQ" und contract.localSymbol = "MNQU6"
     mock_pos = MagicMock()
-    mock_pos.account = "U19605236"
+    mock_pos.account = "DU123456"
     mock_pos.contract.symbol = "MNQ"
     mock_pos.contract.localSymbol = "MNQU6"
     mock_pos.position = 1.0

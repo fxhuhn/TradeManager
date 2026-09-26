@@ -138,7 +138,7 @@ def test_has_live_position_matches_dot_de_symbol() -> None:
 def test_get_live_position_quantity_matches_future_local_symbol() -> None:
     """Verifies that _get_live_position_quantity matches resolved localSymbol MNQU6 against IBKR position MNQ."""
     mock_position = MagicMock()
-    mock_position.account = "U19605236"
+    mock_position.account = "DU123456"
     mock_position.contract.symbol = "MNQ"
     mock_position.contract.localSymbol = "MNQU6"
     mock_position.position = 1.0
@@ -147,22 +147,22 @@ def test_get_live_position_quantity_matches_future_local_symbol() -> None:
     mock_ib.positions.return_value = [mock_position]
 
     # Matching via localSymbol
-    quantity_local = _get_live_position_quantity(mock_ib, "U19605236", "MNQU6")
+    quantity_local = _get_live_position_quantity(mock_ib, "DU123456", "MNQU6")
     assert quantity_local == Decimal("1.0")
 
     # Matching via root symbol
-    quantity_root = _get_live_position_quantity(mock_ib, "U19605236", "MNQ")
+    quantity_root = _get_live_position_quantity(mock_ib, "DU123456", "MNQ")
     assert quantity_root == Decimal("1.0")
 
     # Mismatched symbol returns 0.0
-    quantity_other = _get_live_position_quantity(mock_ib, "U19605236", "ES")
+    quantity_other = _get_live_position_quantity(mock_ib, "DU123456", "ES")
     assert quantity_other == Decimal("0.0")
 
 
 def test_has_live_position_matches_future_local_symbol() -> None:
     """Verifies that _has_live_position returns True for future localSymbol MNQU6."""
     mock_position = MagicMock()
-    mock_position.account = "U19605236"
+    mock_position.account = "DU123456"
     mock_position.contract.symbol = "MNQ"
     mock_position.contract.localSymbol = "MNQU6"
     mock_position.position = 1.0
@@ -170,9 +170,9 @@ def test_has_live_position_matches_future_local_symbol() -> None:
     mock_ib = MagicMock()
     mock_ib.positions.return_value = [mock_position]
 
-    assert _has_live_position(mock_ib, "U19605236", "MNQU6") is True
-    assert _has_live_position(mock_ib, "U19605236", "MNQ") is True
-    assert _has_live_position(mock_ib, "U19605236", "ES") is False
+    assert _has_live_position(mock_ib, "DU123456", "MNQU6") is True
+    assert _has_live_position(mock_ib, "DU123456", "MNQ") is True
+    assert _has_live_position(mock_ib, "DU123456", "ES") is False
 
 
 @pytest.mark.parametrize(

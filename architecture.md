@@ -129,7 +129,8 @@ This section provides a detailed reference of all public classes and functions i
 - `TelegramConfig` (Class): Telegram credentials and target chat settings.
 - `FuturesConfig` (Class): Configuration for automatic signal transformation into CME futures.
   - `is_strategy_enabled` (Method): Evaluates whether a strategy is permitted to transform into futures, supporting wildcard declarations.
-- `Config` (Class): Parent configuration object nesting TWS, App, Account, Telegram, and Futures configs.
+- `FlexQueryConfig` (Class): Configuration for Interactive Brokers Flex Query web service synchronization.
+- `Config` (Class): Parent configuration object nesting TWS, App, Account, Telegram, Futures, and Flex Query configs.
 - `load_env` (Function): Loads environment variables from the given environment path.
 - `load_config` (Function): Parses and constructs the type-safe configuration object.
 
@@ -151,6 +152,10 @@ This section provides a detailed reference of all public classes and functions i
 - `order_row_from_db_row` (Function): Maps a DB mapping row to an `OrderRow` instance.
 - `ExecutionRow` (Class): Relational structure representing individual transaction execution fills.
 - `SettlementRow` (Class): Relational structure for calculated trade group settlements.
+- `CashLedgerRow` (Class): Relational structure representing an entry in the cash_ledger table.
+- `cash_ledger_row_from_db_row` (Function): Maps a DB mapping row to a CashLedgerRow instance.
+- `SettledTradeAllInRow` (Class): Relational structure representing combined execution settlement and allocated cash ledger adjustments.
+- `settled_trade_all_in_from_db_row` (Function): Maps a DB mapping row from v_trade_settlement_all_in to a SettledTradeAllInRow instance.
 
 ### 4.5 Module: `app.services.alert_watcher`
 - `DeadOrderMarketSession` (Class): Immutable parameter container encapsulating market session timestamps, timezone, and threshold limits for dead order evaluation.
@@ -209,6 +214,7 @@ This section provides a detailed reference of all public classes and functions i
   - `send_read_only_alert` (Method)
   - `send_archived_error_alert` (Method)
   - `send_daily_summary` (Method)
+  - `send_flex_reconciliation_summary` (Method)
 
 ### 4.9 Module: `app.services.container_manager`
 - `ContainerStatusReport` (Class): Dataclass encapsulating container execution and health status.
@@ -309,10 +315,12 @@ This section provides a detailed reference of all public classes and functions i
   - `run_reconnect_callback` (Method)
   - `manual_reconnect_trigger` (Method)
   - `provide_status_report` (Method)
+  - `run_flex_sync_callback` (Method)
   - `start_background_tasks` (Method)
   - `graceful_shutdown` (Method)
   - `heartbeat_loop` (Method)
   - `database_backup_loop` (Method)
+  - `flex_query_sync_loop` (Method)
 - `signal_handler` (Function): Receives OS signals for cleanup.
 - `connect_to_tws` (Function): Establishes gateway network socket connection.
 
@@ -322,4 +330,44 @@ This section provides a detailed reference of all public classes and functions i
 - `generate_system_status_report` (Function): Collects and aggregates database and filesystem states.
 - `format_status_report` (Function): Formats the status report into human-readable console text.
 - `main` (Function): CLI entrypoint executing status checks.
+
+### 4.22 Module: `app.services.flex_query.models`
+- `FlexTradeFeeRecord` (Class): Dataclass encapsulating unbundled execution fee records.
+- `FlexBorrowFeeRecord` (Class): Dataclass encapsulating daily hard-to-borrow short fee records.
+- `FlexDividendAccrualRecord` (Class): Dataclass encapsulating open dividend accrual records.
+- `FlexCashTransactionRecord` (Class): Dataclass encapsulating cash transaction records.
+- `ParsedFlexStatement` (Class): Dataclass encapsulating parsed Flex Query statements.
+
+### 4.23 Module: `app.services.flex_query.parser`
+- `to_decimal` (Function): Deterministically converts strings or numeric types to Decimal.
+- `parse_ibkr_date` (Function): Normalizes IBKR date strings into ISO YYYY-MM-DD.
+- `generate_external_reference_id` (Function): Generates deterministic SHA-256 idempotency hash.
+- `parse_flex_xml` (Function): Parses IBKR Flex Statement XML into ParsedFlexStatement.
+
+### 4.24 Module: `app.services.flex_query.matcher`
+- `HistoricalTradeContext` (Class): Context container of historical trades for matching.
+- `match_flex_statement` (Function): Pure matcher mapping statement records to CashLedgerRow instances.
+
+### 4.25 Module: `app.services.flex_query.client`
+- `FlexQueryError` (Class): Base exception for Flex Query errors.
+- `FlexQueryAuthError` (Class): Exception for authentication/token failures.
+- `FlexQueryRateLimitError` (Class): Exception for rate limiting.
+- `FlexQueryTimeoutError` (Class): Exception for statement generation timeouts.
+- `FlexQueryServiceError` (Class): Exception for server or protocol errors.
+- `FlexWebServiceClient` (Class): Async client for IBKR Flex Query Web Service API.
+  - `request_reference_code` (Method): Submits SendRequest and extracts ReferenceCode.
+  - `fetch_statement_xml` (Method): Polls GetStatement with backoff and fetches XML.
+  - `fetch_statement` (Method): High-level orchestrator fetching statement XML end-to-end.
+
+### 4.26 Module: `app.services.flex_query.service`
+- `ReconciliationReport` (Class): Dataclass encapsulating reconciliation statistics and totals.
+- `FlexReconciliationService` (Class): Service orchestrating database reconciliation of Flex Statements.
+  - `fetch_historical_trades` (Method): Queries historical trade contexts from SQLite.
+  - `reconcile_from_xml` (Method): Ingests statement XML and persists cash ledger entries.
+  - `sync_and_reconcile` (Method): Fetches statement via client and executes reconciliation.
+
+### 4.27 Module: `app.cli.flex_sync`
+- `format_flex_sync_report` (Function): Formats reconciliation report for console output.
+- `run_flex_sync` (Function): Runs sync pipeline from file or web service.
+- `main` (Function): CLI entrypoint for flex query synchronization.
 

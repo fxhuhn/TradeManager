@@ -115,7 +115,7 @@ async def test_recovery_syncs_presubmitted_order_to_submitted(
             0,
             None,
             "20260601_TurnoverTiming_0.5_001",
-            "U19605236",
+            "DU123456",
             "ENTRY",
             "MU",
             "STK",
@@ -186,7 +186,7 @@ async def test_recovery_recovers_filled_entry_with_active_child(
             48380410,
             None,
             "890_DipBuyer_BG",
-            "U19605236",
+            "DU123456",
             "ENTRY",
             "BG",
             "STK",
@@ -212,7 +212,7 @@ async def test_recovery_recovers_filled_entry_with_active_child(
             48380411,
             177,
             "890_DipBuyer_BG",
-            "U19605236",
+            "DU123456",
             "TP",
             "BG",
             "STK",
@@ -300,7 +300,7 @@ async def test_recovery_ignores_negative_order_ids(db, mock_config: Config) -> N
             0,
             None,
             "918_TurnoverTiming_0.5_MU",
-            "U19605236",
+            "DU123456",
             "ENTRY",
             "MU",
             "STK",
@@ -371,7 +371,7 @@ async def test_recovery_recovers_filled_order_downtime(db, mock_config: Config) 
             48380420,
             None,
             "895_DipBuyer_XYZ",
-            "U19605236",
+            "DU123456",
             "ENTRY",
             "XYZ",
             "STK",
@@ -432,7 +432,7 @@ async def test_recovery_recovers_filled_order_downtime(db, mock_config: Config) 
     )
 
     await asyncio.sleep(0.1)
-    mock_trigger_settlement.assert_called_once_with("895_DipBuyer_XYZ", "U19605236")
+    mock_trigger_settlement.assert_called_once_with("895_DipBuyer_XYZ", "DU123456")
 
 
 @pytest.mark.asyncio
@@ -443,7 +443,7 @@ async def test_recovery_cancels_ghost_order(db, mock_config: Config) -> None:
         INSERT INTO orders (
             order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role,
             symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name, status
-        ) VALUES (999, 111, NULL, 'G_GHOST', 'U19605236', 'ENTRY', 'GHOST', 'STK', 'SMART', 'BUY', 10, 'LMT', 50.0, 'DAY', 'DipBuyer', 'Submitted')
+        ) VALUES (999, 111, NULL, 'G_GHOST', 'DU123456', 'ENTRY', 'GHOST', 'STK', 'SMART', 'BUY', 10, 'LMT', 50.0, 'DAY', 'DipBuyer', 'Submitted')
         """
     )
     await db.commit()
@@ -484,7 +484,7 @@ async def test_reconcile_broker_positions_recovers_unassigned_position(db) -> No
     und DB synthetische ENTRY-Orders (strategy_name=None) und Executions anlegt.
     """
     mock_position = MagicMock()
-    mock_position.account = "U19605236"
+    mock_position.account = "DU123456"
     mock_position.contract.symbol = "AKAM"
     mock_position.contract.currency = "USD"
     mock_position.position = 15.0
@@ -504,7 +504,7 @@ async def test_reconcile_broker_positions_recovers_unassigned_position(db) -> No
         row = await cursor.fetchone()
         assert row is not None
         assert row["order_id"] < 0
-        assert row["trade_group_id"] == "UNASSIGNED_AKAM_U19605236"
+        assert row["trade_group_id"] == "UNASSIGNED_AKAM_DU123456"
         assert row["action"] == "BUY"
         assert row["quantity"] == 15
         assert row["bracket_role"] == "ENTRY"
@@ -526,7 +526,7 @@ async def test_reconcile_broker_positions_recovers_unassigned_position(db) -> No
         symbol="AKAM",
         quantity=Decimal("15"),
         avg_cost=Decimal("133.48"),
-        account_id="U19605236",
+        account_id="DU123456",
     )
 
 
@@ -539,7 +539,7 @@ async def test_reconcile_broker_positions_skips_when_synced(db) -> None:
     await db.execute(
         """
         INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, status)
-        VALUES (100, 'TG_ALAB', 'U19605236', 'ENTRY', 'ALAB', 'STK', 'SMART', 'BUY', 10, 'MKT', 'Filled')
+        VALUES (100, 'TG_ALAB', 'DU123456', 'ENTRY', 'ALAB', 'STK', 'SMART', 'BUY', 10, 'MKT', 'Filled')
         """
     )
     await db.execute(
@@ -551,7 +551,7 @@ async def test_reconcile_broker_positions_skips_when_synced(db) -> None:
     await db.commit()
 
     mock_position = MagicMock()
-    mock_position.account = "U19605236"
+    mock_position.account = "DU123456"
     mock_position.contract.symbol = "ALAB"
     mock_position.contract.currency = "USD"
     mock_position.position = 10.0

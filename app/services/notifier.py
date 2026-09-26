@@ -5,6 +5,8 @@ Formatiert und sendet asynchrone Erfolgs-, Warn- und Statusnachrichten an Telegr
 unter Einhaltung der API-Rate-Limits.
 """
 
+from __future__ import annotations
+
 import asyncio
 import re
 import time
@@ -12,12 +14,15 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Final, TypedDict
+from typing import TYPE_CHECKING, Any, Final, TypedDict
 
 import aiohttp
 import structlog
 
 from app.core.config import Config
+
+if TYPE_CHECKING:
+    from app.services.flex_query.service import ReconciliationReport
 
 logger = structlog.get_logger()
 
@@ -291,6 +296,30 @@ def _format_daily_summary_rows(report: DailySummaryReport) -> list[TreeRow]:
     rows.append(
         ("Realisierter Net PnL", f"{pnl_emoji} <code>$ {report.net_pnl:,.2f}</code>")
     )
+    return rows
+
+
+def _format_flex_reconciliation_rows(report: ReconciliationReport) -> list[TreeRow]:
+    """Pure helper constructing structured rows for a Flex Query reconciliation report."""
+    rows: list[TreeRow] = [
+        ("Account", f"<code>{report.account_id}</code>"),
+        (
+            "Zeitraum",
+            f"<code>{report.from_date}</code> bis <code>{report.to_date}</code>",
+        ),
+        (
+            "Verarbeitet",
+            f"Gesamt: {report.total_parsed} • Neu: {report.inserted_count} • Ignoriert: {report.skipped_duplicate_count}",
+        ),
+        (
+            "Trade-Allokation",
+            f"{report.allocated_to_trades_count} Buchungen (<code>$ {report.total_trade_adjustments_base:,.2f}</code>)",
+        ),
+        (
+            "Account-Ebene",
+            f"{report.account_level_count} Buchungen (<code>$ {report.total_account_expenses_base:,.2f}</code>)",
+        ),
+    ]
     return rows
 
 
@@ -870,6 +899,20 @@ class TelegramNotifier:
             title="TAGESABSCHLUSS-BERICHT",
             context=date_str,
             emoji="📊",
+            rows=rows,
+        )
+        return await self.send_message(message)
+
+    async def send_flex_reconciliation_summary(
+        self,
+        report: ReconciliationReport,
+    ) -> bool:
+        """Sendet eine Zusammenfassung des Flex-Query-Reconciliation-Laufs an Telegram."""
+        rows = _format_flex_reconciliation_rows(report)
+        message = build_tree_message(
+            title="IBKR FLEX RECONCILIATION",
+            context=f"{report.from_date} - {report.to_date}",
+            emoji="📑",
             rows=rows,
         )
         return await self.send_message(message)

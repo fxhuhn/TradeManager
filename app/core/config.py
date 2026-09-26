@@ -95,6 +95,21 @@ class FuturesConfig:
 
 
 @dataclass(frozen=True)
+class FlexQueryConfig:
+    """Konfiguration für IBKR Flex Query Web Service Synchronisation."""
+
+    token: str = ""
+    query_id: str = ""
+    base_url: str = (
+        "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService"
+    )
+    max_retries: int = 10
+    retry_delay_s: float = 3.0
+    sync_time_utc: str = "23:30"
+    enabled: bool = False
+
+
+@dataclass(frozen=True)
 class Config:
     """Zentrale Konfigurationsklasse für das gesamte Trading-System."""
 
@@ -103,6 +118,7 @@ class Config:
     account: AccountConfig
     telegram: TelegramConfig
     futures: FuturesConfig = field(default_factory=FuturesConfig)
+    flex_query: FlexQueryConfig = field(default_factory=FlexQueryConfig)
     strategy_limits: dict[str, float] = field(default_factory=dict)
 
 
@@ -301,6 +317,41 @@ def _parse_futures_config(toml_data: dict[str, object]) -> FuturesConfig:
     )
 
 
+def _parse_flex_query_config(
+    flex_data: dict[str, object], environment_variables: dict[str, str]
+) -> FlexQueryConfig:
+    token = (
+        os.environ.get("IBKR_FLEX_TOKEN")
+        or environment_variables.get("IBKR_FLEX_TOKEN", "")
+        or str(flex_data.get("token", ""))
+    )
+    query_id = (
+        os.environ.get("IBKR_FLEX_QUERY_ID")
+        or environment_variables.get("IBKR_FLEX_QUERY_ID", "")
+        or str(flex_data.get("query_id", ""))
+    )
+    base_url = str(
+        flex_data.get(
+            "base_url",
+            "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService",
+        )
+    )
+    max_retries = _to_int(flex_data.get("max_retries"), 10)
+    retry_delay_s = _to_float(flex_data.get("retry_delay_s"), 3.0)
+    sync_time_utc = str(flex_data.get("sync_time_utc", "23:30"))
+    enabled = bool(flex_data.get("enabled", bool(token and query_id)))
+
+    return FlexQueryConfig(
+        token=token,
+        query_id=query_id,
+        base_url=base_url,
+        max_retries=max_retries,
+        retry_delay_s=retry_delay_s,
+        sync_time_utc=sync_time_utc,
+        enabled=enabled,
+    )
+
+
 def load_config(root_path: Path = Path(".")) -> Config:
     """Lädt die Konfiguration aus config.toml und .env."""
     config_toml_path = root_path / "config.toml"
@@ -325,6 +376,9 @@ def load_config(root_path: Path = Path(".")) -> Config:
     )
 
     futures_config = _parse_futures_config(toml_data)
+    flex_query_config = _parse_flex_query_config(
+        toml_data.get("flex_query", {}), environment_variables
+    )
 
     strategy_limits = toml_data.get("strategy_limits", {})
     typed_strategy_limits = {
@@ -338,5 +392,6 @@ def load_config(root_path: Path = Path(".")) -> Config:
         account=account_config,
         telegram=telegram_config,
         futures=futures_config,
+        flex_query=flex_query_config,
         strategy_limits=typed_strategy_limits,
     )

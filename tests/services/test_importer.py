@@ -435,12 +435,12 @@ async def test_run_csv_import_handles_standalone_exit_gracefully(
     # Ein Standalone Exit (kein ENTRY in DB)
     csv_content = (
         "trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name\n"
-        "974_DipBuyer_STLD,EXIT,STLD,STK,SMART,U19605236,SELL,27,LMT,227.46,DAY,DipBuyer\n"
+        "974_DipBuyer_STLD,EXIT,STLD,STK,SMART,DU123456,SELL,27,LMT,227.46,DAY,DipBuyer\n"
     )
     csv_file.write_text(csv_content, encoding="utf-8")
 
     mock_interactive_brokers = MagicMock()
-    mock_interactive_brokers.managedAccounts.return_value = ["U19605236"]
+    mock_interactive_brokers.managedAccounts.return_value = ["DU123456"]
     mock_interactive_brokers.isConnected.return_value = True
 
     mock_notifier = MagicMock()
@@ -481,33 +481,33 @@ async def test_run_csv_import_sends_telegram_on_downscaling(
     # An entry with high quantity (100) and target price 100.0. Total cost = 10,000.00.
     csv_content = (
         "trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name\n"
-        "1001_DipBuyer_GLW,ENTRY,GLW,STK,SMART,U19605236,BUY,100,LMT,100.00,DAY,DipBuyer\n"
+        "1001_DipBuyer_GLW,ENTRY,GLW,STK,SMART,DU123456,BUY,100,LMT,100.00,DAY,DipBuyer\n"
     )
     csv_file.write_text(csv_content, encoding="utf-8")
 
     # Mock TWS so capital sizing limits allocation to e.g. 5,000.00 (which will downscale 100 to 50)
     mock_interactive_brokers = MagicMock()
-    mock_interactive_brokers.managedAccounts.return_value = ["U19605236"]
+    mock_interactive_brokers.managedAccounts.return_value = ["DU123456"]
     mock_interactive_brokers.isConnected.return_value = True
 
     # 5% of 100,000 NLV = 5,000 allocation.
     mock_interactive_brokers.accountValues.return_value = [
         AccountValue(
-            account="U19605236",
+            account="DU123456",
             tag="NetLiquidation",
             value="50000.00",
             currency="EUR",
             modelCode="",
         ),
         AccountValue(
-            account="U19605236",
+            account="DU123456",
             tag="AvailableFunds",
             value="80000.00",
             currency="EUR",
             modelCode="",
         ),
         AccountValue(
-            account="U19605236",
+            account="DU123456",
             tag="TotalCashValue",
             value="60000.00",
             currency="EUR",
@@ -553,7 +553,7 @@ async def test_run_csv_import_aligns_standalone_exit_quantity(
     await db.execute(
         """
         INSERT INTO orders (order_id, parent_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name, status, retry_count)
-        VALUES (123, NULL, '1028_TwoPercent_SXRV.DE', 'U19605236', 'ENTRY', 'SXRV.DE', 'STK', 'SMART', 'BUY', 5, 'LMT', '1474.00', 'DAY', 'TwoPercent', 'Filled', 0)
+        VALUES (123, NULL, '1028_TwoPercent_SXRV.DE', 'DU123456', 'ENTRY', 'SXRV.DE', 'STK', 'SMART', 'BUY', 5, 'LMT', '1474.00', 'DAY', 'TwoPercent', 'Filled', 0)
         """
     )
     await db.commit()
@@ -562,12 +562,12 @@ async def test_run_csv_import_aligns_standalone_exit_quantity(
     csv_file = tmp_path / "orders_2026_07_06_exit.csv"
     csv_content = (
         "trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name\n"
-        "1028_TwoPercent_SXRV.DE,EXIT,SXRV.DE,STK,SMART,U19605236,SELL,6,LMT,1500.00,DAY,TwoPercent\n"
+        "1028_TwoPercent_SXRV.DE,EXIT,SXRV.DE,STK,SMART,DU123456,SELL,6,LMT,1500.00,DAY,TwoPercent\n"
     )
     csv_file.write_text(csv_content, encoding="utf-8")
 
     mock_interactive_brokers = MagicMock()
-    mock_interactive_brokers.managedAccounts.return_value = ["U19605236"]
+    mock_interactive_brokers.managedAccounts.return_value = ["DU123456"]
     mock_interactive_brokers.isConnected.return_value = True
 
     mock_notifier = MagicMock()
@@ -1829,8 +1829,8 @@ async def test_run_csv_import_only_returns_queued_trade_groups(
     test_csv = data_dir / "orders_2026_09_04.csv"
     test_csv.write_text(
         "trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name,currency\n"
-        "1438_DipBuyer_PTC,ENTRY,PTC,STK,SMART,U19605236,BUY,41,LMT,145.00,DAY,DipBuyer,\n"
-        "1438_DipBuyer_PTC,TP,PTC,STK,SMART,U19605236,SELL,41,LOC,154.28,DAY,DipBuyer,\n",
+        "1438_DipBuyer_PTC,ENTRY,PTC,STK,SMART,DU123456,BUY,41,LMT,145.00,DAY,DipBuyer,\n"
+        "1438_DipBuyer_PTC,TP,PTC,STK,SMART,DU123456,SELL,41,LOC,154.28,DAY,DipBuyer,\n",
         encoding="utf-8",
     )
 

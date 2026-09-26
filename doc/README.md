@@ -464,7 +464,7 @@ Dieses Kapitel beschreibt die Vereinbarung zur Erstellung der täglichen CSV-Dat
 | `symbol` | Text | ✅ | Ticker (z. B. `AAPL`, `QQQ`) | Basiswert. Muss für alle Legs einer Gruppe identisch sein. |
 | `sec_type` | Text | ✅ | `STK` | Wertpapierklasse. In der CSV **stets `STK`** (auch für BounceBandit). |
 | `exchange` | Text | ✅ | `SMART` | Börsenplatz. In der CSV **stets `SMART`**. |
-| `account_id` | Text | ✅ | z. B. `U19605236` | IBKR-Kontonummer. Muss pro Gruppe identisch sein. |
+| `account_id` | Text | ✅ | z. B. `DU123456` | IBKR-Kontonummer. Muss pro Gruppe identisch sein. |
 | `action` | Enum | ✅ | `BUY`, `SELL` | Handelsrichtung. |
 | `quantity` | Ganzzahl | ✅ | Integer > 0 | Soll-Stückzahl. Wird bei Kapitalmangel proportional herunterskaliert. |
 | `order_type` | Enum | ✅ | `LMT`, `STP`, `MKT`, `MOC` | TWS Order-Typ. |
@@ -505,27 +505,27 @@ archive/*.csv.bak  archive/*.csv.err (🚨 Telegram Alarm)
 * **Bracket-Order (ENTRY + SL + TP):**
   ```csv
   trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name
-  20260905_Momentum_001,ENTRY,NVDA,STK,SMART,U19605236,BUY,10,LMT,208.50,DAY,Momentum
-  20260905_Momentum_001,SL,NVDA,STK,SMART,U19605236,SELL,10,STP,195.00,GTC,Momentum
-  20260905_Momentum_001,TP,NVDA,STK,SMART,U19605236,SELL,10,LMT,225.00,GTC,Momentum
+  20260905_Momentum_001,ENTRY,NVDA,STK,SMART,DU123456,BUY,10,LMT,208.50,DAY,Momentum
+  20260905_Momentum_001,SL,NVDA,STK,SMART,DU123456,SELL,10,STP,195.00,GTC,Momentum
+  20260905_Momentum_001,TP,NVDA,STK,SMART,DU123456,SELL,10,LMT,225.00,GTC,Momentum
   ```
 
 * **Reine Entry-Order:**
   ```csv
   trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name
-  20260905_Turnover_001,ENTRY,MU,STK,SMART,U19605236,BUY,2,LMT,938.82,DAY,TurnoverTiming
+  20260905_Turnover_001,ENTRY,MU,STK,SMART,DU123456,BUY,2,LMT,938.82,DAY,TurnoverTiming
   ```
 
 * **Reine Exit-Order (Positionsschluss via Market-on-Open):**
   ```csv
   trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name
-  20260905_Exit_001,EXIT,TSLA,STK,SMART,U19605236,SELL,4,MKT,0.00,OPG,Momentum
+  20260905_Exit_001,EXIT,TSLA,STK,SMART,DU123456,SELL,4,MKT,0.00,OPG,Momentum
   ```
 
 * **BounceBandit (wird automatisch in CME MNQ-Future gewandelt):**
   ```csv
   trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name
-  20260905_Bounce_001,ENTRY,QQQ,STK,SMART,U19605236,BUY,1,MKT,0.00,DAY,BounceBandit
+  20260905_Bounce_001,ENTRY,QQQ,STK,SMART,DU123456,BUY,1,MKT,0.00,DAY,BounceBandit
   ```
 
 ---
@@ -1153,14 +1153,14 @@ Testing Interactive Brokers TWS Connection
 Connecting to TWS at 127.0.0.1:7496 with Client ID 0...
 
 ✅ CONNECTION SUCCESSFUL ON PORT 7496!
-Managed Accounts: U19605236
+Managed Accounts: DU123456
 
 --- Available Capital & Account Summary ---
 Metric                         |           Value | Currency | Account
 ---------------------------------------------------------------------------
-Net Liquidation Value          |      100,000.00 | EUR      | U19605236
-Total Cash Value               |       95,000.00 | EUR      | U19605236
-Available Funds                |       85,000.00 | EUR      | U19605236
+Net Liquidation Value          |      100,000.00 | EUR      | DU123456
+Total Cash Value               |       95,000.00 | EUR      | DU123456
+Available Funds                |       85,000.00 | EUR      | DU123456
 ```
 
 **Einsatzbereich:** Täglicher Pre-Flight-Check vor dem Start des Trading-Systems.
@@ -1460,7 +1460,7 @@ Wird gesendet, sobald ein Trade komplett geschlossen wurde (Schließen der Exit-
 * **Margin-Limit überschritten (Cushion- oder What-If-Prüfung schlägt fehl):**
   ```html
   🚨 <b>MARGIN-LIMIT ÜBERSCHRITTEN</b> | <code>MU</code>
-  ├─ <b>Konto:</b> <code>U19605236</code>
+  ├─ <b>Konto:</b> <code>DU123456</code>
   ├─ <b>Erforderliche Margin:</b> <code>$ 85,250.00</code>
   ├─ <b>Limit:</b> <code>$ 80,000.00</code>
   ├─ <b>Konto-Cushion:</b> <code>8.5%</code>
@@ -1469,7 +1469,7 @@ Wird gesendet, sobald ein Trade komplett geschlossen wurde (Schließen der Exit-
 * **Margin-Nutzung erforderlich (Kaufwert übersteigt Cash-Bestand):**
   ```html
   ℹ️ <b>MARGIN-NUTZUNG ERFORDERLICH</b> | <code>MU</code>
-  ├─ <b>Konto:</b> <code>U19605236</code>
+  ├─ <b>Konto:</b> <code>DU123456</code>
   ├─ <b>Kaufwert:</b> <code>$ 12,000.00</code>
   ├─ <b>Verfügbares Cash:</b> <code>$ 10,000.00</code>
   └─ <b>Info:</b> Zusätzliche Margin von <code>$ 2,000.00</code> wird beansprucht.
@@ -1477,7 +1477,7 @@ Wird gesendet, sobald ein Trade komplett geschlossen wurde (Schließen der Exit-
 * **Hohe Margin-Auslastung (>50% der Netto-Liquidation):**
   ```html
   ⚠️ <b>HOHE MARGIN-AUSLASTUNG (>50%)</b> | <code>MU</code>
-  ├─ <b>Konto:</b> <code>U19605236</code>
+  ├─ <b>Konto:</b> <code>DU123456</code>
   ├─ <b>Margin-Auslastung:</b> <code>55.4%</code>
   ├─ <b>Initial Margin (Neu):</b> <code>$ 55,400.00</code>
   └─ <b>Netto-Liquidationswert:</b> <code>$ 100,000.00</code>
