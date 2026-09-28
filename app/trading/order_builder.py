@@ -88,23 +88,67 @@ def normalize_symbol(symbol: str) -> str:
     return cleaned_symbol.replace("-", " ").replace(".", " ")
 
 
-def symbols_match(symbol_a: str | None, symbol_b: str | None) -> bool:
-    """Prüft, ob zwei Aktiensymbole nach Normalisierung identisch sind.
+CME_FUTURE_ROOTS: Final[tuple[str, ...]] = (
+    "MNQ",
+    "MES",
+    "M2K",
+    "MYM",
+    "NQ",
+    "ES",
+    "RTY",
+    "YM",
+)
 
-    Gibt True zurück, wenn beide Symbole nach Bereinigung von Börsensuffixen
-    und US-Share-Class-Trennzeichen übereinstimmen. Wenn mindestens ein Symbol
-    None oder leer ist, wird True zurückgegeben.
+
+def symbols_match(
+    symbol_a: str | None,
+    symbol_b: str | None,
+    local_symbol_a: str | None = None,
+) -> bool:
+    """Prüft, ob zwei Symbole (Aktien oder CME-Futures) nach Normalisierung identisch sind.
+
+    Gibt True zurück, wenn:
+    1. Mindestens ein Symbol None oder leer ist.
+    2. Beide Symbole nach Normalisierung identisch sind.
+    3. Ein optionales local_symbol_a mit symbol_b übereinstimmt.
+    4. Eines der Symbole ein bekanntes CME-Future-Root-Symbol (z. B. 'MNQ', 'MES') ist
+       und das andere Symbol dieses Root-Symbol als Präfix gefolgt von Kontraktmonat/Jahr
+       (z. B. 'MNQZ6', 'MNQU6') aufweist.
 
     Args:
         symbol_a: Erstes Symbol (z. B. aus TWS-Event).
         symbol_b: Zweites Symbol (z. B. aus lokaler DB).
+        local_symbol_a: Optionales lokales Kontrakt-Symbol (z. B. fill.contract.localSymbol).
 
     Returns:
         True bei Übereinstimmung oder fehlendem Vergleichswert, sonst False.
     """
     if not symbol_a or not symbol_b:
         return True
-    return normalize_symbol(symbol_a) == normalize_symbol(symbol_b)
+
+    clean_a = normalize_symbol(symbol_a)
+    clean_b = normalize_symbol(symbol_b)
+
+    if clean_a == clean_b:
+        return True
+
+    if local_symbol_a:
+        clean_local = normalize_symbol(local_symbol_a)
+        if clean_local == clean_b:
+            return True
+
+    # CME-Future-Root-zu-Kontrakt-Matching (z. B. 'MNQ' <-> 'MNQZ6' oder 'MES' <-> 'MESZ6')
+    for root in CME_FUTURE_ROOTS:
+        if clean_a == root and clean_b.startswith(root):
+            rem = clean_b[len(root) :]
+            if rem and any(char.isdigit() for char in rem):
+                return True
+        elif clean_b == root and clean_a.startswith(root):
+            rem = clean_a[len(root) :]
+            if rem and any(char.isdigit() for char in rem):
+                return True
+
+    return False
 
 
 def make_stock_contract(symbol: str) -> Stock:

@@ -1142,6 +1142,7 @@ async def test_on_order_status_dispatches_task(mock_config: Config) -> None:
     mock_trade.orderStatus.permId = 888
     mock_trade.orderStatus.avgFillPrice = 120.50
     mock_trade.contract.symbol = "AAPL"
+    mock_trade.contract.localSymbol = "AAPL"
     mock_trade.contract.secType = "STK"
 
     manager = TwsCallbacksManager(
@@ -1164,6 +1165,7 @@ async def test_on_order_status_dispatches_task(mock_config: Config) -> None:
             888,
             avg_fill_price=120.50,
             event_symbol="AAPL",
+            event_local_symbol="AAPL",
             event_sec_type="STK",
         )
 
@@ -1180,6 +1182,8 @@ async def test_on_exec_details_dispatches_task(mock_config: Config) -> None:
     mock_fill.execution.side = "BOT"
     mock_fill.execution.time = "2026-07-24"
     mock_fill.contract.symbol = "AAPL"
+    mock_fill.contract.localSymbol = "AAPL"
+    mock_fill.contract.secType = "STK"
     mock_fill.contract.currency = "USD"
 
     manager = TwsCallbacksManager(
@@ -1204,6 +1208,8 @@ async def test_on_exec_details_dispatches_task(mock_config: Config) -> None:
             "USD",
             "2026-07-24",
             symbol="AAPL",
+            local_symbol="AAPL",
+            sec_type="STK",
             trade=mock_trade,
             fill=mock_fill,
         )
@@ -1342,6 +1348,7 @@ async def test_callbacks_additional_coverage_branches(mock_config: Config) -> No
             999,
             avg_fill_price=0.0,
             event_symbol=trade_presubmitted.contract.symbol,
+            event_local_symbol=trade_presubmitted.contract.localSymbol,
             event_sec_type=trade_presubmitted.contract.secType,
         )
 
@@ -1353,6 +1360,7 @@ async def test_callbacks_additional_coverage_branches(mock_config: Config) -> No
             111,
             avg_fill_price=0.0,
             event_symbol=trade_inactive.contract.symbol,
+            event_local_symbol=trade_inactive.contract.localSymbol,
             event_sec_type=trade_inactive.contract.secType,
         )
 
@@ -1364,6 +1372,7 @@ async def test_callbacks_additional_coverage_branches(mock_config: Config) -> No
             222,
             avg_fill_price=0.0,
             event_symbol=trade_unknown.contract.symbol,
+            event_local_symbol=trade_unknown.contract.localSymbol,
             event_sec_type=trade_unknown.contract.secType,
         )
 
@@ -1969,6 +1978,205 @@ async def test_save_execution_accepts_normalized_symbol_match_dot_de(
             assert row["currency"] == "EUR"
     finally:
         db.close = original_close
+
+
+@pytest.mark.asyncio
+async def test_save_execution_accepts_cme_future_root_and_local_symbol(
+    db, mock_config: Config
+) -> None:
+    """Verifies _save_execution persists execution when DB symbol is MNQZ6 and event symbol is MNQ."""
+    # Arrange
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=MagicMock(),
+        notifier=MagicMock(),
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    try:
+        await db.execute(
+            """
+            INSERT INTO orders (order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name, status)
+            VALUES (1729, 3001, NULL, 'G_MNQ', 'U19605236', 'ENTRY', 'MNQZ6', 'FUT', 'CME', 'BUY', 1, 'LMT', 21500.0, 'DAY', 'TwoPercent', 'Submitted')
+            """
+        )
+        await db.commit()
+
+        # Act: save execution with event symbol 'MNQ' and local_symbol 'MNQZ6'
+        await manager._save_execution(
+            "EXEC_MNQ_1",
+            1729,
+            Decimal("21500.00"),
+            Decimal("1"),
+            "USD",
+            "2026-09-28T16:05:45+00:00",
+            symbol="MNQ",
+            local_symbol="MNQZ6",
+            sec_type="FUT",
+        )
+
+        # Assert: execution inserted in DB
+        async with db.execute(
+            "SELECT COUNT(*) as count, price, qty FROM executions WHERE order_id = 1729"
+        ) as cursor:
+            row = await cursor.fetchone()
+            assert row["count"] == 1
+            assert Decimal(str(row["price"])) == Decimal("21500.00")
+            assert Decimal(str(row["qty"])) == Decimal("1")
+
+        # Act 2: save second execution with event symbol 'MNQ' and local_symbol=None (pure root matching)
+        await manager._save_execution(
+            "EXEC_MNQ_2",
+            1729,
+            Decimal("21505.00"),
+            Decimal("1"),
+            "USD",
+            "2026-09-28T16:06:00+00:00",
+            symbol="MNQ",
+            local_symbol=None,
+            sec_type="FUT",
+        )
+
+        # Assert: second execution also inserted
+        async with db.execute(
+            "SELECT COUNT(*) as count FROM executions WHERE order_id = 1729"
+        ) as cursor:
+            row = await cursor.fetchone()
+            assert row["count"] == 2
+    finally:
+        db.close = original_close
+
+
+@pytest.mark.asyncio
+async def test_update_order_status_db_accepts_cme_future_root_and_local_symbol(
+    db, mock_config: Config
+) -> None:
+    """Verifies _update_order_status_db accepts status updates with CME root symbol MNQ against DB contract MNQZ6."""
+    # Arrange
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    manager = TwsCallbacksManager(
+        db_factory=db_factory,
+        interactive_brokers=MagicMock(),
+        notifier=MagicMock(),
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    try:
+        await db.execute(
+            """
+            INSERT INTO orders (order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name, status)
+            VALUES (1730, 3002, NULL, 'G_MNQ_STATUS', 'U19605236', 'ENTRY', 'MNQZ6', 'FUT', 'CME', 'BUY', 1, 'LMT', 21500.0, 'DAY', 'TwoPercent', 'Submitted')
+            """
+        )
+        await db.commit()
+
+        # Act: update with event symbol 'MNQ' and local_symbol 'MNQZ6'
+        result_with_local = await manager._update_order_status_db(
+            1730,
+            "PreSubmitted",
+            3002,
+            event_symbol="MNQ",
+            event_sec_type="FUT",
+            event_local_symbol="MNQZ6",
+        )
+
+        # Assert: update accepted
+        assert result_with_local is True
+        async with db.execute(
+            "SELECT status FROM orders WHERE order_id = 1730"
+        ) as cursor:
+            row = await cursor.fetchone()
+            assert row["status"] == "PreSubmitted"
+
+        # Act 2: update with event symbol 'MNQ' without local_symbol (root-to-contract matching)
+        result_without_local = await manager._update_order_status_db(
+            1730,
+            "Filled",
+            3002,
+            event_symbol="MNQ",
+            event_sec_type="FUT",
+            event_local_symbol=None,
+        )
+
+        # Assert: update accepted
+        assert result_without_local is True
+        async with db.execute(
+            "SELECT status FROM orders WHERE order_id = 1730"
+        ) as cursor:
+            row = await cursor.fetchone()
+            assert row["status"] == "Filled"
+    finally:
+        db.close = original_close
+
+
+def test_is_event_symbol_mismatch_with_cme_futures() -> None:
+    """Verifies _is_event_symbol_mismatch correctly identifies matching and mismatched CME futures."""
+    # Matching cases: should return False (no mismatch)
+    assert (
+        TwsCallbacksManager._is_event_symbol_mismatch(
+            event_symbol="MNQ",
+            db_symbol="MNQZ6",
+            event_sec_type="FUT",
+            db_sec_type="FUT",
+            order_id=100,
+            event_local_symbol="MNQZ6",
+        )
+        is False
+    )
+    assert (
+        TwsCallbacksManager._is_event_symbol_mismatch(
+            event_symbol="MNQ",
+            db_symbol="MNQZ6",
+            event_sec_type="FUT",
+            db_sec_type="FUT",
+            order_id=101,
+            event_local_symbol=None,
+        )
+        is False
+    )
+
+    # Mismatch cases: should return True (mismatch)
+    assert (
+        TwsCallbacksManager._is_event_symbol_mismatch(
+            event_symbol="AAPL",
+            db_symbol="MNQZ6",
+            event_sec_type="STK",
+            db_sec_type="FUT",
+            order_id=102,
+            event_local_symbol=None,
+        )
+        is True
+    )
+    assert (
+        TwsCallbacksManager._is_event_symbol_mismatch(
+            event_symbol="MES",
+            db_symbol="MNQZ6",
+            event_sec_type="FUT",
+            db_sec_type="FUT",
+            order_id=103,
+            event_local_symbol=None,
+        )
+        is True
+    )
 
 
 @pytest.mark.asyncio

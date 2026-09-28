@@ -356,13 +356,17 @@ class TwsCallbacksManager:
         event_sec_type: str | None,
         db_sec_type: str,
         order_id: int,
+        event_local_symbol: str | None = None,
     ) -> bool:
         """Prüft auf Symbol-Mismatch zwischen TWS-Event und lokalem Datenbank-Record."""
-        if event_symbol is not None and not symbols_match(event_symbol, db_symbol):
+        if event_symbol is not None and not symbols_match(
+            event_symbol, db_symbol, local_symbol_a=event_local_symbol
+        ):
             logger.warning(
                 "Ignoring order status update due to symbol mismatch (ID collision)",
                 order_id=order_id,
                 event_symbol=event_symbol,
+                event_local_symbol=event_local_symbol,
                 db_symbol=db_symbol,
                 event_sec_type=event_sec_type,
                 db_sec_type=db_sec_type,
@@ -377,6 +381,7 @@ class TwsCallbacksManager:
         permanent_id: int,
         event_symbol: str | None = None,
         event_sec_type: str | None = None,
+        event_local_symbol: str | None = None,
     ) -> bool:
         """Schreibt das Status-Update atomar in die Datenbank.
 
@@ -406,6 +411,7 @@ class TwsCallbacksManager:
                     event_sec_type=event_sec_type,
                     db_sec_type=row["sec_type"],
                     order_id=order_id,
+                    event_local_symbol=event_local_symbol,
                 ):
                     return False
 
@@ -530,6 +536,9 @@ class TwsCallbacksManager:
                 trade.orderStatus.avgFillPrice if trade.orderStatus else None
             )
             event_symbol = trade.contract.symbol if trade.contract else None
+            event_local_symbol = (
+                getattr(trade.contract, "localSymbol", None) if trade.contract else None
+            )
             event_sec_type = trade.contract.secType if trade.contract else None
             cancel_reason = self._extract_cancellation_reason(trade)
 
@@ -541,6 +550,7 @@ class TwsCallbacksManager:
                         permanent_id,
                         avg_fill_price=avg_fill_price,
                         event_symbol=event_symbol,
+                        event_local_symbol=event_local_symbol,
                         event_sec_type=event_sec_type,
                         reason=cancel_reason,
                     )
@@ -553,6 +563,7 @@ class TwsCallbacksManager:
                         permanent_id,
                         avg_fill_price=avg_fill_price,
                         event_symbol=event_symbol,
+                        event_local_symbol=event_local_symbol,
                         event_sec_type=event_sec_type,
                     )
                 )
@@ -643,6 +654,7 @@ class TwsCallbacksManager:
         permanent_id: int,
         avg_fill_price: float | None = None,
         event_symbol: str | None = None,
+        event_local_symbol: str | None = None,
         event_sec_type: str | None = None,
         reason: str = "",
     ) -> None:
@@ -655,6 +667,7 @@ class TwsCallbacksManager:
                     permanent_id,
                     event_symbol=event_symbol,
                     event_sec_type=event_sec_type,
+                    event_local_symbol=event_local_symbol,
                 )
 
             if not updated:
@@ -1074,6 +1087,8 @@ class TwsCallbacksManager:
         currency = fill.contract.currency
         executed_at = fill.execution.time
         symbol = fill.contract.symbol
+        local_symbol = getattr(fill.contract, "localSymbol", None)
+        sec_type = getattr(fill.contract, "secType", None)
         side = fill.execution.side
 
         logger.info(
@@ -1081,6 +1096,8 @@ class TwsCallbacksManager:
             exec_id=exec_id,
             order_id=order_id,
             symbol=symbol,
+            local_symbol=local_symbol,
+            sec_type=sec_type,
             side=side,
             price=price,
             qty=qty,
@@ -1095,6 +1112,8 @@ class TwsCallbacksManager:
                 currency,
                 executed_at,
                 symbol=symbol,
+                local_symbol=local_symbol,
+                sec_type=sec_type,
                 trade=trade,
                 fill=fill,
             )
@@ -1130,6 +1149,8 @@ class TwsCallbacksManager:
         currency: str,
         executed_at: object,
         symbol: str | None = None,
+        local_symbol: str | None = None,
+        sec_type: str | None = None,
         trade: object = None,
         fill: object = None,
     ) -> None:
@@ -1137,12 +1158,15 @@ class TwsCallbacksManager:
         db = await self.db_factory()
         try:
             async with db.execute(
-                "SELECT symbol FROM orders WHERE order_id = ?", (order_id,)
+                "SELECT symbol, sec_type FROM orders WHERE order_id = ?", (order_id,)
             ) as cursor:
                 order_row = await cursor.fetchone()
 
             if not order_row or (
-                symbol is not None and not symbols_match(symbol, order_row["symbol"])
+                symbol is not None
+                and not symbols_match(
+                    symbol, order_row["symbol"], local_symbol_a=local_symbol
+                )
             ):
                 self._handle_unmatched_execution(
                     order_id=order_id,

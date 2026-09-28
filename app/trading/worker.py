@@ -46,6 +46,7 @@ from app.trading.order_builder import (
     make_contract_for_order,
     normalize_symbol,
     should_apply_loc_gtd,
+    symbols_match,
 )
 
 logger = structlog.get_logger()
@@ -1716,7 +1717,9 @@ def _get_live_position_quantity(
             if isinstance(raw_local_symbol, str)
             else ""
         )
-        if target_symbol in (contract_symbol, contract_local_symbol):
+        if target_symbol in (contract_symbol, contract_local_symbol) or symbols_match(
+            contract_symbol, target_symbol, local_symbol_a=contract_local_symbol
+        ):
             return Decimal(str(position.position))
     return Decimal("0.0")
 

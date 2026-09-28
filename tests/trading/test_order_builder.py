@@ -71,6 +71,43 @@ def test_symbols_match_with_different_symbols() -> None:
     assert symbols_match("BRK.A", "BRK.B") is False
 
 
+def test_symbols_match_with_cme_future_roots_and_contracts() -> None:
+    """Verifies that symbols_match connects CME future roots to concrete contracts."""
+    # Symmetrical root-to-contract matching
+    assert symbols_match("MNQ", "MNQZ6") is True
+    assert symbols_match("MNQZ6", "MNQ") is True
+    assert symbols_match("MES", "MESU6") is True
+    assert symbols_match("MESU6", "MES") is True
+    assert symbols_match("M2K", "M2KZ6") is True
+    assert symbols_match("MYM", "MYMH7") is True
+    assert symbols_match("NQ", "NQZ26") is True
+    assert symbols_match("ES", "ESZ6") is True
+    assert symbols_match("RTY", "RTYM7") is True
+    assert symbols_match("YM", "YMZ6") is True
+
+    # Case insensitivity
+    assert symbols_match("mnq", "MNQZ6") is True
+    assert symbols_match("MNQ", "mnqz6") is True
+
+
+def test_symbols_match_with_local_symbol() -> None:
+    """Verifies that symbols_match evaluates optional local_symbol_a parameter."""
+    assert symbols_match("MNQ", "MNQZ6", local_symbol_a="MNQZ6") is True
+    assert symbols_match("UNKNOWN", "MNQZ6", local_symbol_a="MNQZ6") is True
+    assert symbols_match("MNQ", "MNQU6", local_symbol_a="MNQU6") is True
+
+
+def test_symbols_match_with_future_mismatches() -> None:
+    """Verifies that symbols_match rejects mismatched future contracts and non-futures."""
+    # Different contracts where neither is root
+    assert symbols_match("MNQZ6", "MNQU6") is False
+    # Cross-product of different roots
+    assert symbols_match("MNQ", "MESZ6") is False
+    assert symbols_match("ES", "NQZ6") is False
+    # Root followed only by non-digits
+    assert symbols_match("MNQ", "MNQABC") is False
+
+
 def test_symbols_match_with_none_or_empty() -> None:
     """Verifies that symbols_match returns True when either argument is None or empty."""
     assert symbols_match(None, "AAPL") is True

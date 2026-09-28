@@ -23,7 +23,7 @@ from app.core.config import Config
 from app.core.db import transaction
 from app.core.models import OrderRow, order_row_from_db_row, parse_positive_decimal
 from app.services.notifier import TelegramNotifier, build_tree_message
-from app.trading.order_builder import normalize_symbol
+from app.trading.order_builder import normalize_symbol, symbols_match
 
 logger = structlog.get_logger()
 
@@ -463,8 +463,12 @@ def _has_live_position(interactive_brokers: IB, account_id: str, symbol: str) ->
         )
         if (
             target_symbol in (contract_symbol, contract_local_symbol)
-            and abs(position.position) > 0
-        ):
+            or symbols_match(
+                contract_symbol,
+                target_symbol,
+                local_symbol_a=contract_local_symbol,
+            )
+        ) and abs(position.position) > 0:
             return True
     return False
 
@@ -614,7 +618,15 @@ async def reconcile_broker_positions(
             elif root_symbol in db_positions:
                 symbol = root_symbol
             else:
-                symbol = local_symbol
+                matching_db_symbol = next(
+                    (
+                        s
+                        for s in db_positions
+                        if symbols_match(root_symbol, s, local_symbol_a=local_symbol)
+                    ),
+                    None,
+                )
+                symbol = matching_db_symbol if matching_db_symbol else local_symbol
         else:
             symbol = root_symbol
 
