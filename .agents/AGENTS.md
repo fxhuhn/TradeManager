@@ -46,6 +46,7 @@ whenever a task involves one of the domains below:
 | Testing & SDET                      | `python-tester`                                                    |
 | Database & Persistence Management   | `sqlite-persistence`                                               |
 | Code Refactoring & Transformation   | `python-craftsman` / `python-tester` / `python-auditor` (workflow: `/refactor`) |
+| Dead Code & Deprecation Audit       | `python-auditor` / `python-security` (workflow: `/audit-dead-code`) |
 | Comprehensive Code Review & Gates   | `python-craftsman` (workflow: `/craft`)                            |
 
 ### Step 3 — Analysis & Implementation
