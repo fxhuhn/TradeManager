@@ -8,6 +8,7 @@ transmitted_at
 ExecutionRow
 SettlementRow
 net_pnl
+pnl_backtest
 settled_at
 CSV_FILE_PATH
 oca_type

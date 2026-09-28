@@ -261,3 +261,136 @@ def test_match_unrecognized_cash_transaction_skipped() -> None:
 
     ledger_rows = match_flex_statement(statement, historical_trades=())
     assert len(ledger_rows) == 0
+
+
+def test_match_trade_fees_with_direct_id_and_unbundled_components() -> None:
+    """Verifiziert die Buchung aller unbundled Gebühren (Reg, Exch, Clearing, Other) über trade_id."""
+    from app.services.flex_query.models import FlexTradeFeeRecord
+
+    statement = ParsedFlexStatement(
+        account_id="DU123456",
+        from_date="2026-06-01",
+        to_date="2026-06-30",
+        when_generated="20260630;100000",
+        trade_fees=(
+            FlexTradeFeeRecord(
+                account_id="DU123456",
+                symbol="AAPL",
+                date_time="2026-06-15",
+                buy_sell="BUY",
+                quantity=Decimal("100"),
+                price=Decimal("150.00"),
+                total_commission=Decimal("2.50"),
+                broker_execution_charge=Decimal("1.00"),
+                broker_clearing_charge=Decimal("0.50"),
+                third_party_execution_charge=Decimal("0.30"),
+                third_party_clearing_charge=Decimal("0.20"),
+                third_party_regulatory_charge=Decimal("0.10"),
+                other=Decimal("0.05"),
+                currency="USD",
+                fx_rate_to_base=Decimal("1.0"),
+                trade_id="EXEC-12345",
+            ),
+        ),
+    )
+
+    trades = (
+        HistoricalTradeContext(
+            account_id="DU123456",
+            trade_group_id="TG-AAPL-01",
+            symbol="AAPL",
+            action="BUY",
+            quantity=Decimal("100"),
+            entry_date="2026-06-15",
+            exec_ids=frozenset({"EXEC-12345"}),
+        ),
+    )
+
+    ledger_rows = match_flex_statement(statement, trades)
+    # Should create: REGULATORY_FEE and EXCHANGE_FEE
+    assert len(ledger_rows) == 2
+    categories = {row.category for row in ledger_rows}
+    assert categories == {"REGULATORY_FEE", "EXCHANGE_FEE"}
+    for row in ledger_rows:
+        assert row.trade_group_id == "TG-AAPL-01"
+        assert row.amount < Decimal("0.0")
+        assert row.status == "SETTLED"
+
+
+def test_match_trade_fees_fallback_matching() -> None:
+    """Verifiziert das Fallback-Matching über order_reference und Symbol/Datum."""
+    from app.services.flex_query.models import FlexTradeFeeRecord
+
+    statement = ParsedFlexStatement(
+        account_id="DU123456",
+        from_date="2026-06-01",
+        to_date="2026-06-30",
+        when_generated="20260630;100000",
+        trade_fees=(
+            # Match via order_reference
+            FlexTradeFeeRecord(
+                account_id="DU123456",
+                symbol="MSFT",
+                date_time="2026-06-15",
+                buy_sell="BUY",
+                quantity=Decimal("50"),
+                price=Decimal("300.00"),
+                total_commission=Decimal("1.50"),
+                broker_execution_charge=Decimal("0.0"),
+                broker_clearing_charge=Decimal("0.0"),
+                third_party_execution_charge=Decimal("0.25"),
+                third_party_clearing_charge=Decimal("0.0"),
+                third_party_regulatory_charge=Decimal("0.0"),
+                other=Decimal("0.0"),
+                currency="USD",
+                order_reference="999001",
+            ),
+            # Match via Symbol/Datum Fallback
+            FlexTradeFeeRecord(
+                account_id="DU123456",
+                symbol="TSLA",
+                date_time="2026-06-20",
+                buy_sell="SELL",
+                quantity=Decimal("20"),
+                price=Decimal("200.00"),
+                total_commission=Decimal("1.00"),
+                broker_execution_charge=Decimal("0.0"),
+                broker_clearing_charge=Decimal("0.0"),
+                third_party_execution_charge=Decimal("0.0"),
+                third_party_clearing_charge=Decimal("0.0"),
+                third_party_regulatory_charge=Decimal("0.15"),
+                other=Decimal("0.0"),
+                currency="USD",
+                order_reference="INVALID_NON_INT",
+            ),
+        ),
+    )
+
+    trades = (
+        HistoricalTradeContext(
+            account_id="DU123456",
+            trade_group_id="TG-MSFT-01",
+            symbol="MSFT",
+            action="BUY",
+            quantity=Decimal("50"),
+            entry_date="2026-06-15",
+            order_ids=frozenset({999001}),
+        ),
+        HistoricalTradeContext(
+            account_id="DU123456",
+            trade_group_id="TG-TSLA-01",
+            symbol="TSLA",
+            action="SELL",
+            quantity=Decimal("20"),
+            entry_date="2026-06-20",
+        ),
+    )
+
+    ledger_rows = match_flex_statement(statement, trades)
+    assert len(ledger_rows) == 2
+    msft_fee = next(r for r in ledger_rows if r.symbol == "MSFT")
+    tsla_fee = next(r for r in ledger_rows if r.symbol == "TSLA")
+    assert msft_fee.trade_group_id == "TG-MSFT-01"
+    assert msft_fee.category == "EXCHANGE_FEE"
+    assert tsla_fee.trade_group_id == "TG-TSLA-01"
+    assert tsla_fee.category == "REGULATORY_FEE"

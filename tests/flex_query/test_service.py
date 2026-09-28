@@ -100,3 +100,61 @@ async def test_fetch_historical_trades_empty_db(
     service = FlexReconciliationService(db=memory_db, config=config)
     trades = await service.fetch_historical_trades()
     assert len(trades) == 0
+
+
+@pytest.mark.asyncio
+async def test_sync_and_reconcile_flow(
+    memory_db: aiosqlite.Connection,
+    sample_flex_xml: str,
+) -> None:
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    config = FlexQueryConfig(enabled=True)
+    mock_notifier = MagicMock()
+    mock_notifier.is_active = True
+    mock_notifier.send_flex_reconciliation_summary = AsyncMock()
+
+    service = FlexReconciliationService(
+        db=memory_db, config=config, notifier=mock_notifier
+    )
+
+    with patch(
+        "app.services.flex_query.client.FlexWebServiceClient.fetch_statement",
+        new_callable=AsyncMock,
+    ) as mock_fetch:
+        mock_fetch.return_value = sample_flex_xml
+
+        report = await service.sync_and_reconcile(token="TOK123", query_id="QRY456")
+        assert report.account_id == "DU123456"
+        mock_fetch.assert_awaited_once_with(token="TOK123", query_id="QRY456")
+        mock_notifier.send_flex_reconciliation_summary.assert_awaited_once_with(report)
+
+
+@pytest.mark.asyncio
+async def test_sync_and_reconcile_handles_notifier_error(
+    memory_db: aiosqlite.Connection,
+    sample_flex_xml: str,
+) -> None:
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    config = FlexQueryConfig(enabled=True)
+    mock_notifier = MagicMock()
+    mock_notifier.is_active = True
+    mock_notifier.send_flex_reconciliation_summary = AsyncMock(
+        side_effect=RuntimeError("Telegram network down")
+    )
+
+    service = FlexReconciliationService(
+        db=memory_db, config=config, notifier=mock_notifier
+    )
+
+    with patch(
+        "app.services.flex_query.client.FlexWebServiceClient.fetch_statement",
+        new_callable=AsyncMock,
+    ) as mock_fetch:
+        mock_fetch.return_value = sample_flex_xml
+
+        # Should not raise exception, logs error instead
+        report = await service.sync_and_reconcile()
+        assert report.account_id == "DU123456"
+        mock_notifier.send_flex_reconciliation_summary.assert_awaited_once()

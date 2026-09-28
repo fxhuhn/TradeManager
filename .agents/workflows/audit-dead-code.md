@@ -143,7 +143,9 @@ from warnings import deprecated
     "get_latest_account_metrics ist veraltet und wird in v1.5 entfernt. "
     "Nutze stattdessen sync_and_save_account_metrics."
 )
-async def get_latest_account_metrics(database: aiosqlite.Connection) -> AccountMetricsSnapshot | None:
+async def get_latest_account_metrics(
+    database: aiosqlite.Connection,
+) -> AccountMetricsSnapshot | None:
     """Queries the latest account metrics snapshot from SQLite.
 
     .. deprecated:: 1.4

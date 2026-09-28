@@ -33,7 +33,6 @@ class CodeDefinition:
     file_path: Path
     line_number: int
     def_type: str  # 'function', 'async_function', 'class', 'method'
-    parent_class: str | None
     is_private: bool
 
 
@@ -61,7 +60,6 @@ class DefinitionExtractor(ast.NodeVisitor):
                 file_path=self.file_path,
                 line_number=node.lineno,
                 def_type="class",
-                parent_class=None,
                 is_private=node.name.startswith("_"),
             )
         )
@@ -95,7 +93,6 @@ class DefinitionExtractor(ast.NodeVisitor):
                 file_path=self.file_path,
                 line_number=node.lineno,
                 def_type=def_type,
-                parent_class=self._current_class,
                 is_private=node.name.startswith("_"),
             )
         )
