@@ -1175,3 +1175,31 @@ async def test_send_daily_summary_without_equity(mock_config: MagicMock) -> None
         message_arg = mock_send.call_args[0][0]
         assert "Equity" not in message_arg
         assert "🟢" in message_arg
+
+
+def test_format_flex_reconciliation_rows() -> None:
+    """Verifies that _format_flex_reconciliation_rows formats trade reconciliation rows."""
+    from app.services.flex_query.service import ReconciliationReport
+    from app.services.notifier import _format_flex_reconciliation_rows
+
+    report = ReconciliationReport(
+        account_id="U123456",
+        from_date="2026-09-28",
+        to_date="2026-09-28",
+        total_parsed=10,
+        inserted_count=2,
+        skipped_duplicate_count=8,
+        allocated_to_trades_count=1,
+        account_level_count=1,
+        total_trade_adjustments_base=Decimal("15.50"),
+        total_account_expenses_base=Decimal("2.30"),
+        reconciled_trades_count=2,
+        settled_trades_count=2,
+    )
+
+    rows = _format_flex_reconciliation_rows(report)
+    row_keys = [k for k, _ in rows]
+    assert "Account" in row_keys
+    assert "Trade-Abgleich" in row_keys
+    trade_row = next(v for k, v in rows if k == "Trade-Abgleich")
+    assert "2 Fills abgeglichen (2 abgewickelt)" in trade_row

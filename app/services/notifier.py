@@ -151,7 +151,10 @@ def build_tree_message(
 
 
 DEFAULT_BOT_KEYBOARD: Final[dict[str, Any]] = {
-    "keyboard": [[{"text": "📊 Status"}, {"text": "🔄 IBKR Neustart"}]],
+    "keyboard": [
+        [{"text": "📊 Status"}, {"text": "🔄 IBKR Neustart"}],
+        [{"text": "📑 Sync Flex"}],
+    ],
     "resize_keyboard": True,
     "persistent": True,
 }
@@ -320,6 +323,13 @@ def _format_flex_reconciliation_rows(report: ReconciliationReport) -> list[TreeR
             f"{report.account_level_count} Buchungen (<code>$ {report.total_account_expenses_base:,.2f}</code>)",
         ),
     ]
+    if report.reconciled_trades_count > 0 or report.settled_trades_count > 0:
+        rows.append(
+            (
+                "Trade-Abgleich",
+                f"{report.reconciled_trades_count} Fills abgeglichen ({report.settled_trades_count} abgewickelt)",
+            )
+        )
     return rows
 
 

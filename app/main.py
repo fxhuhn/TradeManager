@@ -172,11 +172,15 @@ class TradingSystemOrchestrator:
                 notifier=self.notifier,
             )
             report = await service.sync_and_reconcile()
+            trades_info = ""
+            if report.reconciled_trades_count > 0 or report.settled_trades_count > 0:
+                trades_info = f"\n• {report.reconciled_trades_count} Fills abgeglichen ({report.settled_trades_count} Trades abgewickelt)"
             return (
                 f"✅ Flex-Sync erfolgreich:\n"
                 f"• {report.inserted_count} neue Buchungen ({report.skipped_duplicate_count} Duplikate)\n"
                 f"• {report.allocated_to_trades_count} Trades zugeordnet ($ {report.total_trade_adjustments_base:,.2f})\n"
                 f"• {report.account_level_count} Konto-Ausgaben ($ {report.total_account_expenses_base:,.2f})"
+                f"{trades_info}"
             )
         finally:
             await db.close()

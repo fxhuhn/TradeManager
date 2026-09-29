@@ -284,6 +284,35 @@ async def test_handle_callback_query_authorized(mock_config: MagicMock) -> None:
 
 
 @pytest.mark.asyncio
+async def test_handle_callback_query_sync_flex(mock_config: MagicMock) -> None:
+    """Verifiziert Behandlung von Inline-Button sync_flex."""
+    notifier = MagicMock()
+    notifier.send_message = AsyncMock(return_value=True)
+    notifier.answer_callback_query = AsyncMock(return_value=True)
+    flex_cb = AsyncMock(return_value="Sync OK")
+
+    listener = TelegramCommandListener(
+        config=mock_config,
+        notifier=notifier,
+        container_manager=MagicMock(),
+        trigger_reconnect_callback=AsyncMock(),
+        flex_sync_callback=flex_cb,
+    )
+
+    callback_query = {
+        "id": "query_456",
+        "message": {"chat": {"id": 987654321}},
+        "data": "sync_flex",
+    }
+    await listener._handle_callback_query(callback_query)
+
+    notifier.answer_callback_query.assert_awaited_once_with(
+        "query_456", text="Flex-Sync wird ausgeführt..."
+    )
+    flex_cb.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_handle_callback_query_unauthorized(mock_config: MagicMock) -> None:
     """Verifiziert Ablehnung unautorisierter Inline-Button-Klicks."""
     notifier = MagicMock()
@@ -378,6 +407,14 @@ async def test_handle_button_text_commands(mock_config: MagicMock) -> None:
     )
     container_mgr.restart_container.assert_awaited_once_with(container_name="ibkr")
     reconnect_cb.assert_awaited_once()
+
+    # 3. Klick auf '📑 Sync Flex'
+    flex_cb = AsyncMock(return_value="Sync finished")
+    listener._flex_sync_callback = flex_cb
+    await listener._handle_text_message(
+        {"chat": {"id": 987654321}, "text": "📑 Sync Flex"}
+    )
+    flex_cb.assert_awaited_once()
 
 
 @pytest.mark.asyncio

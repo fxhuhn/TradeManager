@@ -261,6 +261,11 @@ class TelegramCommandListener:
                 query_id, text="IBKR-Neustart wird ausgeführt..."
             )
             await self._execute_ibkr_restart_flow()
+        elif callback_data == "sync_flex":
+            await self._notifier.answer_callback_query(
+                query_id, text="Flex-Sync wird ausgeführt..."
+            )
+            await self._execute_flex_sync_flow()
         else:
             await self._notifier.answer_callback_query(
                 query_id, text=f"Unbekannte Aktion: {callback_data}"
@@ -527,7 +532,7 @@ class TelegramCommandListener:
                 ),
                 (
                     "/sync_flex",
-                    "IBKR Flex Query synchronisieren (Nebenkosten & Zinsen)",
+                    "IBKR Flex Query synchronisieren (Trades, Nebenkosten & Zinsen)",
                 ),
                 ("/help", "Diese Hilfemeldung anzeigen"),
             ],
