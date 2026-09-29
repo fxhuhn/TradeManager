@@ -100,7 +100,7 @@ The system is constructed around a strict set of architectural rules to ensure d
 
 ### 3.1 Import, Sizing & Queueing
 1. **File Watcher Detection**: A background task polls for `orders_YYYY_MM_DD.csv` in `data/orders/` (see [doc/csv_interface.md](file:///Users/produktmanagement/Python/github/TradeManager/doc/csv_interface.md) for the exhaustive CSV interface contract). If found, a sizing check is initiated.
-2. **Capital Zuteilung Limits & Downscaling**: Net liquidation, cash, and buying power are requested from IBKR. The sizing math scales order quantities down symmetrically if estimated costs exceed allocated thresholds.
+2. **Capital Zuteilung Limits & Downscaling**: Net liquidation, cash, and buying power are requested from IBKR. The sizing math scales order quantities down symmetrically if estimated costs exceed allocated thresholds. Under BaFin cash protection rules, a batch cash budget reserves required margin for each futures trade group, skipping groups if qualifying cash is exhausted.
 3. **Database Insertion**: Orders are saved to SQLite with negative temporary parent/child IDs (to maintain bracket structures before TWS ID assignment).
 4. **Worker Queueing**: Valid trade groups are pushed to an asynchronous processing queue (`asyncio.Queue`).
 
@@ -115,6 +115,7 @@ The system is constructed around a strict set of architectural rules to ensure d
 2. **PnL & VWAP Consolidation**: Upon exit fill, the settlement module fetches execution entries, calculates average entry/exit VWAP, commissions, slippage, and net PnL, then persists the record in `trades_settlement`.
 3. **Telegram Notification**: Formatted HTML summaries are sent via the rate-limited Telegram client.
 4. **Background Alerting**: An independent watchdog scans the database for stuck orders (no status change for over threshold time) or excessive slippage and reports anomalies immediately.
+5. **Position Reconciliation & Liquidation Recovery**: Periodic reconciliation (`reconcile_broker_positions`) compares local positions against broker holdings. Discrepancies where local size exceeds broker holdings (`delta_qty < 0`, e.g. from BaFin Negative Equity Protection liquidations) trigger automatic cancellation of active child exit orders (`SL`, `TP`, `EXIT`), synthetic settlement generation, and high-priority Telegram alerts.
 
 ---
 
@@ -129,6 +130,7 @@ This section provides a detailed reference of all public classes and functions i
 - `TelegramConfig` (Class): Telegram credentials and target chat settings.
 - `FuturesConfig` (Class): Configuration for automatic signal transformation into CME futures.
   - `is_strategy_enabled` (Method): Evaluates whether a strategy is permitted to transform into futures, supporting wildcard declarations.
+  - `get_margin_requirement` (Method): Returns the configured margin cash buffer for a future symbol.
 - `FlexQueryConfig` (Class): Configuration for Interactive Brokers Flex Query web service synchronization.
 - `Config` (Class): Parent configuration object nesting TWS, App, Account, Telegram, Futures, and Flex Query configs.
 - `load_env` (Function): Loads environment variables from the given environment path.
@@ -182,6 +184,7 @@ This section provides a detailed reference of all public classes and functions i
 
 ### 4.7 Module: `app.services.importer`
 - `AccountBalanceMetrics` (Class): Dataclass encapsulating cash, margin, and liquidation values.
+- `BatchCashBudget` (Class): Dataclass managing remaining qualifying futures cash across batch CSV trade groups under BaFin rules.
 - `run_csv_import` (Function): Orchestrates directory polling and loading of new CSV targets.
 - `resolve_account_id` (Function): Queries TWS to determine the default target account ID.
 - `calculate_downscaled_quantity` (Function): Computes downscaled order size to respect capital rules.
@@ -210,6 +213,7 @@ This section provides a detailed reference of all public classes and functions i
   - `send_margin_utilization_warning` (Method)
   - `send_high_margin_usage_warning` (Method)
   - `send_unassigned_position_recovered` (Method)
+  - `send_external_liquidation_alert` (Method)
   - `send_broker_connection_status` (Method)
   - `send_read_only_alert` (Method)
   - `send_archived_error_alert` (Method)
@@ -298,6 +302,7 @@ This section provides a detailed reference of all public classes and functions i
 - `execution_worker` (Function): Asynchronous background consumer service processing trade group placement requests from the queue.
 - `process_trade_group` (Function): Core worker loop evaluating a single trade group sequence.
 - `handle_reauthorization_wait` (Function): Pauses order execution upon a token/reauthorization requirement, performs periodic What-If probes, sends Telegram alerts, and cancels expired orders upon market close.
+- `get_live_position_quantity` (Function): Queries live broker position quantity for a specific account and symbol.
 
 ### 4.19 Module: `app.services.account_metrics`
 - `AccountMetricsSnapshot` (Class): Encapsulates equity, margin requirements, cushion, and cash.

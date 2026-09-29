@@ -46,6 +46,13 @@ class AccountBalanceMetrics:
     buying_power: Decimal = Decimal("0.0")
 
 
+@dataclass
+class BatchCashBudget:
+    """Verfolgt das verbleibende freie Futures-Cash während eines CSV-Import-Batches."""
+
+    available_futures_cash: Decimal
+
+
 async def csv_directory_watcher(
     db_factory: Callable[[], Awaitable[aiosqlite.Connection]],
     interactive_brokers: IB,
@@ -199,6 +206,38 @@ async def run_csv_import(
                 error=str(exception),
             )
 
+    batch_cash_budget: BatchCashBudget | None = None
+    if config.futures.bafin_cash_protection:
+        try:
+            primary_account = resolve_account_id(interactive_brokers, "")
+            balance_metrics = await fetch_account_balance_metrics(
+                interactive_brokers, primary_account
+            )
+            total_cash = balance_metrics.total_cash_value
+            existing_futures_margin = Decimal("0.0")
+            for pos in interactive_brokers.positions():
+                raw_sec_type = getattr(pos.contract, "secType", "")
+                if raw_sec_type == "FUT" and pos.position != 0:
+                    pos_symbol = getattr(pos.contract, "symbol", "") or getattr(
+                        pos.contract, "localSymbol", ""
+                    )
+                    req = config.futures.get_margin_requirement(pos_symbol)
+                    existing_futures_margin += abs(Decimal(str(pos.position))) * req
+
+            avail_cash = max(Decimal("0.0"), total_cash - existing_futures_margin)
+            batch_cash_budget = BatchCashBudget(available_futures_cash=avail_cash)
+            logger.info(
+                "Initialized batch cash budget for futures",
+                total_cash=float(total_cash),
+                existing_futures_margin=float(existing_futures_margin),
+                available_futures_cash=float(avail_cash),
+            )
+        except Exception as budget_error:
+            logger.warning(
+                "Could not initialize batch futures cash budget. Falling back.",
+                error=str(budget_error),
+            )
+
     imported_group_ids: list[str] = []
     for trade_group_id, raw_legs in grouped_legs.items():
         is_queued = await _process_and_upsert_group(
@@ -210,6 +249,7 @@ async def run_csv_import(
             notifier=notifier,
             config=config,
             current_weekday=current_weekday,
+            batch_cash_budget=batch_cash_budget,
         )
         if is_queued:
             imported_group_ids.append(trade_group_id)
@@ -271,7 +311,7 @@ async def _process_daily_csv_file(
                     "WHERE trade_group_id IN (SELECT value FROM json_each(?)) "
                     "AND ("
                     "  (status = 'Error' AND (transmitted_at IS NULL OR date(transmitted_at) >= ?)) "
-                    "  OR (status = 'Cancelled' AND transmitted_at IS NULL)"
+                    "  OR (status = 'Cancelled' AND transmitted_at IS NULL AND bracket_role = 'ENTRY')"
                     ")"
                 )
                 parameters: tuple[object, ...] = (
@@ -284,7 +324,7 @@ async def _process_daily_csv_file(
                     "WHERE trade_group_id IN (SELECT value FROM json_each(?)) "
                     "AND ("
                     "  (status = 'Error' AND (transmitted_at IS NULL OR date(transmitted_at) >= date('now', 'localtime'))) "
-                    "  OR (status = 'Cancelled' AND transmitted_at IS NULL)"
+                    "  OR (status = 'Cancelled' AND transmitted_at IS NULL AND bracket_role = 'ENTRY')"
                     ")"
                 )
                 parameters = (json.dumps(imported_group_ids),)
@@ -436,6 +476,7 @@ async def _process_and_upsert_group(
     notifier: TelegramNotifier,
     config: Config,
     current_weekday: int | None = None,
+    batch_cash_budget: BatchCashBudget | None = None,
 ) -> bool:
     """Validiert eine einzelne Gruppe, berechnet das Sizing und speichert sie in der DB."""
     is_valid, error_message = validate_group(trade_group_id, raw_legs)
@@ -576,6 +617,40 @@ async def _process_and_upsert_group(
     account_id = resolve_account_id(interactive_brokers, account_id)
 
     target_quantity = 1 if is_future_transformed else first_leg.quantity
+    if entry_leg and is_future_transformed:
+        if config.futures.bafin_cash_protection and batch_cash_budget is not None:
+            required_margin = config.futures.get_margin_requirement(future_symbol)
+            if batch_cash_budget.available_futures_cash < required_margin:
+                logger.warning(
+                    "Future trade group skipped due to BaFin cash protection: Insufficient qualifying cash.",
+                    trade_group_id=trade_group_id,
+                    strategy=strategy,
+                    future_symbol=future_symbol,
+                    available_cash=float(batch_cash_budget.available_futures_cash),
+                    required_margin=float(required_margin),
+                )
+                await notifier.send_importer_info(
+                    file_name=trade_group_id,
+                    status="Übersprungen (BaFin-Cash-Schutz)",
+                    details=(
+                        f"Future-Order {future_symbol} ({strategy}) abgelehnt: Verfügbares Cash "
+                        f"(${float(batch_cash_budget.available_futures_cash):.2f}) reicht nicht für den "
+                        f"erforderlichen Margin-Puffer (${float(required_margin):.2f})."
+                    ),
+                    emoji="🛡️",
+                    title="BAFIN CASH-SCHUTZ",
+                )
+                return False
+
+            batch_cash_budget.available_futures_cash -= required_margin
+            logger.info(
+                "Allocated cash for future order",
+                trade_group_id=trade_group_id,
+                future_symbol=future_symbol,
+                allocated_margin=float(required_margin),
+                remaining_cash=float(batch_cash_budget.available_futures_cash),
+            )
+
     if entry_leg and not is_future_transformed:
         balance_metrics = await fetch_account_balance_metrics(
             interactive_brokers, account_id
@@ -666,7 +741,27 @@ async def _process_and_upsert_group(
                 title="SIZING-FEHLER",
             )
             return False
-    elif not entry_leg:
+
+    if not entry_leg:
+        # 1. Prüfen, ob die Trade-Gruppe bereits final abgewickelt (settled) ist
+        async with db.execute(
+            "SELECT 1 FROM trades_settlement WHERE account_id = ? AND trade_group_id = ?",
+            (account_id, trade_group_id),
+        ) as cursor:
+            if await cursor.fetchone():
+                logger.info(
+                    "Skipping standalone exit: Trade group is already settled.",
+                    trade_group_id=trade_group_id,
+                )
+                await notifier.send_importer_info(
+                    file_name=trade_group_id,
+                    status="Übersprungen",
+                    details=f"Exit-Order für {trade_group_id} übersprungen: Trade-Gruppe ist bereits final abgerechnet.",
+                    emoji="ℹ️",
+                    title="TRADE BEREITS GESCHLOSSEN",
+                )
+                return False
+
         # Standalone exit: Validate that an ENTRY order exists in DB and is not in Error/Cancelled status
         async with db.execute(
             "SELECT order_id, status, quantity FROM orders WHERE account_id = ? AND trade_group_id = ? AND bracket_role = 'ENTRY'",

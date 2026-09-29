@@ -939,7 +939,55 @@ async def _verify_margin_and_cushion(
 
     if order_state:
         init_margin_after = Decimal(str(order_state.initMarginAfter or "0.0"))
+        try:
+            raw_margin_before = getattr(order_state, "initMarginBefore", None)
+            init_margin_before = (
+                Decimal(str(raw_margin_before))
+                if raw_margin_before is not None
+                and str(raw_margin_before).replace(".", "", 1).isdigit()
+                else Decimal("0.0")
+            )
+        except Exception:
+            init_margin_before = Decimal("0.0")
         equity_with_loan = Decimal(str(order_state.equityWithLoanAfter or "0.0"))
+
+        # BaFin-Futures Cash-Schutz: Reine Cash-Deckung für Futures erzwingen
+        if entry_order.sec_type == "FUT" and config.futures.bafin_cash_protection:
+            margin_delta = max(Decimal("0.0"), init_margin_after - init_margin_before)
+            if margin_delta <= Decimal("0.0"):
+                margin_delta = config.futures.get_margin_requirement(entry_order.symbol)
+
+            total_cash = _get_account_value(
+                interactive_brokers, entry_order.account_id, "TotalCashValue"
+            )
+            if total_cash is None:
+                total_cash = _get_account_value(
+                    interactive_brokers, entry_order.account_id, "TotalCashBalance"
+                )
+
+            if total_cash is not None and margin_delta > total_cash:
+                logger.error(
+                    "Futures order blocked by BaFin cash protection: required margin exceeds available cash.",
+                    required_margin=float(margin_delta),
+                    total_cash=float(total_cash),
+                    symbol=entry_order.symbol,
+                    trade_group_id=entry_order.trade_group_id,
+                )
+                entry_order = dataclasses.replace(entry_order, status="Error")
+                async with transaction(db):
+                    await db.execute(
+                        "UPDATE orders SET status = 'Error' WHERE order_id = ?",
+                        (entry_order.order_id,),
+                    )
+                await notifier.send_margin_limit_exceeded(
+                    symbol=entry_order.symbol,
+                    account_id=entry_order.account_id,
+                    init_margin_after=margin_delta,
+                    limit_value=total_cash,
+                    cushion_percentage=cushion_percentage,
+                )
+                return False, entry_order
+
         passed_limit, entry_order = await _check_margin_limit_and_alert(
             db=db,
             entry_order=entry_order,
@@ -1695,7 +1743,7 @@ async def _reduce_exit_order_quantity(
     )
 
 
-def _get_live_position_quantity(
+def get_live_position_quantity(
     interactive_brokers: IB, account_id: str, symbol: str
 ) -> Decimal:
     """Ermittelt den aktuellen Depotbestand für ein bestimmtes Symbol und Account.
@@ -1722,6 +1770,9 @@ def _get_live_position_quantity(
         ):
             return Decimal(str(position.position))
     return Decimal("0.0")
+
+
+_get_live_position_quantity = get_live_position_quantity
 
 
 async def _get_next_non_colliding_order_id(

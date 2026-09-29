@@ -812,3 +812,88 @@ async def test_run_recovery_skips_when_disconnected(mock_config: Config) -> None
             mock_db, mock_ib, mock_queue, mock_notifier, mock_trigger, mock_config
         )
         mock_fetch.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_broker_positions_detects_deficit_and_cancels_child_orders(
+    db,
+) -> None:
+    """Verifies that reconcile_broker_positions detects deficit (broker_qty < db_qty), cancels child orders, creates synthetic EXIT, and alerts."""
+    from app.trading.recovery import reconcile_broker_positions
+
+    # 1. DB-Zustand: Offene Position durch gefüllten Entry
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name, status)
+        VALUES (100, 1001, NULL, 'TG_LIQ_MNQ', 'U12345', 'ENTRY', 'MNQZ6', 'FUT', 'CME', 'BUY', 1, 'MKT', '21000.0', 'GTC', 'TwoPercent', 'Filled')
+        """
+    )
+    await db.execute(
+        """
+        INSERT INTO executions (exec_id, order_id, price, qty, commission, currency, executed_at)
+        VALUES ('EXEC_ENTRY_100', 100, '21000.0', '1.0', '1.50', 'USD', '2026-09-28T15:00:00+00:00')
+        """
+    )
+    # Aktive Child Stop-Loss Order
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, strategy_name, status)
+        VALUES (101, 1002, 100, 'TG_LIQ_MNQ', 'U12345', 'SL', 'MNQZ6', 'FUT', 'CME', 'SELL', 1, 'STP', '20800.0', 'GTC', 'TwoPercent', 'PreSubmitted')
+        """
+    )
+    await db.commit()
+
+    # 2. Broker-Zustand: Hält AAPL, aber MNQZ6 ist weg (Position = 0 / Liquidiert)
+    mock_pos_other = MagicMock()
+    mock_pos_other.position = 10.0
+    mock_pos_other.contract.secType = "STK"
+    mock_pos_other.contract.symbol = "AAPL"
+    mock_pos_other.contract.localSymbol = "AAPL"
+    mock_pos_other.contract.currency = "USD"
+    mock_pos_other.account = "U12345"
+    mock_pos_other.avgCost = 150.0
+
+    mock_ib = MagicMock()
+    mock_ib.positions.return_value = [mock_pos_other]
+    mock_ib.cancelOrder = MagicMock()
+    mock_ib.fills.return_value = []
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_external_liquidation_alert = AsyncMock(return_value=True)
+    mock_trigger_settlement = AsyncMock()
+
+    await reconcile_broker_positions(
+        database_connection=db,
+        interactive_brokers_session=mock_ib,
+        notifier=mock_notifier,
+        trigger_settlement_callback=mock_trigger_settlement,
+    )
+
+    # Verifikation: Child-Order 101 storniert bei TWS
+    mock_ib.cancelOrder.assert_called_once()
+    cancelled_ib_order = mock_ib.cancelOrder.call_args[0][0]
+    assert cancelled_ib_order.orderId == 101
+
+    # Verifikation: Child-Order 101 in DB auf Cancelled
+    async with db.execute("SELECT status FROM orders WHERE order_id = 101") as cursor:
+        row = await cursor.fetchone()
+        assert row["status"] == "Cancelled"
+
+    # Verifikation: Synthetische EXIT Order angelegt
+    async with db.execute(
+        "SELECT order_id, bracket_role, status, quantity, action FROM orders WHERE trade_group_id = 'TG_LIQ_MNQ' AND bracket_role = 'EXIT'"
+    ) as cursor:
+        exit_order = await cursor.fetchone()
+        assert exit_order is not None
+        assert exit_order["status"] == "Filled"
+        assert exit_order["action"] == "SELL"
+        assert exit_order["quantity"] == 1
+
+    # Verifikation: Settlement getriggert & Notfall-Alarm versendet
+    mock_trigger_settlement.assert_called_once_with("TG_LIQ_MNQ", "U12345")
+    mock_notifier.send_external_liquidation_alert.assert_called_once()
+    kwargs = mock_notifier.send_external_liquidation_alert.call_args[1]
+    assert kwargs["symbol"] == "MNQZ6"
+    assert kwargs["quantity"] == Decimal("1.0")
+    assert kwargs["trade_group_id"] == "TG_LIQ_MNQ"
+    assert kwargs["cancelled_child_orders_count"] == 1

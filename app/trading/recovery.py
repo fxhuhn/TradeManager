@@ -10,6 +10,7 @@ Siehe Datenfluss- und Architekturzusammenhang in app.core.models.
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -17,7 +18,7 @@ from typing import Any
 
 import aiosqlite
 import structlog
-from ib_async import IB, Trade
+from ib_async import IB, Order, Trade
 
 from app.core.config import Config
 from app.core.db import transaction
@@ -89,6 +90,7 @@ async def run_recovery(
         database_connection=database_connection,
         interactive_brokers_session=interactive_brokers_session,
         notifier=notifier,
+        trigger_settlement_callback=trigger_settlement_callback,
     )
 
     logger.debug("Recovery phase completed")
@@ -555,15 +557,20 @@ async def reconcile_broker_positions(
     database_connection: aiosqlite.Connection,
     interactive_brokers_session: IB,
     notifier: TelegramNotifier,
+    trigger_settlement_callback: (
+        Callable[[str, str], Coroutine[Any, Any, None]] | None
+    ) = None,
 ) -> None:
     """
-    Gleicht Live-Positionen vom IBKR Broker mit der lokalen SQLite-Datenbank ab.
+    Gleicht Live-Positionen vom IBKR Broker mit der lokalen SQLite-Datenbank in beide Richtungen ab.
 
-    Falls Positionen im Broker existieren, die nicht oder nur teilweise in der DB erfasst sind,
-    werden synthetische Entry-Orders und Executions mit strategy_name = None (NULL) angelegt,
-    damit die Bestände 100% synchron sind und spätere Settlement-Verkäufe vorbereitet sind.
+    1. delta_qty > 0 (Broker > DB): Unassigned-Positionen werden als synthetische Entry-Orders erfasst.
+    2. delta_qty < 0 (DB > Broker): Bei extern geschlossenen Positionen oder Zwangsliquidierungen
+       werden verwaiste Child-Orders (SL, TP, EXIT) sofort storniert (Short-Schutz), eine
+       synthetische Exit-Order zur Abrechnung verbucht und ein Notfall-Alarm versendet.
     """
-    positions = interactive_brokers_session.positions()
+    raw_positions = interactive_brokers_session.positions()
+    positions = list(raw_positions) if hasattr(raw_positions, "__iter__") else []
     if not positions:
         return
 
@@ -582,10 +589,9 @@ async def reconcile_broker_positions(
             net_qty = Decimal(str(row[1])) if row[1] is not None else Decimal("0.0")
             db_positions[symbol] = net_qty
 
+    broker_positions_map: dict[str, tuple[Decimal, Any]] = {}
     for pos in positions:
         broker_qty = Decimal(str(pos.position))
-        if broker_qty <= Decimal("0.0"):
-            continue
 
         raw_sec_type = getattr(pos.contract, "secType", None)
         sec_type = (
@@ -629,6 +635,11 @@ async def reconcile_broker_positions(
                 symbol = matching_db_symbol if matching_db_symbol else local_symbol
         else:
             symbol = root_symbol
+
+        broker_positions_map[symbol] = (broker_qty, pos)
+
+        if broker_qty <= Decimal("0.0"):
+            continue
 
         account_id = pos.account
         avg_cost = Decimal(str(round(float(pos.avgCost), 4)))
@@ -705,12 +716,232 @@ async def reconcile_broker_positions(
                     ),
                 )
 
-            await notifier.send_unassigned_position_recovered(
+            unassigned_coro = notifier.send_unassigned_position_recovered(
                 symbol=symbol,
                 quantity=delta_qty,
                 avg_cost=avg_cost,
                 account_id=account_id,
             )
+            if asyncio.iscoroutine(unassigned_coro) or hasattr(
+                unassigned_coro, "__await__"
+            ):
+                await unassigned_coro
+
+    # --- ZWEI-WEGE-RECONCILIATION: delta_qty < 0 (DB > Broker) ---
+    for db_symbol, db_net_qty in db_positions.items():
+        if db_net_qty <= Decimal("0.0"):
+            continue
+
+        broker_entry = broker_positions_map.get(db_symbol)
+        broker_qty = broker_entry[0] if broker_entry else Decimal("0.0")
+        deficit_qty = db_net_qty - broker_qty
+
+        if deficit_qty > Decimal("0.0"):
+            logger.warning(
+                "Broker position deficit detected (position closed externally / liquidated). Recovering to DB.",
+                symbol=db_symbol,
+                db_net_qty=float(db_net_qty),
+                broker_qty=float(broker_qty),
+                deficit_qty=float(deficit_qty),
+            )
+
+            # 1. Alle offenen Child-Orders (SL, TP, EXIT) für dieses Symbol stornieren (Short-Schutz)
+            query_active = """
+                SELECT order_id, perm_id, trade_group_id, account_id, bracket_role, status
+                FROM orders
+                WHERE symbol = ? AND status IN ('Submitted', 'PreSubmitted', 'Created')
+            """
+            cancelled_child_count = 0
+            async with database_connection.execute(
+                query_active, (db_symbol,)
+            ) as cursor:
+                active_orders = await cursor.fetchall()
+
+            for order_row in active_orders:
+                o_id = order_row["order_id"]
+                role = order_row["bracket_role"]
+                t_group = order_row["trade_group_id"]
+                o_status = order_row["status"]
+
+                if role in ("SL", "TP", "EXIT"):
+                    if o_id > 0 and o_status in ("Submitted", "PreSubmitted"):
+                        try:
+                            ib_order = Order(orderId=o_id)
+                            cancel_result = interactive_brokers_session.cancelOrder(
+                                ib_order
+                            )
+                            if inspect.isawaitable(cancel_result):
+                                await cancel_result
+                            logger.info(
+                                "Cancelled orphaned child order at TWS",
+                                order_id=o_id,
+                                symbol=db_symbol,
+                                trade_group_id=t_group,
+                            )
+                        except Exception as cancel_err:
+                            logger.warning(
+                                "Error cancelling orphaned child order at TWS",
+                                order_id=o_id,
+                                error=str(cancel_err),
+                            )
+
+                    async with transaction(database_connection):
+                        await database_connection.execute(
+                            "UPDATE orders SET status = 'Cancelled' WHERE order_id = ?",
+                            (o_id,),
+                        )
+                    cancelled_child_count += 1
+
+            # 2. Nicht-abgewickelte ENTRY-Orders für dieses Symbol ermitteln
+            query_entries = """
+                SELECT o.order_id, o.trade_group_id, o.account_id, o.quantity, o.strategy_name, o.sec_type, o.exchange, o.action,
+                       COALESCE((SELECT e.price FROM executions e WHERE e.order_id = o.order_id LIMIT 1), o.target_price) as entry_price
+                FROM orders o
+                LEFT JOIN trades_settlement ts ON o.account_id = ts.account_id AND o.trade_group_id = ts.trade_group_id
+                WHERE o.symbol = ? AND o.bracket_role = 'ENTRY' AND o.status = 'Filled' AND ts.trade_group_id IS NULL
+                ORDER BY o.order_id ASC
+            """
+            remaining_deficit = deficit_qty
+            async with database_connection.execute(
+                query_entries, (db_symbol,)
+            ) as cursor:
+                unsettled_entries = await cursor.fetchall()
+
+            for entry_match in unsettled_entries:
+                if remaining_deficit <= Decimal("0.0"):
+                    break
+
+                e_group = entry_match["trade_group_id"]
+                e_account = entry_match["account_id"]
+                e_qty = Decimal(str(entry_match["quantity"]))
+                e_sec_type = entry_match["sec_type"]
+                e_exchange = entry_match["exchange"]
+                e_action = entry_match["action"]
+                raw_e_price = entry_match["entry_price"]
+                fallback_entry_price = (
+                    Decimal(str(raw_e_price))
+                    if raw_e_price is not None
+                    else Decimal("0.0")
+                )
+                strategy_name = entry_match["strategy_name"]
+
+                close_qty = min(remaining_deficit, e_qty)
+                remaining_deficit -= close_qty
+
+                exit_price = await _resolve_external_exit_price(
+                    interactive_brokers_session,
+                    db_symbol,
+                    fallback_price=fallback_entry_price,
+                )
+
+                temp_id = await _get_next_recovery_temp_id(database_connection)
+                now_iso = datetime.now(UTC).isoformat()
+                exit_action = "SELL" if e_action == "BUY" else "BUY"
+
+                async with transaction(database_connection):
+                    await database_connection.execute(
+                        """
+                        INSERT INTO orders (
+                            order_id, perm_id, parent_id, trade_group_id, account_id,
+                            bracket_role, symbol, sec_type, exchange, action, quantity,
+                            order_type, target_price, tif, strategy_name, status, transmitted_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            temp_id,
+                            None,
+                            entry_match["order_id"],
+                            e_group,
+                            e_account,
+                            "EXIT",
+                            db_symbol,
+                            e_sec_type,
+                            e_exchange,
+                            exit_action,
+                            int(close_qty),
+                            "MKT",
+                            str(exit_price),
+                            "GTC",
+                            strategy_name,
+                            "Filled",
+                            now_iso,
+                        ),
+                    )
+
+                    exec_id = f"RECOVERED_EXIT_{db_symbol}_{abs(temp_id)}"
+                    await database_connection.execute(
+                        """
+                        INSERT OR IGNORE INTO executions (exec_id, order_id, price, qty, commission, currency, executed_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            exec_id,
+                            temp_id,
+                            str(exit_price),
+                            str(close_qty),
+                            "0.0",
+                            "USD",
+                            now_iso,
+                        ),
+                    )
+
+                if trigger_settlement_callback is not None:
+                    try:
+                        await trigger_settlement_callback(e_group, e_account)
+                    except Exception as settl_err:
+                        logger.error(
+                            "Error triggering settlement for recovered external liquidation",
+                            trade_group_id=e_group,
+                            error=str(settl_err),
+                        )
+
+                alert_coro = notifier.send_external_liquidation_alert(
+                    symbol=db_symbol,
+                    quantity=close_qty,
+                    trade_group_id=e_group,
+                    account_id=e_account,
+                    cancelled_child_orders_count=cancelled_child_count,
+                    strategy_name=strategy_name,
+                )
+                if asyncio.iscoroutine(alert_coro) or hasattr(alert_coro, "__await__"):
+                    await alert_coro
+
+
+async def _resolve_external_exit_price(
+    interactive_brokers_session: IB,
+    symbol: str,
+    fallback_price: Decimal,
+) -> Decimal:
+    """Ermittelt den Ausführungspreis für eine extern geschlossene Position aus Fills."""
+    try:
+        norm_sym = normalize_symbol(symbol)
+        fills_fn = getattr(interactive_brokers_session, "fills", None)
+        fills = fills_fn() if callable(fills_fn) else []
+        recent_fills = [
+            fill
+            for fill in fills
+            if (
+                normalize_symbol(getattr(fill.contract, "symbol", "")) == norm_sym
+                or normalize_symbol(getattr(fill.contract, "localSymbol", ""))
+                == norm_sym
+                or symbols_match(
+                    getattr(fill.contract, "symbol", ""),
+                    norm_sym,
+                    local_symbol_a=getattr(fill.contract, "localSymbol", ""),
+                )
+            )
+            and getattr(fill.execution, "side", "").upper() in ("SLD", "BOT")
+        ]
+        if recent_fills:
+            latest_fill = recent_fills[-1]
+            return Decimal(str(latest_fill.execution.price))
+    except Exception as fill_err:
+        logger.warning(
+            "Could not resolve external exit price from fills. Using fallback.",
+            symbol=symbol,
+            error=str(fill_err),
+        )
+    return fallback_price
 
 
 async def _get_next_recovery_temp_id(database_connection: aiosqlite.Connection) -> int:

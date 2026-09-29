@@ -168,7 +168,7 @@ When a daily order CSV (`orders_YYYY_MM_DD.csv`) is detected:
 1. File is parsed, sized, and upserted into SQLite (`orders.status = 'Created'`), and group IDs are enqueued.
 2. Importer halts archiving until execution worker processes all groups (`await queue.join()`).
 3. If all orders in the batch are successfully processed without cancellation or error: file is moved to `archive/orders_YYYY_MM_DD.csv.bak`.
-4. If any order in the batch is marked `Cancelled` (e.g., reauthorization timed out at market close) or `Error`: file is moved to `archive/orders_YYYY_MM_DD.csv.err`.
+4. If any order in the batch is marked `Cancelled` (e.g., reauthorization timed out at market close) or `Error`: file is moved to `archive/orders_YYYY_MM_DD.csv.err`. Standalone EXIT orders for trade groups already settled (e.g., externally liquidated) are gracefully skipped and do not cause `.err` archiving.
 
 ---
 
@@ -178,6 +178,7 @@ Mapping model classes in [app/core/models.py](app/core/models.py) are immutable 
 
 ### 3.1 Dataclass Definitions
 - `LegRow`: Direct representation of an imported CSV record row.
+- `BatchCashBudget`: In-memory allocation tracker for qualifying futures cash under BaFin rules.
 - `OrderRow`: Database-backed model representing a discrete order leg.
 - `ExecutionRow`: Logged record of an executed trade fill received from TWS.
 - `SettlementRow`: Final PnL and accounting record computed upon position closure.
@@ -230,7 +231,9 @@ The lifecycle status changes of a trade group's order are stateful and governed 
 | `PreSubmitted`| `Cancelled` | Execution is halted via manual intervention, auto-purge, or TWS error cancellation. |
 | `PreSubmitted`| `Error` | Connection disconnect limits exceeded, or Gateway reports failed transmission error. |
 | `Submitted` | `Cancelled` | Brokerage cancels the order context before Gateway processing. |
-| — | `Filled` | Automatic position reconciliation (`reconcile_broker_positions`) detects an unassigned broker position discrepancy and creates a synthetic `ENTRY` order (`strategy_name = NULL`, `trade_group_id = UNASSIGNED_*`) and matching execution ticket. |
+| — | `Filled` | Automatic position reconciliation (`reconcile_broker_positions`) detects an unassigned broker surplus discrepancy (`delta_qty > 0`) and creates a synthetic `ENTRY` order (`strategy_name = NULL`, `trade_group_id = UNASSIGNED_*`) and matching execution ticket. |
+| `PreSubmitted` / `Submitted` | `Cancelled` | Automatic position reconciliation detects an external broker deficit (`delta_qty < 0`, e.g. BaFin liquidation). Active child exit orders (`SL`, `TP`, `EXIT`) are cancelled at TWS and marked `Cancelled` in SQLite to prevent accidental short positions. |
+| — | `Filled` | Automatic position reconciliation creates a synthetic `EXIT` order and execution ticket for the deficit quantity, resolves exit price, triggers trade settlement, and dispatches high-priority Telegram alert. |
 
 * **Transient States & Invariants**:
   * **`PendingSubmit`**: Mapped dynamically to `Submitted`. Does not regress orders already in `PreSubmitted`.

@@ -11,6 +11,7 @@ import re
 # Da tomllib ab Python 3.11 in der Standardbibliothek ist
 import tomllib
 from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
 
 
@@ -84,6 +85,9 @@ class FuturesConfig:
     asset_mapping: dict[str, str] = field(default_factory=dict)
     enabled_strategies: tuple[str, ...] = field(default_factory=tuple)
     min_days_to_expiration: int = 10
+    bafin_cash_protection: bool = True
+    margin_requirements: dict[str, Decimal] = field(default_factory=dict)
+    default_margin: Decimal = Decimal("3500.0")
 
     def is_strategy_enabled(self, strategy_name: str | None) -> bool:
         """Prüft, ob eine Strategie für die Future-Transformation freigegeben ist."""
@@ -92,6 +96,16 @@ class FuturesConfig:
         if not strategy_name:
             return False
         return strategy_name.strip().lower() in self.enabled_strategies
+
+    def get_margin_requirement(self, symbol: str) -> Decimal:
+        """Ermittelt den Margin-Puffer für ein Future-Symbol (z. B. MNQ, MNQZ6)."""
+        root = symbol.strip().upper()
+        if root in self.margin_requirements:
+            return self.margin_requirements[root]
+        for key, margin in self.margin_requirements.items():
+            if root.startswith(key):
+                return margin
+        return self.default_margin
 
 
 @dataclass(frozen=True)
@@ -305,15 +319,33 @@ def _parse_futures_config(toml_data: dict[str, object]) -> FuturesConfig:
 
     raw_futures = toml_data.get("futures")
     min_days = 10
-    if isinstance(raw_futures, dict) and "min_days_to_expiration" in raw_futures:
-        min_days = _to_int(raw_futures.get("min_days_to_expiration"), 10)
+    bafin_cash_protection = True
+    if isinstance(raw_futures, dict):
+        if "min_days_to_expiration" in raw_futures:
+            min_days = _to_int(raw_futures.get("min_days_to_expiration"), 10)
+        if "bafin_cash_protection" in raw_futures:
+            bafin_cash_protection = bool(raw_futures.get("bafin_cash_protection"))
     elif "min_days_to_expiration" in toml_data:
         min_days = _to_int(toml_data.get("min_days_to_expiration"), 10)
+
+    raw_margins = toml_data.get("future_margins")
+    margin_requirements: dict[str, Decimal] = {}
+    default_margin = Decimal("3500.0")
+    if isinstance(raw_margins, dict):
+        for key, val in raw_margins.items():
+            key_clean = str(key).strip().upper()
+            if key_clean == "DEFAULT_MARGIN":
+                default_margin = Decimal(str(val))
+            else:
+                margin_requirements[key_clean] = Decimal(str(val))
 
     return FuturesConfig(
         asset_mapping=asset_mapping,
         enabled_strategies=tuple(enabled_strategies),
         min_days_to_expiration=min_days,
+        bafin_cash_protection=bafin_cash_protection,
+        margin_requirements=margin_requirements,
+        default_margin=default_margin,
     )
 
 

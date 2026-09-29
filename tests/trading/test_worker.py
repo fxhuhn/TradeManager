@@ -2,6 +2,7 @@
 """Unit and integration tests for execution worker logic in app.trading.worker."""
 
 import asyncio
+import dataclasses
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -2435,3 +2436,80 @@ def test_get_live_position_quantity_filters_account_and_symbols() -> None:
 
     qty = _get_live_position_quantity(mock_ib, "U12345", "AAPL")
     assert qty == Decimal("25")
+
+
+@pytest.mark.asyncio
+async def test_verify_margin_and_cushion_bafin_futures_cash_insufficient(
+    db, test_config: Config
+) -> None:
+    """Verifies that _verify_margin_and_cushion blocks a futures order when cash is less than margin."""
+    from app.core.config import FuturesConfig
+    from app.trading.worker import _verify_margin_and_cushion
+
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, status)
+        VALUES (89, 'TG_BAFIN_FUT_FAIL', 'ACC1', 'ENTRY', 'MNQU6', 'FUT', 'CME', 'BUY', 1, 'LMT', 20000.0, 'Created')
+        """
+    )
+    await db.commit()
+
+    entry_order = OrderRow(
+        order_id=89,
+        perm_id=0,
+        parent_id=None,
+        trade_group_id="TG_BAFIN_FUT_FAIL",
+        account_id="ACC1",
+        bracket_role="ENTRY",
+        symbol="MNQU6",
+        sec_type="FUT",
+        exchange="CME",
+        action="BUY",
+        quantity=1,
+        order_type="LMT",
+        target_price=Decimal("20000.0"),
+        tif="DAY",
+        strategy_name="TwoPercent",
+        status="Created",
+    )
+
+    futures_cfg = FuturesConfig(
+        asset_mapping={"QQQ": "MNQ"},
+        enabled_strategies=("twopercent",),
+        bafin_cash_protection=True,
+        margin_requirements={"MNQ": Decimal("3500.0")},
+    )
+    test_config = dataclasses.replace(test_config, futures=futures_cfg)
+
+    mock_cushion = MagicMock(account="ACC1", tag="Cushion", value="0.95")
+    mock_cash = MagicMock(account="ACC1", tag="TotalCashValue", value="2000.0")
+
+    mock_whatif = MagicMock()
+    mock_whatif.initMarginBefore = "0.0"
+    mock_whatif.initMarginAfter = "3500.0"
+    mock_whatif.equityWithLoanAfter = "100000.0"
+
+    mock_ib = MagicMock()
+    mock_ib.accountValues.return_value = [mock_cushion, mock_cash]
+    mock_ib.whatIfOrderAsync = AsyncMock(return_value=mock_whatif)
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_margin_limit_exceeded = AsyncMock(return_value=True)
+
+    passed, updated_order = await _verify_margin_and_cushion(
+        db=db,
+        interactive_brokers=mock_ib,
+        entry_order=entry_order,
+        config=test_config,
+        notifier=mock_notifier,
+    )
+
+    assert passed is False
+    assert updated_order.status == "Error"
+    mock_notifier.send_margin_limit_exceeded.assert_awaited_once_with(
+        symbol="MNQU6",
+        account_id="ACC1",
+        init_margin_after=Decimal("3500.0"),
+        limit_value=Decimal("2000.0"),
+        cushion_percentage=Decimal("95.0"),
+    )

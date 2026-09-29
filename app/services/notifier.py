@@ -852,6 +852,44 @@ class TelegramNotifier:
         )
         return await self.send_message(message)
 
+    async def send_external_liquidation_alert(
+        self,
+        symbol: str,
+        quantity: Decimal,
+        trade_group_id: str,
+        account_id: str,
+        cancelled_child_orders_count: int = 0,
+        strategy_name: str | None = None,
+    ) -> bool:
+        """Sendet einen Notfall-Alarm bei externer Positionsschließung oder Zwangsliquidierung."""
+        rows: list[TreeRow] = [
+            ("Konto", f"<code>{account_id}</code>"),
+            ("Trade-Gruppe", f"<code>{trade_group_id}</code>"),
+            ("Geschlossene Menge", f"<code>{quantity}</code>"),
+        ]
+        if strategy_name:
+            rows.append(("Strategie", f"<i>{strategy_name}</i>"))
+        if cancelled_child_orders_count > 0:
+            rows.append(
+                (
+                    "Stornierte Child-Orders",
+                    f"<code>{cancelled_child_orders_count}</code> Orders storniert (Short-Schutz)",
+                )
+            )
+        rows.append(
+            (
+                "Aktion",
+                "Position wurde extern geschlossen / liquidiert. Trade-Gruppe final abgerechnet.",
+            )
+        )
+        message = build_tree_message(
+            title="ZWANGSLIQUIDIERUNG / EXTERNE SCHLIESSUNG",
+            context=symbol,
+            emoji="🚨",
+            rows=rows,
+        )
+        return await self.send_message(message)
+
     async def send_archived_error_alert(
         self, file_name: str, details: str = ""
     ) -> bool:

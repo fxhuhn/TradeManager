@@ -1,5 +1,6 @@
 # filename: tests/services/test_importer.py
 import asyncio
+import dataclasses
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1907,3 +1908,223 @@ async def test_process_daily_csv_file_treats_expired_transmitted_day_orders_as_s
     call_kwargs = mock_notifier.send_importer_info.call_args[1]
     assert call_kwargs["title"] == "DATEI IMPORTIERT"
     assert call_kwargs["status"] == "Erfolgreich"
+
+
+@pytest.mark.asyncio
+async def test_future_import_skipped_when_qualifying_cash_insufficient(
+    tmp_path: Path, mock_config: Config, db
+) -> None:
+    """Verifies that future orders are rejected when available cash does not cover the required margin buffer."""
+    csv_file = tmp_path / "orders_2026_09_28.csv"
+    csv_content = (
+        "trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name\n"
+        "1570_TwoPercent_QQQ,ENTRY,QQQ,STK,SMART,U12345,BUY,10,MKT,,DAY,TwoPercent\n"
+    )
+    csv_file.write_text(csv_content, encoding="utf-8")
+
+    from app.core.config import FuturesConfig
+
+    futures_config = FuturesConfig(
+        asset_mapping={"QQQ": "MNQ", "SPY": "MES"},
+        enabled_strategies=("twopercent", "tgim"),
+        bafin_cash_protection=True,
+        margin_requirements={"MNQ": Decimal("3500.0"), "MES": Decimal("2000.0")},
+    )
+    test_config = dataclasses.replace(mock_config, futures=futures_config)
+
+    from ib_async import AccountValue
+
+    mock_ib = MagicMock()
+    mock_ib.managedAccounts.return_value = ["U12345"]
+    mock_ib.isConnected.return_value = True
+    # Nur $2000 Cash, aber MNQ benötigt $3500 Puffer
+    mock_ib.accountValues.return_value = [
+        AccountValue(
+            account="U12345",
+            tag="NetLiquidation",
+            value="100000.00",
+            currency="USD",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U12345",
+            tag="AvailableFunds",
+            value="100000.00",
+            currency="USD",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U12345",
+            tag="TotalCashValue",
+            value="2000.00",
+            currency="USD",
+            modelCode="",
+        ),
+    ]
+    mock_ib.positions.return_value = []
+
+    # Mock contract resolution for QQQ -> MNQ
+    mock_resolved_contract = MagicMock()
+    mock_resolved_contract.localSymbol = "MNQZ6"
+
+    with patch(
+        "app.services.importer.resolve_active_future_contract",
+        new_callable=AsyncMock,
+        return_value=mock_resolved_contract,
+    ):
+        mock_notifier = MagicMock()
+        mock_notifier.send_importer_info = AsyncMock(return_value=True)
+        queue = asyncio.Queue()
+
+        imported_ids = await run_csv_import(
+            db, mock_ib, csv_file, queue, mock_notifier, test_config
+        )
+
+        assert imported_ids == []
+        assert queue.qsize() == 0
+
+        # Verifikation des BaFin-Hinweises
+        info_calls = mock_notifier.send_importer_info.call_args_list
+        bafin_calls = [
+            c for c in info_calls if c[1].get("title") == "BAFIN CASH-SCHUTZ"
+        ]
+        assert len(bafin_calls) == 1
+        assert "Übersprungen (BaFin-Cash-Schutz)" in bafin_calls[0][1]["status"]
+
+
+@pytest.mark.asyncio
+async def test_future_batch_cash_budget_allocates_and_exhausts(
+    tmp_path: Path, mock_config: Config, db
+) -> None:
+    """Verifies that BatchCashBudget tracks remaining cash across multiple futures in the same batch."""
+    csv_file = tmp_path / "orders_2026_09_28.csv"
+    csv_content = (
+        "trade_group_id,bracket_role,symbol,sec_type,exchange,account_id,action,quantity,order_type,target_price,tif,strategy_name\n"
+        "1570_TwoPercent_QQQ,ENTRY,QQQ,STK,SMART,U12345,BUY,10,MKT,,DAY,TwoPercent\n"
+        "1571_TGIM_SPY,ENTRY,SPY,STK,SMART,U12345,BUY,10,MKT,,DAY,TGIM\n"
+    )
+    csv_file.write_text(csv_content, encoding="utf-8")
+
+    from app.core.config import FuturesConfig
+
+    futures_config = FuturesConfig(
+        asset_mapping={"QQQ": "MNQ", "SPY": "MES"},
+        enabled_strategies=("twopercent", "tgim"),
+        bafin_cash_protection=True,
+        margin_requirements={"MNQ": Decimal("3500.0"), "MES": Decimal("2000.0")},
+    )
+    test_config = dataclasses.replace(mock_config, futures=futures_config)
+
+    from ib_async import AccountValue
+
+    mock_ib = MagicMock()
+    mock_ib.managedAccounts.return_value = ["U12345"]
+    mock_ib.isConnected.return_value = True
+    # $5000 Cash: Reicht für MNQ ($3500), aber nicht mehr für MES ($2000)
+    mock_ib.accountValues.return_value = [
+        AccountValue(
+            account="U12345",
+            tag="NetLiquidation",
+            value="100000.00",
+            currency="USD",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U12345",
+            tag="AvailableFunds",
+            value="100000.00",
+            currency="USD",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U12345",
+            tag="TotalCashValue",
+            value="5000.00",
+            currency="USD",
+            modelCode="",
+        ),
+    ]
+    mock_ib.positions.return_value = []
+
+    async def mock_resolver(ib, symbol, exchange, min_days_to_expiration):
+        c = MagicMock()
+        c.localSymbol = f"{symbol}Z6"
+        return c
+
+    with patch(
+        "app.services.importer.resolve_active_future_contract",
+        side_effect=mock_resolver,
+    ):
+        mock_notifier = MagicMock()
+        mock_notifier.send_importer_info = AsyncMock(return_value=True)
+        queue = asyncio.Queue()
+
+        imported_ids = await run_csv_import(
+            db, mock_ib, csv_file, queue, mock_notifier, test_config
+        )
+
+        # MNQ wurde akzeptiert, SPY/MES wegen erschöpftem Cash-Budget abgelehnt
+        assert imported_ids == ["1570_TwoPercent_QQQ"]
+        assert queue.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_standalone_exit_skipped_when_already_settled(
+    mock_config: Config, db
+) -> None:
+    """Verifies that standalone exits are gracefully skipped when the trade group is already settled."""
+    from app.services.csv_reader import LegRow
+    from app.services.importer import _process_and_upsert_group
+
+    # 1. Entry in orders und Eintrag in trades_settlement anlegen
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, status)
+        VALUES (500, 'TG_ALREADY_SETTLED', 'U12345', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 10, 'MKT', 'Filled')
+        """
+    )
+    await db.execute(
+        """
+        INSERT INTO trades_settlement (account_id, trade_group_id, avg_entry_price, avg_exit_price, price_diff_slippage, total_commissions, net_pnl)
+        VALUES ('U12345', 'TG_ALREADY_SETTLED', '150.0', '155.0', '0.0', '2.0', '48.0')
+        """
+    )
+    await db.commit()
+
+    exit_leg = LegRow(
+        "TG_ALREADY_SETTLED",
+        "EXIT",
+        "AAPL",
+        "STK",
+        "SMART",
+        "U12345",
+        "SELL",
+        10,
+        "MKT",
+        None,
+        "DAY",
+        "Test",
+    )
+
+    mock_ib = MagicMock()
+    mock_ib.managedAccounts.return_value = ["U12345"]
+    mock_notifier = MagicMock()
+    mock_notifier.send_importer_info = AsyncMock()
+    queue = asyncio.Queue()
+
+    result = await _process_and_upsert_group(
+        db=db,
+        interactive_brokers=mock_ib,
+        trade_group_id="TG_ALREADY_SETTLED",
+        raw_legs=[exit_leg],
+        queue=queue,
+        notifier=mock_notifier,
+        config=mock_config,
+    )
+
+    assert result is False
+    assert queue.qsize() == 0
+    mock_notifier.send_importer_info.assert_called_once()
+    kwargs = mock_notifier.send_importer_info.call_args[1]
+    assert kwargs["title"] == "TRADE BEREITS GESCHLOSSEN"
+    assert "bereits final abgerechnet" in kwargs["details"]
