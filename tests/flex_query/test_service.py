@@ -213,7 +213,7 @@ async def test_reconcile_from_xml_reconciles_missing_trade_and_settles(
     <Trades>
     <Trade accountId="U12345" currency="USD" assetCategory="FUT" symbol="MNQ" dateTime="20260928;215900"
            tradePrice="20050.0" quantity="-1" proceeds="20050.0" ibCommission="-0.85" buySell="SELL"
-           ibOrderID="205" ibExecutionID="EXEC_LIQ_1" notes="L" exchange="CME" />
+           ibOrderID="205" ibExecutionID="EXEC_LIQ_1" notes="L" exchange="GLOBEX" />
     </Trades>
     </FlexStatement>
     </FlexStatements>

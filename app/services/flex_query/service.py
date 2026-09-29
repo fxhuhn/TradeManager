@@ -221,9 +221,11 @@ class FlexReconciliationService:
                             action.matched_parent_order_id,
                             trade_group_id,
                             trade.account_id,
-                            trade.symbol,
+                            action.symbol or trade.symbol,
                             action.sec_type,
-                            trade.exchange or "SMART",
+                            "CME"
+                            if (action.sec_type == "FUT" or trade.sec_type == "FUT")
+                            else "SMART",
                             trade.buy_sell,
                             int(trade.quantity),
                             str(trade.price),
