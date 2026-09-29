@@ -44,47 +44,7 @@ async def trigger_settlement(
     async with lock:
         db = await database_connection_factory()
         try:
-            if await _has_existing_settlement(db, account_id, trade_group_id):
-                logger.info(
-                    "Settlement for trade group already exists. Aborting.",
-                    trade_group_id=trade_group_id,
-                )
-                return
-
-            settlement_input = await _fetch_settlement_data(db, trade_group_id)
-            if not settlement_input:
-                return
-
-            calculation_outputs = calculate_settlement(settlement_input)
-
-            logger.info(
-                "Settlement calculation completed",
-                trade_group_id=trade_group_id,
-                entry_vwap=float(calculation_outputs.avg_entry_price),
-                exit_vwap=float(calculation_outputs.avg_exit_price),
-                slippage=float(calculation_outputs.price_diff_slippage),
-                commissions=float(settlement_input.total_commissions),
-                net_pnl=float(calculation_outputs.net_profit_loss),
-            )
-
-            await _save_settlement(
-                db,
-                account_id,
-                trade_group_id,
-                calculation_outputs,
-                settlement_input.total_commissions,
-            )
-
-            await _send_settlement_notification(
-                notifier,
-                trade_group_id,
-                settlement_input.entry_action,
-                settlement_input.entry_target_price,
-                calculation_outputs,
-                settlement_input.total_commissions,
-                entry_sec_type=settlement_input.entry_sec_type,
-            )
-
+            await settle_trade_group(db, trade_group_id, account_id, notifier)
         except Exception as exception:
             logger.error(
                 "Severe error in settlement process",
@@ -95,6 +55,58 @@ async def trigger_settlement(
             await db.close()
 
     await cleanup_settlement_lock(trade_group_id)
+
+
+async def settle_trade_group(
+    db: aiosqlite.Connection,
+    trade_group_id: str,
+    account_id: str,
+    notifier: TelegramNotifier | None = None,
+) -> bool:
+    """Berechnet und persistiert das Settlement für eine bestimmte Trade-Gruppe."""
+    if await _has_existing_settlement(db, account_id, trade_group_id):
+        logger.info(
+            "Settlement for trade group already exists. Aborting.",
+            trade_group_id=trade_group_id,
+        )
+        return False
+
+    settlement_input = await _fetch_settlement_data(db, trade_group_id)
+    if not settlement_input:
+        return False
+
+    calculation_outputs = calculate_settlement(settlement_input)
+
+    logger.info(
+        "Settlement calculation completed",
+        trade_group_id=trade_group_id,
+        entry_vwap=float(calculation_outputs.avg_entry_price),
+        exit_vwap=float(calculation_outputs.avg_exit_price),
+        slippage=float(calculation_outputs.price_diff_slippage),
+        commissions=float(settlement_input.total_commissions),
+        net_pnl=float(calculation_outputs.net_profit_loss),
+    )
+
+    await _save_settlement(
+        db,
+        account_id,
+        trade_group_id,
+        calculation_outputs,
+        settlement_input.total_commissions,
+    )
+
+    if notifier and notifier.is_active:
+        await _send_settlement_notification(
+            notifier,
+            trade_group_id,
+            settlement_input.entry_action,
+            settlement_input.entry_target_price,
+            calculation_outputs,
+            settlement_input.total_commissions,
+            entry_sec_type=settlement_input.entry_sec_type,
+        )
+
+    return True
 
 
 async def _has_existing_settlement(

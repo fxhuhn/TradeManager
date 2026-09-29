@@ -14,8 +14,14 @@ from app.core.db import transaction
 from app.services.flex_query.matcher import (
     HistoricalTradeContext,
     match_flex_statement,
+    match_flex_trades,
 )
-from app.services.flex_query.parser import parse_flex_statement
+from app.services.flex_query.models import FlexTradeRecord
+from app.services.flex_query.parser import (
+    parse_flex_statement,
+    parse_ibkr_date,
+)
+from app.trading.settlement import settle_trade_group
 
 if TYPE_CHECKING:
     import aiosqlite
@@ -41,6 +47,8 @@ class ReconciliationReport:
     account_level_count: int
     total_trade_adjustments_base: Decimal
     total_account_expenses_base: Decimal
+    reconciled_trades_count: int = 0
+    settled_trades_count: int = 0
 
 
 class FlexReconciliationService:
@@ -72,7 +80,12 @@ class FlexReconciliationService:
                 o.action,
                 COALESCE(MAX(o.quantity), 0) AS quantity,
                 MIN(DATE(COALESCE(e.executed_at, o.transmitted_at))) AS entry_date,
-                MAX(DATE(ts.settled_at)) AS exit_date
+                MAX(DATE(ts.settled_at)) AS exit_date,
+                MIN(CASE WHEN o.bracket_role = 'ENTRY' THEN o.order_id ELSE NULL END) AS parent_order_id,
+                MAX(o.sec_type) AS sec_type,
+                MAX(o.strategy_name) AS strategy_name,
+                (ts.trade_group_id IS NOT NULL) AS is_settled,
+                GROUP_CONCAT(DISTINCT e.exec_id) AS exec_ids_str
             FROM orders o
             LEFT JOIN executions e ON o.order_id = e.order_id
             LEFT JOIN trades_settlement ts
@@ -93,6 +106,14 @@ class FlexReconciliationService:
                 quantity = Decimal(str(row[4] or "0"))
                 entry_date = str(row[5] or "")
                 exit_date = str(row[6]) if row[6] else None
+                parent_order_id = int(row[7]) if row[7] is not None else None
+                sec_type = str(row[8] or "STK")
+                strategy_name = str(row[9]) if row[9] else None
+                is_settled = bool(row[10])
+                raw_exec_ids = str(row[11] or "")
+                exec_ids = tuple(
+                    x.strip() for x in raw_exec_ids.split(",") if x.strip()
+                )
 
                 if trade_group_id and symbol and entry_date:
                     historical_trades.append(
@@ -104,9 +125,147 @@ class FlexReconciliationService:
                             quantity=quantity,
                             entry_date=entry_date,
                             exit_date=exit_date,
+                            exec_ids=exec_ids,
+                            parent_order_id=parent_order_id,
+                            sec_type=sec_type,
+                            strategy_name=strategy_name,
+                            is_settled=is_settled,
                         )
                     )
         return tuple(historical_trades)
+
+    async def reconcile_trades(
+        self,
+        trades: tuple[FlexTradeRecord, ...],
+        historical_trades: tuple[HistoricalTradeContext, ...],
+    ) -> tuple[int, int]:
+        """Gleicht FlexTradeRecords gegen die lokale Datenbank ab und bucht fehlende Fills."""
+        if not trades:
+            return 0, 0
+
+        existing_exec_ids: set[str] = set()
+        async with self._db.execute("SELECT exec_id FROM executions") as cursor:
+            async for row in cursor:
+                if row[0]:
+                    existing_exec_ids.add(str(row[0]).strip())
+
+        actions = match_flex_trades(
+            trades=trades,
+            historical_trades=historical_trades,
+            existing_exec_ids=existing_exec_ids,
+        )
+
+        reconciled_trades_count = 0
+        settled_trades_count = 0
+
+        for action in actions:
+            if action.action_type != "MISSING_EXIT":
+                continue
+
+            trade = action.trade
+            trade_group_id = action.matched_trade_group_id
+            if not trade_group_id:
+                continue
+
+            logger.warning(
+                "Flex Query Reconciliation: Fehlende EXIT-Ausführung erkannt. Buche Trade nach.",
+                extra={
+                    "trade_group_id": trade_group_id,
+                    "symbol": trade.symbol,
+                    "exec_id": trade.trade_id,
+                    "price": float(trade.price),
+                    "qty": float(trade.quantity),
+                },
+            )
+
+            async with transaction(self._db):
+                # 1. Offene Child-Orders (SL, TP, EXIT) stornieren
+                await self._db.execute(
+                    """
+                    UPDATE orders
+                    SET status = 'Cancelled'
+                    WHERE trade_group_id = ? AND bracket_role IN ('SL', 'TP', 'EXIT')
+                      AND status IN ('Created', 'Submitted', 'PreSubmitted')
+                    """,
+                    (trade_group_id,),
+                )
+
+                # 2. Prüfen, ob bereits eine EXIT-Order existiert
+                query_exit = "SELECT order_id FROM orders WHERE trade_group_id = ? AND bracket_role = 'EXIT' LIMIT 1"
+                exit_order_id: int | None = None
+                async with self._db.execute(query_exit, (trade_group_id,)) as cursor:
+                    exit_row = await cursor.fetchone()
+                    if exit_row:
+                        exit_order_id = int(exit_row[0])
+                        await self._db.execute(
+                            "UPDATE orders SET status = 'Filled' WHERE order_id = ?",
+                            (exit_order_id,),
+                        )
+
+                # Falls keine EXIT-Order existiert, synthetische EXIT-Order anlegen
+                if exit_order_id is None:
+                    exit_order_id = -1 * int(
+                        abs(hash(f"FLEX_EXIT_{trade_group_id}_{trade.account_id}"))
+                        % 100000000
+                    )
+                    await self._db.execute(
+                        """
+                        INSERT INTO orders (
+                            order_id, perm_id, parent_id, trade_group_id, account_id,
+                            bracket_role, symbol, sec_type, exchange, action, quantity,
+                            order_type, target_price, tif, strategy_name, status, transmitted_at
+                        ) VALUES (?, NULL, ?, ?, ?, 'EXIT', ?, ?, ?, ?, ?, 'MKT', ?, 'DAY', ?, 'Filled', CURRENT_TIMESTAMP)
+                        """,
+                        (
+                            exit_order_id,
+                            action.matched_parent_order_id,
+                            trade_group_id,
+                            trade.account_id,
+                            trade.symbol,
+                            action.sec_type,
+                            trade.exchange or "SMART",
+                            trade.buy_sell,
+                            int(trade.quantity),
+                            str(trade.price),
+                            action.strategy_name,
+                        ),
+                    )
+
+                # 3. Execution eintragen
+                exec_id = (
+                    trade.trade_id or f"FLEX_EXEC_{trade_group_id}_{exit_order_id}"
+                )
+                await self._db.execute(
+                    """
+                    INSERT INTO executions (
+                        exec_id, order_id, price, qty, commission, currency, executed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (exec_id) DO NOTHING
+                    """,
+                    (
+                        exec_id,
+                        exit_order_id,
+                        str(trade.price),
+                        str(trade.quantity),
+                        str(abs(trade.total_commission)),
+                        trade.currency,
+                        parse_ibkr_date(trade.date_time),
+                    ),
+                )
+                reconciled_trades_count += 1
+                existing_exec_ids.add(exec_id)
+
+            # 4. Settlement anstoßen
+            settled = await settle_trade_group(
+                self._db,
+                trade_group_id=trade_group_id,
+                account_id=trade.account_id,
+                notifier=self._notifier,
+            )
+            if settled:
+                settled_trades_count += 1
+
+        return reconciled_trades_count, settled_trades_count
 
     async def reconcile_from_xml(self, xml_content: str) -> ReconciliationReport:
         """Führt den Abgleich für ein übergebenes Flex-Statement-XML durch."""
@@ -180,6 +339,11 @@ class FlexReconciliationService:
                 else:
                     skipped_duplicate_count += 1
 
+        # Trades abgleichen (fehlende Ausführungen nachbuchen & abrechnen)
+        reconciled_trades_count, settled_trades_count = await self.reconcile_trades(
+            parsed.trades, historical_trades
+        )
+
         report = ReconciliationReport(
             account_id=parsed.account_id,
             from_date=parsed.from_date,
@@ -191,16 +355,20 @@ class FlexReconciliationService:
             account_level_count=account_level_count,
             total_trade_adjustments_base=total_trade_adjustments_base,
             total_account_expenses_base=total_account_expenses_base,
+            reconciled_trades_count=reconciled_trades_count,
+            settled_trades_count=settled_trades_count,
         )
 
         logger.info(
-            "Flex Query Reconciliation abgeschlossen: %d neue Einträge verbucht (%d Duplikate übersprungen). Trade-Allokationen: %d (%.2f Base), Account-Ausgaben: %d (%.2f Base)",
+            "Flex Query Reconciliation abgeschlossen: %d neue Einträge verbucht (%d Duplikate übersprungen). Trade-Allokationen: %d (%.2f Base), Account-Ausgaben: %d (%.2f Base), Trades abgeglichen: %d, abgewickelt: %d",
             report.inserted_count,
             report.skipped_duplicate_count,
             report.allocated_to_trades_count,
             report.total_trade_adjustments_base,
             report.account_level_count,
             report.total_account_expenses_base,
+            report.reconciled_trades_count,
+            report.settled_trades_count,
         )
 
         return report

@@ -37,6 +37,9 @@ def format_flex_sync_report(report: ReconciliationReport) -> str:
         f"  Summe Trade-Kosten:    $ {report.total_trade_adjustments_base:,.2f}",
         f"  Konto-Nebenkosten:     {report.account_level_count} Buchungen",
         f"  Summe Konto-Kosten:    $ {report.total_account_expenses_base:,.2f}",
+        "-" * 60,
+        f"  Trades abgeglichen:    {report.reconciled_trades_count} Fills",
+        f"  Trades abgewickelt:    {report.settled_trades_count} Settlements",
         "=" * 60,
     ]
     return "\n".join(lines)

@@ -296,6 +296,7 @@ This section provides a detailed reference of all public classes and functions i
 - `SettlementInput` (Class): Aggregated variables passed to calculations.
 - `SettlementOutput` (Class): Summary variables calculated for DB storage.
 - `calculate_settlement` (Function): Resolves net price, profit, and commissions.
+- `settle_trade_group` (Function): Computes VWAP, slippage, and net PnL, persists settlement to SQLite, and sends Telegram alert.
 
 ### 4.18 Module: `app.trading.worker`
 - `WorkerExecutionContext` (Class): Immutable parameter container encapsulating database, TWS client, notifier, and configuration dependencies.
@@ -338,6 +339,7 @@ This section provides a detailed reference of all public classes and functions i
 
 ### 4.22 Module: `app.services.flex_query.models`
 - `FlexTradeFeeRecord` (Class): Dataclass encapsulating unbundled execution fee records.
+- `FlexTradeRecord` (Class): Dataclass encapsulating executed trade transaction records parsed from the Trades section.
 - `FlexBorrowFeeRecord` (Class): Dataclass encapsulating daily hard-to-borrow short fee records.
 - `FlexDividendAccrualRecord` (Class): Dataclass encapsulating open dividend accrual records.
 - `FlexCashTransactionRecord` (Class): Dataclass encapsulating cash transaction records.
@@ -351,7 +353,9 @@ This section provides a detailed reference of all public classes and functions i
 
 ### 4.24 Module: `app.services.flex_query.matcher`
 - `HistoricalTradeContext` (Class): Context container of historical trades for matching.
+- `FlexTradeReconciliationAction` (Class): Encapsulates reconciliation evaluation for an individual Flex trade record.
 - `match_flex_statement` (Function): Pure matcher mapping statement records to CashLedgerRow instances.
+- `match_flex_trades` (Function): Pure matcher evaluating Flex trade records against local trade contexts and executions.
 
 ### 4.25 Module: `app.services.flex_query.client`
 - `FlexQueryError` (Class): Base exception for Flex Query errors.
@@ -368,7 +372,8 @@ This section provides a detailed reference of all public classes and functions i
 - `ReconciliationReport` (Class): Dataclass encapsulating reconciliation statistics and totals.
 - `FlexReconciliationService` (Class): Service orchestrating database reconciliation of Flex Statements.
   - `fetch_historical_trades` (Method): Queries historical trade contexts from SQLite.
-  - `reconcile_from_xml` (Method): Ingests statement XML and persists cash ledger entries.
+  - `reconcile_trades` (Method): Reconciles broker trades against local orders/executions and auto-settles missing exit fills.
+  - `reconcile_from_xml` (Method): Ingests statement XML, persists cash ledger entries, and reconciles trade executions.
   - `sync_and_reconcile` (Method): Fetches statement via client and executes reconciliation.
 
 ### 4.27 Module: `app.cli.flex_sync`

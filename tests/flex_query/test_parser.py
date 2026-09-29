@@ -86,3 +86,34 @@ def test_parse_invalid_xml() -> None:
 
     with pytest.raises(ValueError, match="does not contain a valid <FlexStatement>"):
         parse_flex_xml("<FlexQueryResponse></FlexQueryResponse>")
+
+
+def test_parse_trades_section() -> None:
+    """Verifiziert das Parsen der Sektion Trades / Trade."""
+    xml_with_trades = """<FlexQueryResponse queryName="Trades Sample" type="AF">
+    <FlexStatements count="1">
+    <FlexStatement accountId="U12345" fromDate="20260928" toDate="20260928">
+    <Trades>
+    <Trade accountId="U12345" currency="USD" assetCategory="FUT" symbol="MNQ" dateTime="20260928;215900"
+           tradePrice="20050.25" quantity="-1" proceeds="20050.25" ibCommission="-0.85" buySell="SELL"
+           ibOrderID="105" ibExecutionID="0002b.66f81a" notes="L" exchange="CME" />
+    </Trades>
+    </FlexStatement>
+    </FlexStatements>
+    </FlexQueryResponse>"""
+
+    statement = parse_flex_xml(xml_with_trades)
+    assert len(statement.trades) == 1
+    trade = statement.trades[0]
+    assert trade.account_id == "U12345"
+    assert trade.symbol == "MNQ"
+    assert trade.sec_type == "FUT"
+    assert trade.date_time == "20260928;215900"
+    assert trade.buy_sell == "SELL"
+    assert trade.quantity == Decimal("1")
+    assert trade.price == Decimal("20050.25")
+    assert trade.total_commission == Decimal("0.85")
+    assert trade.trade_id == "0002b.66f81a"
+    assert trade.order_reference == "105"
+    assert trade.notes == "L"
+    assert trade.exchange == "CME"

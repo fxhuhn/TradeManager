@@ -19,6 +19,7 @@ from app.services.flex_query.models import (
     FlexCashTransactionRecord,
     FlexDividendAccrualRecord,
     FlexTradeFeeRecord,
+    FlexTradeRecord,
     ParsedFlexStatement,
 )
 
@@ -197,6 +198,74 @@ def parse_flex_xml(xml_content: str | bytes) -> ParsedFlexStatement:
             )
         )
 
+    # 5. Trades / Executions parsing (Sektion Trades / TradeConfirm / Order)
+    trade_nodes = statement_element.findall(
+        ".//Trades/Trade"
+    ) + statement_element.findall(".//TradeConfirm")
+    if not trade_nodes:
+        trade_nodes = statement_element.findall(".//Trade")
+
+    trades: list[FlexTradeRecord] = []
+    seen_trade_ids: set[str] = set()
+    for node in trade_nodes:
+        record_account = node.attrib.get("accountId", account_id).strip()
+        raw_qty = to_decimal(node.attrib.get("quantity"))
+        raw_buy_sell = node.attrib.get("buySell", "").strip().upper()
+        if not raw_buy_sell:
+            raw_buy_sell = "BUY" if raw_qty >= Decimal("0.0") else "SELL"
+
+        trade_id = (
+            node.attrib.get("tradeID") or node.attrib.get("ibExecutionID") or ""
+        ).strip()
+        if trade_id and trade_id in seen_trade_ids:
+            continue
+        if trade_id:
+            seen_trade_ids.add(trade_id)
+
+        sec_type = (
+            (node.attrib.get("assetCategory") or node.attrib.get("secType") or "STK")
+            .strip()
+            .upper()
+        )
+        if "FUT" in sec_type:
+            sec_type = "FUT"
+        elif "STK" in sec_type:
+            sec_type = "STK"
+
+        order_ref = (
+            node.attrib.get("orderReference") or node.attrib.get("ibOrderID") or ""
+        ).strip()
+
+        notes = (node.attrib.get("notes") or node.attrib.get("code") or "").strip()
+
+        trades.append(
+            FlexTradeRecord(
+                account_id=record_account,
+                symbol=node.attrib.get("symbol", "").strip(),
+                date_time=node.attrib.get("dateTime", "").strip(),
+                buy_sell=raw_buy_sell,
+                quantity=abs(raw_qty),
+                price=to_decimal(
+                    node.attrib.get("price") or node.attrib.get("tradePrice")
+                ),
+                total_commission=abs(
+                    to_decimal(
+                        node.attrib.get("totalCommission")
+                        or node.attrib.get("ibCommission")
+                    )
+                ),
+                currency=node.attrib.get("currency", "USD").strip(),
+                fx_rate_to_base=to_decimal(
+                    node.attrib.get("fxRateToBase"), Decimal("1.0")
+                ),
+                sec_type=sec_type,
+                trade_id=trade_id,
+                order_reference=order_ref,
+                exchange=node.attrib.get("exchange", "").strip(),
+                notes=notes,
+            )
+        )
+
     return ParsedFlexStatement(
         account_id=account_id,
         from_date=from_date,
@@ -206,6 +275,7 @@ def parse_flex_xml(xml_content: str | bytes) -> ParsedFlexStatement:
         borrow_fees=tuple(borrow_fees),
         dividend_accruals=tuple(dividend_accruals),
         cash_transactions=tuple(cash_transactions),
+        trades=tuple(trades),
     )
 
 

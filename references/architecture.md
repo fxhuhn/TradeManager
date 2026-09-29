@@ -185,6 +185,8 @@ Mapping model classes in [app/core/models.py](app/core/models.py) are immutable 
 - `CashLedgerRow`: Database-backed model representing an entry in `cash_ledger`.
 - `SettledTradeAllInRow`: Aggregated all-in trade settlement combining core execution PnL with allocated secondary ledger costs.
 - `FlexTradeFeeRecord`: Unbundled execution fee record parsed from Flex Query statement.
+- `FlexTradeRecord`: Executed trade fill record parsed from Flex Query Trades section.
+- `FlexTradeReconciliationAction`: In-memory classification of trade reconciliation against local database.
 - `FlexBorrowFeeRecord`: Daily hard-to-borrow short fee record parsed from Flex Query statement.
 - `FlexDividendAccrualRecord`: Pending dividend accrual record parsed from Flex Query statement.
 - `FlexCashTransactionRecord`: Cash transaction record (dividends, interest, withholding taxes, market data) parsed from Flex Query statement.

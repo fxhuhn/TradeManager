@@ -12,11 +12,15 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from app.core.models import CashLedgerRow
-from app.services.flex_query.models import ParsedFlexStatement
+from app.services.flex_query.models import (
+    FlexTradeRecord,
+    ParsedFlexStatement,
+)
 from app.services.flex_query.parser import (
     generate_external_reference_id,
     parse_ibkr_date,
 )
+from app.trading.order_builder import symbols_match
 
 
 @dataclass(frozen=True)
@@ -33,6 +37,118 @@ class HistoricalTradeContext:
     order_ids: tuple[int, ...] = ()
     perm_ids: tuple[int, ...] = ()
     exec_ids: tuple[str, ...] = ()
+    parent_order_id: int | None = None
+    sec_type: str = "STK"
+    strategy_name: str | None = None
+    is_settled: bool = False
+
+
+@dataclass(frozen=True)
+class FlexTradeReconciliationAction:
+    """Ergebnis des Abgleichs eines FlexTradeRecords gegen historische Trade-Kontexte."""
+
+    trade: FlexTradeRecord
+    action_type: (
+        str  # "ALREADY_RECONCILED", "MISSING_EXIT", "MISSING_ENTRY", "UNMATCHED"
+    )
+    matched_trade_group_id: str | None = None
+    matched_parent_order_id: int | None = None
+    symbol: str = ""
+    strategy_name: str | None = None
+    sec_type: str = "STK"
+
+
+def match_flex_trades(
+    trades: Sequence[FlexTradeRecord],
+    historical_trades: Sequence[HistoricalTradeContext],
+    existing_exec_ids: set[str],
+) -> list[FlexTradeReconciliationAction]:
+    """Gleicht FlexTradeRecords gegen lokale historische Trade-Kontexte ab (Functional Core).
+
+    Ermittelt für jeden Trade, ob er bereits lokal verbucht ist oder eine fehlende
+    Ausführung (z. B. unbemerkte Zwangsliquidierung oder manueller Exit) darstellt.
+    """
+    actions: list[FlexTradeReconciliationAction] = []
+    for trade in trades:
+        # 1. Ist die Ausführung bereits in executions vorhanden?
+        if trade.trade_id and trade.trade_id in existing_exec_ids:
+            actions.append(
+                FlexTradeReconciliationAction(
+                    trade=trade,
+                    action_type="ALREADY_RECONCILED",
+                    symbol=trade.symbol,
+                )
+            )
+            continue
+
+        # 2. Suche passenden Trade-Kontext nach Account und Symbol
+        target_date = parse_ibkr_date(trade.date_time)
+        matched_context: HistoricalTradeContext | None = None
+
+        for context in historical_trades:
+            if context.account_id != trade.account_id:
+                continue
+            if not symbols_match(trade.symbol, context.symbol):
+                continue
+            # Liegt das Ausführungsdatum am oder nach dem Entry-Datum?
+            if target_date >= context.entry_date:
+                # Bevorzuge offene (nicht abgewickelte) Trades
+                if not context.is_settled:
+                    matched_context = context
+                    break
+                elif matched_context is None:
+                    matched_context = context
+
+        if matched_context is None:
+            actions.append(
+                FlexTradeReconciliationAction(
+                    trade=trade,
+                    action_type="UNMATCHED",
+                    symbol=trade.symbol,
+                )
+            )
+            continue
+
+        # 3. Handelt es sich um eine Schließung (EXIT) oder Einstieg (ENTRY)?
+        if trade.buy_sell.upper() != matched_context.action.upper():
+            if matched_context.is_settled:
+                actions.append(
+                    FlexTradeReconciliationAction(
+                        trade=trade,
+                        action_type="ALREADY_RECONCILED",
+                        matched_trade_group_id=matched_context.trade_group_id,
+                        matched_parent_order_id=matched_context.parent_order_id,
+                        symbol=matched_context.symbol,
+                        strategy_name=matched_context.strategy_name,
+                        sec_type=matched_context.sec_type,
+                    )
+                )
+            else:
+                actions.append(
+                    FlexTradeReconciliationAction(
+                        trade=trade,
+                        action_type="MISSING_EXIT",
+                        matched_trade_group_id=matched_context.trade_group_id,
+                        matched_parent_order_id=matched_context.parent_order_id,
+                        symbol=matched_context.symbol,
+                        strategy_name=matched_context.strategy_name,
+                        sec_type=matched_context.sec_type,
+                    )
+                )
+        else:
+            actions.append(
+                FlexTradeReconciliationAction(
+                    trade=trade,
+                    action_type="MISSING_ENTRY",
+                    matched_trade_group_id=matched_context.trade_group_id,
+                    matched_parent_order_id=matched_context.parent_order_id,
+                    symbol=matched_context.symbol,
+                    strategy_name=matched_context.strategy_name,
+                    sec_type=matched_context.sec_type,
+                )
+            )
+
+    return actions
 
 
 def _find_matching_trade(

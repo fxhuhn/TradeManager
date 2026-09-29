@@ -158,3 +158,106 @@ async def test_sync_and_reconcile_handles_notifier_error(
         report = await service.sync_and_reconcile()
         assert report.account_id == "DU123456"
         mock_notifier.send_flex_reconciliation_summary.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_from_xml_reconciles_missing_trade_and_settles(
+    memory_db: aiosqlite.Connection,
+) -> None:
+    """Verifiziert die automatische Erkennung und Abrechnung eines im Flex-Statement enthaltenen Trades."""
+    # 1. Entry-Order und Ausführung für MNQU6 anlegen
+    await memory_db.execute(
+        """
+        INSERT INTO orders (
+            order_id, perm_id, parent_id, trade_group_id, account_id,
+            bracket_role, symbol, sec_type, exchange, action, quantity,
+            order_type, target_price, tif, strategy_name, status, transmitted_at
+        ) VALUES (
+            200, 2000, NULL, '1570_TwoPercent_QQQ', 'U12345',
+            'ENTRY', 'MNQU6', 'FUT', 'CME', 'BUY', 1,
+            'LMT', 20000.0, 'DAY', 'TwoPercent', 'Filled', '2026-09-28 15:30:00'
+        )
+        """
+    )
+    await memory_db.execute(
+        """
+        INSERT INTO executions (
+            exec_id, order_id, price, qty, commission, currency, executed_at
+        ) VALUES (
+            'EXEC_ENTRY_1', 200, 20000.0, 1.0, 0.85, 'USD', '2026-09-28 15:30:00'
+        )
+        """
+    )
+    # Aktive SL-Order, die storniert werden muss
+    await memory_db.execute(
+        """
+        INSERT INTO orders (
+            order_id, perm_id, parent_id, trade_group_id, account_id,
+            bracket_role, symbol, sec_type, exchange, action, quantity,
+            order_type, target_price, tif, strategy_name, status, transmitted_at
+        ) VALUES (
+            201, 2001, 200, '1570_TwoPercent_QQQ', 'U12345',
+            'SL', 'MNQU6', 'FUT', 'CME', 'SELL', 1,
+            'STP', 19800.0, 'GTC', 'TwoPercent', 'Submitted', '2026-09-28 15:30:00'
+        )
+        """
+    )
+    await memory_db.commit()
+
+    config = FlexQueryConfig(enabled=True)
+    service = FlexReconciliationService(db=memory_db, config=config)
+
+    xml_with_trades = """<FlexQueryResponse queryName="Trades Sample" type="AF">
+    <FlexStatements count="1">
+    <FlexStatement accountId="U12345" fromDate="20260928" toDate="20260928">
+    <Trades>
+    <Trade accountId="U12345" currency="USD" assetCategory="FUT" symbol="MNQ" dateTime="20260928;215900"
+           tradePrice="20050.0" quantity="-1" proceeds="20050.0" ibCommission="-0.85" buySell="SELL"
+           ibOrderID="205" ibExecutionID="EXEC_LIQ_1" notes="L" exchange="CME" />
+    </Trades>
+    </FlexStatement>
+    </FlexStatements>
+    </FlexQueryResponse>"""
+
+    # 1. Erster Durchlauf: Trade muss erkannt, verbucht und abgerechnet werden
+    report = await service.reconcile_from_xml(xml_with_trades)
+    assert report.reconciled_trades_count == 1
+    assert report.settled_trades_count == 1
+
+    # Verifikation: SL-Order 201 wurde storniert
+    async with memory_db.execute(
+        "SELECT status FROM orders WHERE order_id = 201"
+    ) as cursor:
+        sl_row = await cursor.fetchone()
+        assert sl_row["status"] == "Cancelled"
+
+    # Verifikation: Synthetischer Exit und Execution angelegt
+    async with memory_db.execute(
+        "SELECT order_id, status, bracket_role FROM orders WHERE trade_group_id = '1570_TwoPercent_QQQ' AND bracket_role = 'EXIT'"
+    ) as cursor:
+        exit_row = await cursor.fetchone()
+        assert exit_row is not None
+        assert exit_row["status"] == "Filled"
+
+    async with memory_db.execute(
+        "SELECT price, qty, commission FROM executions WHERE exec_id = 'EXEC_LIQ_1'"
+    ) as cursor:
+        exec_row = await cursor.fetchone()
+        assert exec_row is not None
+        assert Decimal(str(exec_row["price"])) == Decimal("20050.0")
+
+    # Verifikation: Settlement gebucht mit CME Multiplikator 2.0
+    async with memory_db.execute(
+        "SELECT avg_entry_price, avg_exit_price, net_pnl FROM trades_settlement WHERE trade_group_id = '1570_TwoPercent_QQQ'"
+    ) as cursor:
+        settlement_row = await cursor.fetchone()
+        assert settlement_row is not None
+        assert Decimal(str(settlement_row["avg_entry_price"])) == Decimal("20000.0")
+        assert Decimal(str(settlement_row["avg_exit_price"])) == Decimal("20050.0")
+        # (20050 - 20000) * 1 - (0.85 + 0.85) = 50 - 1.70 = 48.30
+        assert Decimal(str(settlement_row["net_pnl"])) == Decimal("48.30")
+
+    # 2. Zweiter Durchlauf: Idempotenztest (keine Doppelbuchung)
+    report2 = await service.reconcile_from_xml(xml_with_trades)
+    assert report2.reconciled_trades_count == 0
+    assert report2.settled_trades_count == 0

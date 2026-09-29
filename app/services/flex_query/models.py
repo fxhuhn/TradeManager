@@ -86,6 +86,26 @@ class FlexCashTransactionRecord:
 
 
 @dataclass(frozen=True)
+class FlexTradeRecord:
+    """Repräsentiert eine ausgeführte Order/Transaktion aus der Sektion Trades."""
+
+    account_id: str
+    symbol: str
+    date_time: str
+    buy_sell: str  # BUY oder SELL
+    quantity: Decimal
+    price: Decimal
+    total_commission: Decimal
+    currency: str = "USD"
+    fx_rate_to_base: Decimal = Decimal("1.0")
+    sec_type: str = "STK"  # STK, FUT, etc.
+    trade_id: str = ""  # ibExecutionID oder tradeID
+    order_reference: str = ""  # ibOrderID oder orderReference
+    exchange: str = ""
+    notes: str = ""  # z. B. 'L' (Liquidation)
+
+
+@dataclass(frozen=True)
 class ParsedFlexStatement:
     """Kapselt den gesamten extrahierten Inhalt einer Flex-Statement-XML-Antwort."""
 
@@ -97,3 +117,4 @@ class ParsedFlexStatement:
     borrow_fees: tuple[FlexBorrowFeeRecord, ...] = ()
     dividend_accruals: tuple[FlexDividendAccrualRecord, ...] = ()
     cash_transactions: tuple[FlexCashTransactionRecord, ...] = ()
+    trades: tuple[FlexTradeRecord, ...] = ()

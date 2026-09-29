@@ -2,11 +2,16 @@
 
 from decimal import Decimal
 
-from app.services.flex_query.matcher import HistoricalTradeContext, match_flex_statement
+from app.services.flex_query.matcher import (
+    HistoricalTradeContext,
+    match_flex_statement,
+    match_flex_trades,
+)
 from app.services.flex_query.models import (
     FlexBorrowFeeRecord,
     FlexCashTransactionRecord,
     FlexDividendAccrualRecord,
+    FlexTradeRecord,
     ParsedFlexStatement,
 )
 
@@ -394,3 +399,56 @@ def test_match_trade_fees_fallback_matching() -> None:
     assert msft_fee.category == "EXCHANGE_FEE"
     assert tsla_fee.trade_group_id == "TG-TSLA-01"
     assert tsla_fee.category == "REGULATORY_FEE"
+
+
+def test_match_flex_trades_detects_missing_exit_and_already_reconciled() -> None:
+    """Verifiziert die Erkennung von fehlenden Exit-Trades und bereits verbuchten Fills."""
+    trade_liq = FlexTradeRecord(
+        account_id="U12345",
+        symbol="MNQ",
+        date_time="2026-09-28;215900",
+        buy_sell="SELL",
+        quantity=Decimal("1"),
+        price=Decimal("20050.25"),
+        total_commission=Decimal("-0.85"),
+        sec_type="FUT",
+        trade_id="EXEC_LIQ_1",
+        notes="L",
+    )
+    trade_existing = FlexTradeRecord(
+        account_id="U12345",
+        symbol="AAPL",
+        date_time="2026-09-28;160000",
+        buy_sell="SELL",
+        quantity=Decimal("10"),
+        price=Decimal("230.50"),
+        total_commission=Decimal("-1.00"),
+        trade_id="EXEC_AAPL_OLD",
+    )
+
+    historical_trades = (
+        HistoricalTradeContext(
+            account_id="U12345",
+            trade_group_id="1570_TwoPercent_QQQ",
+            symbol="MNQU6",
+            action="BUY",
+            quantity=Decimal("1"),
+            entry_date="2026-09-28",
+            parent_order_id=100,
+            sec_type="FUT",
+            is_settled=False,
+        ),
+    )
+    existing_exec_ids = {"EXEC_AAPL_OLD"}
+
+    actions = match_flex_trades(
+        trades=[trade_liq, trade_existing],
+        historical_trades=historical_trades,
+        existing_exec_ids=existing_exec_ids,
+    )
+
+    assert len(actions) == 2
+    assert actions[0].action_type == "MISSING_EXIT"
+    assert actions[0].matched_trade_group_id == "1570_TwoPercent_QQQ"
+    assert actions[0].matched_parent_order_id == 100
+    assert actions[1].action_type == "ALREADY_RECONCILED"
