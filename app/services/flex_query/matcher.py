@@ -41,6 +41,7 @@ class HistoricalTradeContext:
     sec_type: str = "STK"
     strategy_name: str | None = None
     is_settled: bool = False
+    status: str = "Filled"
 
 
 @dataclass(frozen=True)
@@ -121,6 +122,14 @@ def match_flex_trades(
                         symbol=matched_context.symbol,
                         strategy_name=matched_context.strategy_name,
                         sec_type=matched_context.sec_type,
+                    )
+                )
+            elif matched_context.status in ("Cancelled", "Error"):
+                actions.append(
+                    FlexTradeReconciliationAction(
+                        trade=trade,
+                        action_type="UNMATCHED",
+                        symbol=trade.symbol,
                     )
                 )
             else:

@@ -259,6 +259,7 @@ This section provides a detailed reference of all public classes and functions i
 
 ### 4.13 Module: `app.trading.order_builder`
 - `normalize_symbol` (Function): Normalizes asset symbols by stripping exchange suffixes (e.g., `.DE`).
+- `normalize_routing_exchange` (Function): Normalizes the exchange to the appropriate IBKR routing target ('SMART' for stocks, specified or 'CME' for futures).
 - `symbols_match` (Function): Robustly verifies whether two symbols match after normalization.
 - `make_stock_contract` (Function): Instantiates Stock contract structures for TWS.
 - `make_future_contract` (Function): Instantiates Future contract structures for CME (e.g., MNQ, MES).

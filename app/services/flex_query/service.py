@@ -21,6 +21,7 @@ from app.services.flex_query.parser import (
     parse_flex_statement,
     parse_ibkr_date,
 )
+from app.trading.order_builder import normalize_routing_exchange
 from app.trading.settlement import settle_trade_group
 
 if TYPE_CHECKING:
@@ -85,14 +86,17 @@ class FlexReconciliationService:
                 MAX(o.sec_type) AS sec_type,
                 MAX(o.strategy_name) AS strategy_name,
                 (ts.trade_group_id IS NOT NULL) AS is_settled,
-                GROUP_CONCAT(DISTINCT e.exec_id) AS exec_ids_str
+                GROUP_CONCAT(DISTINCT e.exec_id) AS exec_ids_str,
+                COALESCE(MAX(CASE WHEN o.bracket_role = 'ENTRY' THEN o.status ELSE NULL END), 'Filled') AS entry_status
             FROM orders o
             LEFT JOIN executions e ON o.order_id = e.order_id
             LEFT JOIN trades_settlement ts
                 ON o.account_id = ts.account_id AND o.trade_group_id = ts.trade_group_id
-            WHERE o.bracket_role = 'ENTRY'
-               OR e.exec_id IS NOT NULL
-               OR ts.settled_at IS NOT NULL
+            WHERE (
+                (o.bracket_role = 'ENTRY' AND o.status IN ('Filled', 'Submitted', 'PreSubmitted'))
+                OR e.exec_id IS NOT NULL
+                OR ts.settled_at IS NOT NULL
+            )
             GROUP BY o.account_id, o.trade_group_id, o.symbol, o.action
             HAVING entry_date IS NOT NULL
         """
@@ -114,6 +118,7 @@ class FlexReconciliationService:
                 exec_ids = tuple(
                     x.strip() for x in raw_exec_ids.split(",") if x.strip()
                 )
+                entry_status = str(row[12] or "Filled")
 
                 if trade_group_id and symbol and entry_date:
                     historical_trades.append(
@@ -130,6 +135,7 @@ class FlexReconciliationService:
                             sec_type=sec_type,
                             strategy_name=strategy_name,
                             is_settled=is_settled,
+                            status=entry_status,
                         )
                     )
         return tuple(historical_trades)
@@ -223,9 +229,10 @@ class FlexReconciliationService:
                             trade.account_id,
                             action.symbol or trade.symbol,
                             action.sec_type,
-                            "CME"
-                            if (action.sec_type == "FUT" or trade.sec_type == "FUT")
-                            else "SMART",
+                            normalize_routing_exchange(
+                                action.sec_type or trade.sec_type,
+                                trade.exchange,
+                            ),
                             trade.buy_sell,
                             int(trade.quantity),
                             str(trade.price),

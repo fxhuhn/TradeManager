@@ -261,3 +261,56 @@ async def test_reconcile_from_xml_reconciles_missing_trade_and_settles(
     report2 = await service.reconcile_from_xml(xml_with_trades)
     assert report2.reconciled_trades_count == 0
     assert report2.settled_trades_count == 0
+
+
+@pytest.mark.asyncio
+async def test_fetch_historical_trades_skips_cancelled_orders_without_fills(
+    memory_db: aiosqlite.Connection,
+) -> None:
+    """Verifies that fetch_historical_trades ignores cancelled orders that have zero fills."""
+    # 1. Stornierte Order ohne Execution (wie der STX-Fall)
+    await memory_db.execute(
+        """
+        INSERT INTO orders (
+            order_id, perm_id, parent_id, trade_group_id, account_id,
+            bracket_role, symbol, sec_type, exchange, action, quantity,
+            order_type, target_price, tif, strategy_name, status, transmitted_at
+        ) VALUES (
+            480, 211672470, NULL, '950_DipBuyer_STX', 'U19605236',
+            'ENTRY', 'STX', 'STK', 'SMART', 'BUY', 7,
+            'LMT', 800.29, 'DAY', 'DipBuyer', 'Cancelled', '2026-06-29 07:45:26'
+        )
+        """
+    )
+    # 2. Gefüllte Order mit Execution
+    await memory_db.execute(
+        """
+        INSERT INTO orders (
+            order_id, perm_id, parent_id, trade_group_id, account_id,
+            bracket_role, symbol, sec_type, exchange, action, quantity,
+            order_type, target_price, tif, strategy_name, status, transmitted_at
+        ) VALUES (
+            995, 1902106629, NULL, '1239_NDXMomentum_STX', 'U19605236',
+            'ENTRY', 'STX', 'STK', 'SMART', 'BUY', 11,
+            'MKT', 817.76, 'OPG', 'NDXMomentum', 'Filled', '2026-08-03 05:34:56'
+        )
+        """
+    )
+    await memory_db.execute(
+        """
+        INSERT INTO executions (exec_id, order_id, price, qty, currency, executed_at)
+        VALUES ('EXEC_995_STX', 995, 817.76, 11.0, 'USD', '2026-08-03 11:30:02')
+        """
+    )
+    await memory_db.commit()
+
+    service = FlexReconciliationService(
+        db=memory_db,
+        config=FlexQueryConfig(token="test", query_id="12345"),
+    )
+
+    historical_trades = await service.fetch_historical_trades()
+
+    trade_groups = [t.trade_group_id for t in historical_trades]
+    assert "950_DipBuyer_STX" not in trade_groups
+    assert "1239_NDXMomentum_STX" in trade_groups

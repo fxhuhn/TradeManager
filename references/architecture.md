@@ -29,7 +29,7 @@ Records intended and submitted orders.
 | `bracket_role` | `TEXT` | `CHECK IN ('ENTRY', 'SL', 'TP', 'EXIT')` | Structural role of the order in the trade group bracket. |
 | `symbol` | `TEXT` | `NOT NULL` | Ticker symbol of the equity asset (e.g. AAPL). |
 | `sec_type` | `TEXT` | `CHECK IN ('STK', 'FUT')` | Asset class; equities ('STK') and index futures ('FUT') supported. |
-| `exchange` | `TEXT` | `CHECK IN ('SMART', 'CME')` | Router routing target ('SMART' for stocks, 'CME' for futures). |
+| `exchange` | `TEXT` | `NOT NULL`, `CHECK (length(exchange) >= 2)` | Order routing target (e.g. SMART for stocks, CME for futures) or execution exchange. |
 | `action` | `TEXT` | `CHECK IN ('BUY', 'SELL')` | The trade direction side. |
 | `quantity` | `INTEGER` | `NOT NULL`, `CHECK (quantity > 0)` | Scaled quantity of shares to trade. |
 | `order_type` | `TEXT` | `NOT NULL` | Order type class (e.g., LMT, STP, MKT, MOC). |

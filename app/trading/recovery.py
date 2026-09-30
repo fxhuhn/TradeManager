@@ -24,7 +24,11 @@ from app.core.config import Config
 from app.core.db import transaction
 from app.core.models import OrderRow, order_row_from_db_row, parse_positive_decimal
 from app.services.notifier import TelegramNotifier, build_tree_message
-from app.trading.order_builder import normalize_symbol, symbols_match
+from app.trading.order_builder import (
+    normalize_routing_exchange,
+    normalize_symbol,
+    symbols_match,
+)
 
 logger = structlog.get_logger()
 
@@ -601,11 +605,7 @@ async def reconcile_broker_positions(
         )
 
         raw_exchange = getattr(pos.contract, "exchange", None)
-        exchange = (
-            raw_exchange.strip().upper()
-            if isinstance(raw_exchange, str) and raw_exchange.strip()
-            else ("CME" if sec_type == "FUT" else "SMART")
-        )
+        exchange = normalize_routing_exchange(sec_type, raw_exchange)
 
         raw_local_symbol = getattr(pos.contract, "localSymbol", None)
         local_symbol = (
@@ -645,6 +645,17 @@ async def reconcile_broker_positions(
         avg_cost = Decimal(str(round(float(pos.avgCost), 4)))
 
         db_net_qty = db_positions.get(symbol, Decimal("0.0"))
+
+        if sec_type == "STK" and db_net_qty < Decimal("0.0"):
+            logger.critical(
+                "Corrupt negative net quantity detected in DB for equity position. "
+                "Refusing automatic recovery to prevent erroneous buying.",
+                symbol=symbol,
+                db_net_qty=float(db_net_qty),
+                broker_qty=float(broker_qty),
+            )
+            continue
+
         delta_qty = broker_qty - db_net_qty
 
         if delta_qty > Decimal("0.0"):

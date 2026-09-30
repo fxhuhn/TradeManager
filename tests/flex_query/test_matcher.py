@@ -452,3 +452,41 @@ def test_match_flex_trades_detects_missing_exit_and_already_reconciled() -> None
     assert actions[0].matched_trade_group_id == "1570_TwoPercent_QQQ"
     assert actions[0].matched_parent_order_id == 100
     assert actions[1].action_type == "ALREADY_RECONCILED"
+
+
+def test_match_flex_trades_ignores_cancelled_or_error_entry_contexts() -> None:
+    """Verifies that an incoming sell trade is NOT matched as MISSING_EXIT to a cancelled or error order."""
+    trade_sell = FlexTradeRecord(
+        account_id="U12345",
+        symbol="STX",
+        date_time="2026-09-29;094342",
+        buy_sell="SELL",
+        quantity=Decimal("14"),
+        price=Decimal("896.74"),
+        total_commission=Decimal("-1.00"),
+        sec_type="STK",
+        trade_id="EXEC_STX_SELL",
+    )
+
+    cancelled_context = HistoricalTradeContext(
+        account_id="U12345",
+        trade_group_id="950_DipBuyer_STX",
+        symbol="STX",
+        action="BUY",
+        quantity=Decimal("7"),
+        entry_date="2026-06-29",
+        parent_order_id=480,
+        sec_type="STK",
+        is_settled=False,
+        status="Cancelled",
+    )
+
+    actions = match_flex_trades(
+        trades=[trade_sell],
+        historical_trades=[cancelled_context],
+        existing_exec_ids=set(),
+    )
+
+    assert len(actions) == 1
+    assert actions[0].action_type == "UNMATCHED"
+    assert actions[0].matched_trade_group_id is None

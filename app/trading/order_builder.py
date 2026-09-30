@@ -195,6 +195,24 @@ def make_future_contract(
     )
 
 
+def normalize_routing_exchange(sec_type: str, raw_exchange: str | None = None) -> str:
+    """Normalisiert den Börsenplatz auf das passende IBKR-Routing-Ziel.
+
+    Für Aktien (STK) ist das kanonische Order-Routing stets 'SMART'.
+    Für Futures (FUT) wird die angegebene Börse (Standard: 'CME') verwendet.
+    """
+    clean_sec = (sec_type or "STK").strip().upper()
+    if clean_sec == "STK":
+        return "SMART"
+    if clean_sec == "FUT":
+        if isinstance(raw_exchange, str) and raw_exchange.strip():
+            return raw_exchange.strip().upper()
+        return "CME"
+    if isinstance(raw_exchange, str) and raw_exchange.strip():
+        return raw_exchange.strip().upper()
+    return "SMART"
+
+
 def make_contract_by_type(
     symbol: str,
     sec_type: str = "STK",
@@ -212,10 +230,11 @@ def make_contract_by_type(
     Returns:
         Ein konfiguriertes Stock- oder Future-Objekt für die IBKR API.
     """
+    routing_exchange = normalize_routing_exchange(sec_type, exchange)
     if (sec_type or "STK").upper() == "FUT":
         return make_future_contract(
             symbol=symbol,
-            exchange=exchange or "CME",
+            exchange=routing_exchange,
             currency=currency,
         )
     return make_stock_contract(symbol)

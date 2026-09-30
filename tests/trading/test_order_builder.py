@@ -13,6 +13,7 @@ from app.trading.order_builder import (
     make_contract_by_type,
     make_contract_for_order,
     make_stock_contract,
+    normalize_routing_exchange,
     normalize_symbol,
     round_to_tick,
     symbols_match,
@@ -630,3 +631,31 @@ def test_build_order_unknown_type_and_none_strategy_and_exit_role() -> None:
     assert order.ocaType == 3
     assert order.lmtPrice == UNSET_DOUBLE
     assert order.auxPrice == UNSET_DOUBLE
+
+
+@pytest.mark.parametrize(
+    ("sec_type", "raw_exchange", "expected"),
+    [
+        ("STK", None, "SMART"),
+        ("STK", "", "SMART"),
+        ("STK", "NASDAQ", "SMART"),
+        ("STK", "NYSE", "SMART"),
+        ("STK", "SMART", "SMART"),
+        ("stk", "arca", "SMART"),
+        ("FUT", None, "CME"),
+        ("FUT", "", "CME"),
+        ("FUT", "   ", "CME"),
+        ("FUT", "CME", "CME"),
+        ("FUT", "NYMEX", "NYMEX"),
+        ("FUT", "eurex", "EUREX"),
+        ("fut", "cbot", "CBOT"),
+        ("UNKNOWN", "GETTEX", "GETTEX"),
+        ("UNKNOWN", "", "SMART"),
+        ("UNKNOWN", None, "SMART"),
+    ],
+)
+def test_normalize_routing_exchange(
+    sec_type: str, raw_exchange: str | None, expected: str
+) -> None:
+    """Verifies that normalize_routing_exchange maps equities to SMART and preserves/defaults futures."""
+    assert normalize_routing_exchange(sec_type, raw_exchange) == expected

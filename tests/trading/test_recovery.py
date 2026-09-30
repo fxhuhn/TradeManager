@@ -897,3 +897,107 @@ async def test_reconcile_broker_positions_detects_deficit_and_cancels_child_orde
     assert kwargs["quantity"] == Decimal("1.0")
     assert kwargs["trade_group_id"] == "TG_LIQ_MNQ"
     assert kwargs["cancelled_child_orders_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("sec_type", "raw_exchange", "expected_db_exchange"),
+    [
+        ("STK", "NASDAQ", "SMART"),
+        ("STK", "NYSE", "SMART"),
+        ("STK", "ARCA", "SMART"),
+        ("STK", "BATS", "SMART"),
+        ("STK", "SMART", "SMART"),
+        ("STK", "", "SMART"),
+        ("FUT", "CME", "CME"),
+        ("FUT", "NYMEX", "NYMEX"),
+        ("FUT", "", "CME"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_reconcile_broker_positions_handles_various_exchanges(
+    db, sec_type: str, raw_exchange: str, expected_db_exchange: str
+) -> None:
+    """Verifies that reconcile_broker_positions accepts and normalizes various broker exchange names."""
+    symbol = "TESTSEC" if sec_type == "STK" else "TESTFUT6"
+    mock_pos = MagicMock()
+    mock_pos.position = 10.0
+    mock_pos.contract.secType = sec_type
+    mock_pos.contract.exchange = raw_exchange
+    mock_pos.contract.symbol = symbol
+    mock_pos.contract.localSymbol = symbol
+    mock_pos.contract.currency = "USD"
+    mock_pos.account = "U_TEST_EXCHANGE"
+    mock_pos.avgCost = 50.0
+
+    mock_ib = MagicMock()
+    mock_ib.positions.return_value = [mock_pos]
+    mock_notifier = MagicMock()
+    mock_notifier.send_unassigned_position_alert = AsyncMock(return_value=True)
+
+    await reconcile_broker_positions(
+        database_connection=db,
+        interactive_brokers_session=mock_ib,
+        notifier=mock_notifier,
+        trigger_settlement_callback=AsyncMock(),
+    )
+
+    # Verifikation: Order wurde erfolgreich angelegt mit normalisierter Exchange
+    async with db.execute(
+        "SELECT exchange, sec_type, quantity, status FROM orders WHERE symbol = ?",
+        (symbol,),
+    ) as cursor:
+        order = await cursor.fetchone()
+        assert order is not None
+        assert order["exchange"] == expected_db_exchange
+        assert order["quantity"] == 10
+        assert order["status"] == "Filled"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_broker_positions_refuses_recovery_when_net_db_qty_is_negative(
+    db,
+) -> None:
+    """Verifies that reconcile_broker_positions blocks recovery for equities with negative net quantities in DB."""
+    # 1. Erstelle einen unplausiblen negativen Netto-Bestand (SELL 10 ohne vorherigen BUY)
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, status)
+        VALUES (-999, 'TG_CORRUPT', 'U12345', 'EXIT', 'CORRUPT_STK', 'STK', 'SMART', 'SELL', 10, 'MKT', 'Filled')
+        """
+    )
+    await db.execute(
+        """
+        INSERT INTO executions (exec_id, order_id, price, qty, currency, executed_at)
+        VALUES ('EXEC_CORRUPT_1', -999, 100.0, 10.0, 'USD', '2026-09-30 08:00:00')
+        """
+    )
+    await db.commit()
+
+    # 2. Broker meldet realen Bestand von 5 Stück
+    mock_pos = MagicMock()
+    mock_pos.position = 5.0
+    mock_pos.contract.secType = "STK"
+    mock_pos.contract.exchange = "NASDAQ"
+    mock_pos.contract.symbol = "CORRUPT_STK"
+    mock_pos.contract.localSymbol = "CORRUPT_STK"
+    mock_pos.contract.currency = "USD"
+    mock_pos.account = "U12345"
+    mock_pos.avgCost = 100.0
+
+    mock_ib = MagicMock()
+    mock_ib.positions.return_value = [mock_pos]
+    mock_notifier = MagicMock()
+
+    await reconcile_broker_positions(
+        database_connection=db,
+        interactive_brokers_session=mock_ib,
+        notifier=mock_notifier,
+        trigger_settlement_callback=AsyncMock(),
+    )
+
+    # 3. Verifikation: Es darf KEINE synthetische Order angelegt worden sein
+    async with db.execute(
+        "SELECT COUNT(*) as count FROM orders WHERE symbol = 'CORRUPT_STK' AND action = 'BUY'"
+    ) as cursor:
+        row = await cursor.fetchone()
+        assert row["count"] == 0
