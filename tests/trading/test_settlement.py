@@ -455,3 +455,100 @@ async def test_settlement_futures_zero_slippage(db) -> None:
     msg = mock_notifier.send_message.call_args[0][0]
     assert "Target: N/A" in msg
     assert "Slippage:</b> <code>N/A</code>" in msg
+
+
+def test_multi_entry_mixed_mkt_lmt_slippage() -> None:
+    """Verifies that an un-targeted MKT entry does not distort slippage of a LMT entry."""
+    settlement_input = SettlementInput(
+        entry_executions=[
+            ExecutionTuple(
+                quantity=Decimal("16"),
+                price=Decimal("794.25"),
+                target_price=None,
+            ),
+            ExecutionTuple(
+                quantity=Decimal("2"),
+                price=Decimal("1039.46"),
+                target_price=Decimal("1039.46"),
+            ),
+        ],
+        exit_executions=[
+            ExecutionTuple(quantity=Decimal("18"), price=Decimal("1080.00"))
+        ],
+        entry_target_price=Decimal("1039.46"),
+        entry_action="BUY",
+        total_commissions=Decimal("2.00"),
+    )
+    result = calculate_settlement(settlement_input)
+
+    # Blended VWAP across all 18 shares: (16*794.25 + 2*1039.46) / 18 = 821.4955...
+    assert round(result.avg_entry_price, 2) == Decimal("821.50")
+    assert result.avg_exit_price == Decimal("1080.00")
+    # Slippage must be 0.00 on the 2 LMT shares, NOT 1039.46 - 821.49 = 217.97
+    assert result.price_diff_slippage == Decimal("0.00")
+
+
+@pytest.mark.asyncio
+async def test_settlement_multi_entry_db(db) -> None:
+    """Verifies DB-level settlement calculation when multiple ENTRY orders exist."""
+    # Entry 1: 16 shares MKT (target_price = None)
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, status
+        ) VALUES (101, NULL, 'G_MULTI', 'A1', 'ENTRY', 'MU', 'STK', 'SMART', 'BUY', 16, 'MKT', NULL, 'Filled')
+        """
+    )
+    # Entry 2: 2 shares LMT @ 1039.46
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, status
+        ) VALUES (102, NULL, 'G_MULTI', 'A1', 'ENTRY', 'MU', 'STK', 'SMART', 'BUY', 2, 'LMT', 1039.46, 'Filled')
+        """
+    )
+    # Exit: 18 shares MKT
+    await db.execute(
+        """
+        INSERT INTO orders (
+            order_id, parent_id, trade_group_id, account_id, bracket_role,
+            symbol, sec_type, exchange, action, quantity, order_type, target_price, status
+        ) VALUES (103, 101, 'G_MULTI', 'A1', 'EXIT', 'MU', 'STK', 'SMART', 'SELL', 18, 'MKT', NULL, 'Filled')
+        """
+    )
+    await db.commit()
+
+    await db.execute(
+        "INSERT INTO executions (exec_id, order_id, price, qty, commission) VALUES ('EM1', 101, 794.25, 16, 1.0)"
+    )
+    await db.execute(
+        "INSERT INTO executions (exec_id, order_id, price, qty, commission) VALUES ('EM2', 102, 1039.46, 2, 1.0)"
+    )
+    await db.execute(
+        "INSERT INTO executions (exec_id, order_id, price, qty, commission) VALUES ('EX1', 103, 1080.00, 18, 2.0)"
+    )
+    await db.commit()
+
+    original_close = db.close
+    db.close = AsyncMock()
+
+    async def db_factory():
+        return db
+
+    mock_notifier = MagicMock()
+    mock_notifier.send_message = AsyncMock(return_value=True)
+
+    try:
+        await trigger_settlement(db_factory, "G_MULTI", "A1", mock_notifier)
+    finally:
+        db.close = original_close
+
+    async with db.execute(
+        "SELECT avg_entry_price, price_diff_slippage FROM trades_settlement WHERE trade_group_id = 'G_MULTI'"
+    ) as cursor:
+        row = await cursor.fetchone()
+        assert row is not None
+        assert abs(float(row["avg_entry_price"]) - 821.49) < 0.01
+        assert abs(float(row["price_diff_slippage"]) - 0.0) < 0.001

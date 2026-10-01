@@ -156,14 +156,19 @@ async def _fetch_settlement_data(
             total_commissions += commission
 
             if role == "ENTRY":
-                entry_executions.append(ExecutionTuple(quantity=quantity, price=price))
+                parsed_target: Decimal | None = None
                 if row["target_price"] is not None:
-                    parsed_target = Decimal(str(row["target_price"]))
-                    entry_target_price = (
-                        parsed_target if parsed_target > Decimal("0.0") else None
+                    pt = Decimal(str(row["target_price"]))
+                    if pt > Decimal("0.0"):
+                        parsed_target = pt
+
+                entry_executions.append(
+                    ExecutionTuple(
+                        quantity=quantity,
+                        price=price,
+                        target_price=parsed_target,
                     )
-                else:
-                    entry_target_price = None
+                )
                 entry_action = row["action"]
                 if "sec_type" in row.keys() and row["sec_type"]:
                     entry_sec_type = str(row["sec_type"])
@@ -182,6 +187,29 @@ async def _fetch_settlement_data(
             trade_group_id=trade_group_id,
         )
         return None
+
+    # Volumen-gewichteter Target-Preis über alle Entry-Legs mit Limit
+    weighted_target_sum = sum(
+        (
+            e.quantity * e.target_price
+            for e in entry_executions
+            if e.target_price is not None and e.target_price > Decimal("0.0")
+        ),
+        Decimal("0.0"),
+    )
+    weighted_target_qty = sum(
+        (
+            e.quantity
+            for e in entry_executions
+            if e.target_price is not None and e.target_price > Decimal("0.0")
+        ),
+        Decimal("0.0"),
+    )
+    entry_target_price = (
+        (weighted_target_sum / weighted_target_qty)
+        if weighted_target_qty > Decimal("0.0")
+        else None
+    )
 
     return SettlementInput(
         entry_executions=entry_executions,
@@ -299,10 +327,11 @@ async def cleanup_settlement_lock(trade_group_id: str) -> None:
 
 @dataclass(frozen=True)
 class ExecutionTuple:
-    """Repräsentiert ein Ausführungs-Leg mit Stückzahl und Preis (Functional Core)."""
+    """Repräsentiert ein Ausführungs-Leg mit Stückzahl, Preis und optionalem Target-Preis (Functional Core)."""
 
     quantity: Decimal
     price: Decimal
+    target_price: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -359,16 +388,59 @@ def calculate_settlement(inputs: SettlementInput) -> SettlementOutput:
         else Decimal("0.0")
     )
 
-    if (
-        inputs.entry_target_price is None
-        or inputs.entry_target_price <= Decimal("0.0")
-        or inputs.entry_sec_type == "FUT"
-    ):
+    # Slippage-Berechnung
+    if inputs.entry_sec_type == "FUT":
         price_diff_slippage = Decimal("0.0")
-    elif inputs.entry_action == "BUY":
-        price_diff_slippage = inputs.entry_target_price - avg_entry_price
     else:
-        price_diff_slippage = avg_entry_price - inputs.entry_target_price
+        # Prüfe, ob Executions individuelle Target-Preise besitzen
+        has_tuple_targets = any(
+            e.target_price is not None and e.target_price > Decimal("0.0")
+            for e in inputs.entry_executions
+        )
+        if has_tuple_targets:
+            # Berechne volumen-gewichtete Slippage ausschließlich über die Legs mit Target-Preis
+            target_legs_qty = sum(
+                (
+                    e.quantity
+                    for e in inputs.entry_executions
+                    if e.target_price is not None and e.target_price > Decimal("0.0")
+                ),
+                Decimal("0.0"),
+            )
+            if target_legs_qty > Decimal("0.0"):
+                if inputs.entry_action == "BUY":
+                    weighted_slip_sum = sum(
+                        (
+                            (e.target_price - e.price) * e.quantity
+                            for e in inputs.entry_executions
+                            if e.target_price is not None
+                            and e.target_price > Decimal("0.0")
+                        ),
+                        Decimal("0.0"),
+                    )
+                else:
+                    weighted_slip_sum = sum(
+                        (
+                            (e.price - e.target_price) * e.quantity
+                            for e in inputs.entry_executions
+                            if e.target_price is not None
+                            and e.target_price > Decimal("0.0")
+                        ),
+                        Decimal("0.0"),
+                    )
+                price_diff_slippage = weighted_slip_sum / target_legs_qty
+            else:
+                price_diff_slippage = Decimal("0.0")
+        elif (
+            inputs.entry_target_price is not None
+            and inputs.entry_target_price > Decimal("0.0")
+        ):
+            if inputs.entry_action == "BUY":
+                price_diff_slippage = inputs.entry_target_price - avg_entry_price
+            else:
+                price_diff_slippage = avg_entry_price - inputs.entry_target_price
+        else:
+            price_diff_slippage = Decimal("0.0")
 
     direction = Decimal("1") if inputs.entry_action == "BUY" else Decimal("-1")
 
