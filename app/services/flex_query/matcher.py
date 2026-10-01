@@ -7,7 +7,7 @@ Matcht geparste Flex-Statement-Einträge deterministisch gegen lokale Trade-Kont
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -20,7 +20,7 @@ from app.services.flex_query.parser import (
     generate_external_reference_id,
     parse_ibkr_date,
 )
-from app.trading.order_builder import symbols_match
+from app.trading.order_builder import normalize_symbol, symbols_match
 
 
 @dataclass(frozen=True)
@@ -49,9 +49,7 @@ class FlexTradeReconciliationAction:
     """Ergebnis des Abgleichs eines FlexTradeRecords gegen historische Trade-Kontexte."""
 
     trade: FlexTradeRecord
-    action_type: (
-        str  # "ALREADY_RECONCILED", "MISSING_EXIT", "MISSING_ENTRY", "UNMATCHED"
-    )
+    action_type: str  # "ALREADY_RECONCILED", "MISSING_EXIT", "MISSING_ENTRY", "UNMATCHED", "BROKER_HOLDING_ACTIVE"
     matched_trade_group_id: str | None = None
     matched_parent_order_id: int | None = None
     symbol: str = ""
@@ -63,6 +61,7 @@ def match_flex_trades(
     trades: Sequence[FlexTradeRecord],
     historical_trades: Sequence[HistoricalTradeContext],
     existing_exec_ids: set[str],
+    broker_positions: Mapping[str, Decimal] | None = None,
 ) -> list[FlexTradeReconciliationAction]:
     """Gleicht FlexTradeRecords gegen lokale historische Trade-Kontexte ab (Functional Core).
 
@@ -91,6 +90,11 @@ def match_flex_trades(
                 continue
             if not symbols_match(trade.symbol, context.symbol):
                 continue
+            # Invariante 2: Mengenkonsistenz
+            # Ein Teilausführung oder abweichende Stückzahl darf nicht blind einer Position anderer Größe zugeordnet werden.
+            if abs(Decimal(str(trade.quantity)) - context.quantity) > Decimal("0.0001"):
+                continue
+
             # Liegt das Ausführungsdatum am oder nach dem Entry-Datum?
             if target_date >= context.entry_date:
                 # Bevorzuge offene (nicht abgewickelte) Trades
@@ -133,17 +137,36 @@ def match_flex_trades(
                     )
                 )
             else:
-                actions.append(
-                    FlexTradeReconciliationAction(
-                        trade=trade,
-                        action_type="MISSING_EXIT",
-                        matched_trade_group_id=matched_context.trade_group_id,
-                        matched_parent_order_id=matched_context.parent_order_id,
-                        symbol=matched_context.symbol,
-                        strategy_name=matched_context.strategy_name,
-                        sec_type=matched_context.sec_type,
+                # Invariante 1: Broker-Holding Guard
+                # Wenn im Broker-Depot noch Bestände für dieses Symbol liegen (broker_qty > 0),
+                # ist die Position am Broker nicht geschlossen! Ein Auto-Exit ist strikt untersagt.
+                norm_sym = normalize_symbol(trade.symbol)
+                if broker_positions is not None and broker_positions.get(
+                    norm_sym, Decimal("0.0")
+                ) > Decimal("0.0"):
+                    actions.append(
+                        FlexTradeReconciliationAction(
+                            trade=trade,
+                            action_type="BROKER_HOLDING_ACTIVE",
+                            matched_trade_group_id=matched_context.trade_group_id,
+                            matched_parent_order_id=matched_context.parent_order_id,
+                            symbol=matched_context.symbol,
+                            strategy_name=matched_context.strategy_name,
+                            sec_type=matched_context.sec_type,
+                        )
                     )
-                )
+                else:
+                    actions.append(
+                        FlexTradeReconciliationAction(
+                            trade=trade,
+                            action_type="MISSING_EXIT",
+                            matched_trade_group_id=matched_context.trade_group_id,
+                            matched_parent_order_id=matched_context.parent_order_id,
+                            symbol=matched_context.symbol,
+                            strategy_name=matched_context.strategy_name,
+                            sec_type=matched_context.sec_type,
+                        )
+                    )
         else:
             actions.append(
                 FlexTradeReconciliationAction(

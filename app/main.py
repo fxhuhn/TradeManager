@@ -170,6 +170,7 @@ class TradingSystemOrchestrator:
                 db=db,
                 config=self.config.flex_query,
                 notifier=self.notifier,
+                interactive_brokers_session=self.interactive_brokers,
             )
             report = await service.sync_and_reconcile()
             trades_info = ""

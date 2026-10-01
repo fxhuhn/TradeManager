@@ -490,3 +490,82 @@ def test_match_flex_trades_ignores_cancelled_or_error_entry_contexts() -> None:
     assert len(actions) == 1
     assert actions[0].action_type == "UNMATCHED"
     assert actions[0].matched_trade_group_id is None
+
+
+def test_match_flex_trades_suppresses_exit_when_broker_holding_active() -> None:
+    """Verifiziert Invariante 1: Auto-Exit wird unterdrückt, wenn die Position noch im Broker liegt."""
+    trade_sell = FlexTradeRecord(
+        account_id="U19605236",
+        symbol="WDC",
+        date_time="2026-09-30;143000",
+        buy_sell="SELL",
+        quantity=Decimal("22"),
+        price=Decimal("442.00"),
+        total_commission=Decimal("-2.00"),
+        trade_id="EXEC_WDC_SELL_1",
+    )
+
+    context = HistoricalTradeContext(
+        account_id="U19605236",
+        trade_group_id="14_NDXMomentum_WDC",
+        symbol="WDC",
+        action="BUY",
+        quantity=Decimal("22"),
+        entry_date="2026-01-02",
+        parent_order_id=-1,
+        sec_type="STK",
+        is_settled=False,
+    )
+
+    # Broker hält noch 22 Stück
+    broker_positions = {"WDC": Decimal("22.0")}
+
+    actions = match_flex_trades(
+        trades=[trade_sell],
+        historical_trades=[context],
+        existing_exec_ids=set(),
+        broker_positions=broker_positions,
+    )
+
+    assert len(actions) == 1
+    assert actions[0].action_type == "BROKER_HOLDING_ACTIVE"
+    assert actions[0].matched_trade_group_id == "14_NDXMomentum_WDC"
+
+
+def test_match_flex_trades_rejects_mismatched_quantity() -> None:
+    """Verifiziert Invariante 2: Ein Verkauf mit abweichender Stückzahl darf keine andere Position schließen."""
+    # Fremder Teilverkauf von 5 Stück aus einer anderen Strategie (z.B. DipBuyer)
+    trade_sell = FlexTradeRecord(
+        account_id="U19605236",
+        symbol="WDC",
+        date_time="2026-09-30;143000",
+        buy_sell="SELL",
+        quantity=Decimal("5"),
+        price=Decimal("442.00"),
+        total_commission=Decimal("-2.00"),
+        trade_id="EXEC_WDC_SELL_DIFF",
+    )
+
+    # Offene 22-Stück Momentum-Position
+    context = HistoricalTradeContext(
+        account_id="U19605236",
+        trade_group_id="14_NDXMomentum_WDC",
+        symbol="WDC",
+        action="BUY",
+        quantity=Decimal("22"),
+        entry_date="2026-01-02",
+        parent_order_id=-1,
+        sec_type="STK",
+        is_settled=False,
+    )
+
+    actions = match_flex_trades(
+        trades=[trade_sell],
+        historical_trades=[context],
+        existing_exec_ids=set(),
+        broker_positions={"WDC": Decimal("0.0")},
+    )
+
+    # Weil 5 != 22, darf der Trade nicht zugeordnet werden!
+    assert len(actions) == 1
+    assert actions[0].action_type == "UNMATCHED"

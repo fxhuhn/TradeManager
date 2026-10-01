@@ -21,11 +21,15 @@ from app.services.flex_query.parser import (
     parse_flex_statement,
     parse_ibkr_date,
 )
-from app.trading.order_builder import normalize_routing_exchange
+from app.trading.order_builder import (
+    normalize_routing_exchange,
+    normalize_symbol,
+)
 from app.trading.settlement import settle_trade_group
 
 if TYPE_CHECKING:
     import aiosqlite
+    from ib_async import IB
 
     from app.core.config import FlexQueryConfig
     from app.services.flex_query.client import FlexWebServiceClient
@@ -61,11 +65,13 @@ class FlexReconciliationService:
         config: FlexQueryConfig,
         client: FlexWebServiceClient | None = None,
         notifier: TelegramNotifier | None = None,
+        interactive_brokers_session: IB | None = None,
     ) -> None:
         self._db = db
         self._config = config
         self._client = client
         self._notifier = notifier
+        self._ib = interactive_brokers_session
 
     async def fetch_historical_trades(self) -> tuple[HistoricalTradeContext, ...]:
         """Lädt alle bekannten Trade-Gruppen aus der Datenbank zur Zuordnung.
@@ -144,10 +150,35 @@ class FlexReconciliationService:
         self,
         trades: tuple[FlexTradeRecord, ...],
         historical_trades: tuple[HistoricalTradeContext, ...],
+        broker_positions: dict[str, Decimal] | None = None,
     ) -> tuple[int, int]:
         """Gleicht FlexTradeRecords gegen die lokale Datenbank ab und bucht fehlende Fills."""
         if not trades:
             return 0, 0
+
+        # Invariante 1: Live Broker-Holding Guard
+        # Frage aktuelle Broker-Bestände ab, um unberechtigte Auto-Exits auf aktiven Positionen zu blockieren.
+        if (
+            broker_positions is None
+            and self._ib is not None
+            and hasattr(self._ib, "positions")
+        ):
+            try:
+                positions_map: dict[str, Decimal] = {}
+                for pos in self._ib.positions():
+                    raw_sym = getattr(pos.contract, "symbol", "")
+                    if raw_sym:
+                        norm_s = normalize_symbol(str(raw_sym))
+                        qty = Decimal(str(pos.position))
+                        positions_map[norm_s] = (
+                            positions_map.get(norm_s, Decimal("0.0")) + qty
+                        )
+                broker_positions = positions_map
+            except Exception as e:
+                logger.warning(
+                    "Konnte Broker-Positionen für Flex-Reconciliation nicht abfragen: %s",
+                    e,
+                )
 
         existing_exec_ids: set[str] = set()
         async with self._db.execute("SELECT exec_id FROM executions") as cursor:
@@ -159,12 +190,21 @@ class FlexReconciliationService:
             trades=trades,
             historical_trades=historical_trades,
             existing_exec_ids=existing_exec_ids,
+            broker_positions=broker_positions,
         )
 
         reconciled_trades_count = 0
         settled_trades_count = 0
 
         for action in actions:
+            if action.action_type == "BROKER_HOLDING_ACTIVE":
+                logger.info(
+                    "Flex Query Reconciliation: Auto-Exit unterdrückt für %s (%s), da Symbol weiterhin im Broker-Depot gehalten wird.",
+                    action.matched_trade_group_id,
+                    action.symbol,
+                )
+                continue
+
             if action.action_type != "MISSING_EXIT":
                 continue
 
