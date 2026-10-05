@@ -96,3 +96,4 @@ _.borrow_fee_rate
 _.gross_rate
 _.fee
 _.net_amount
+_.get_multiplier

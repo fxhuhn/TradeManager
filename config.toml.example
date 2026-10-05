@@ -191,4 +191,28 @@ DIA = "MYM"                       # CME Micro E-mini Dow Jones Industrial Future
 # automatisch als Future (1 Kontrakt @ CME) statt als Aktie/ETF ausgeführt werden.
 # Alle nicht aufgeführten Strategien werden regulär als Aktien/ETFs gehandelt.
 [future_strategies]
-enabled = ["BounceBandit"]
+enabled = ["BounceBandit", "TwoPercent", "TGIM"]
+
+# -----------------------------------------------------------------------------
+# 8. FUTURE MARGIN PUFFER ([future_margins])
+# -----------------------------------------------------------------------------
+[future_margins]
+MNQ = 3500.0                       # CME Micro E-mini Nasdaq-100 Future (Margin-Puffer)
+MES = 2000.0                       # CME Micro E-mini S&P 500 Future (Margin-Puffer)
+M2K = 2000.0                       # CME Micro E-mini Russell 2000 Future
+MYM = 2000.0                       # CME Micro E-mini Dow Jones Future
+default_margin = 3500.0            # Fallback für ungemappte Futures
+
+# -----------------------------------------------------------------------------
+# 9. FUTURE KONTRAKT-MULTIPLIKATOREN ([future_multipliers])
+# -----------------------------------------------------------------------------
+[future_multipliers]
+MES = 5.0                          # CME Micro E-mini S&P 500 ($5 pro Indexpunkt)
+MNQ = 2.0                          # CME Micro E-mini Nasdaq-100 ($2 pro Indexpunkt)
+M2K = 5.0                          # CME Micro E-mini Russell 2000 ($5 pro Indexpunkt)
+MYM = 0.5                          # CME Micro E-mini Dow Jones ($0.50 pro Indexpunkt)
+ES = 50.0                          # CME E-mini S&P 500 ($50 pro Indexpunkt)
+NQ = 20.0                          # CME E-mini Nasdaq-100 ($20 pro Indexpunkt)
+RTY = 50.0                         # CME E-mini Russell 2000 ($50 pro Indexpunkt)
+YM = 5.0                           # CME E-mini Dow Jones ($5 pro Indexpunkt)
+default_multiplier = 1.0           # Standard-Multiplikator für ungemappte Instrumente

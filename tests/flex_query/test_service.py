@@ -254,8 +254,8 @@ async def test_reconcile_from_xml_reconciles_missing_trade_and_settles(
         assert settlement_row is not None
         assert Decimal(str(settlement_row["avg_entry_price"])) == Decimal("20000.0")
         assert Decimal(str(settlement_row["avg_exit_price"])) == Decimal("20050.0")
-        # (20050 - 20000) * 1 - (0.85 + 0.85) = 50 - 1.70 = 48.30
-        assert Decimal(str(settlement_row["net_pnl"])) == Decimal("48.30")
+        # (20050 - 20000) * 1 * 2 - (0.85 + 0.85) = 100 - 1.70 = 98.30
+        assert Decimal(str(settlement_row["net_pnl"])) == Decimal("98.30")
 
     # 2. Zweiter Durchlauf: Idempotenztest (keine Doppelbuchung)
     report2 = await service.reconcile_from_xml(xml_with_trades)

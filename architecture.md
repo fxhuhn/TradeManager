@@ -131,6 +131,7 @@ This section provides a detailed reference of all public classes and functions i
 - `FuturesConfig` (Class): Configuration for automatic signal transformation into CME futures.
   - `is_strategy_enabled` (Method): Evaluates whether a strategy is permitted to transform into futures, supporting wildcard declarations.
   - `get_margin_requirement` (Method): Returns the configured margin cash buffer for a future symbol.
+  - `get_multiplier` (Method): Returns the contract point multiplier for a future symbol (e.g. MES=5.0, MNQ=2.0).
 - `FlexQueryConfig` (Class): Configuration for Interactive Brokers Flex Query web service synchronization.
 - `Config` (Class): Parent configuration object nesting TWS, App, Account, Telegram, Futures, and Flex Query configs.
 - `load_env` (Function): Loads environment variables from the given environment path.
@@ -270,6 +271,7 @@ This section provides a detailed reference of all public classes and functions i
 - `build_order` (Function): Constructs raw `Order` models with stop/limit brackets or conditional parameters.
 - `extract_transmitted_price` (Function): Extracts actual tick-rounded price from a constructed `Order`.
 - `get_underlying_etf_info` (Function): Resolves the underlying ETF symbol and IBKR contract ID for a given CME future contract symbol.
+- `get_contract_multiplier` (Function): Returns the contract multiplier for an instrument (1.0 for equities, point value for futures like MES=5.0, MNQ=2.0).
 - `apply_conditioned_future_order` (Function): Configures execution timing and underlying ETF price conditions on CME future orders.
 - `should_apply_loc_gtd` (Function): Evaluates whether an LMT child order must expire via GTD due to a sibling LOC/MOC order.
 - `compute_loc_gtd_cutoff` (Function): Calculates and formats the market-specific GTD expiry timestamp (15:48 US/Eastern or 17:18 Europe/Berlin).

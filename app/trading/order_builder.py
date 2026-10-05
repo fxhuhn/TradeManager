@@ -99,6 +99,38 @@ CME_FUTURE_ROOTS: Final[tuple[str, ...]] = (
     "YM",
 )
 
+DEFAULT_FUTURE_MULTIPLIERS: Final[dict[str, Decimal]] = {
+    "MES": Decimal("5.0"),
+    "MNQ": Decimal("2.0"),
+    "M2K": Decimal("5.0"),
+    "MYM": Decimal("0.5"),
+    "ES": Decimal("50.0"),
+    "NQ": Decimal("20.0"),
+    "RTY": Decimal("50.0"),
+    "YM": Decimal("5.0"),
+}
+
+
+def get_contract_multiplier(symbol: str, sec_type: str = "STK") -> Decimal:
+    """Ermittelt den Kontrakt-Multiplikator für ein Finanzinstrument.
+
+    Für Aktien (STK) ist der Multiplikator stets 1.0.
+    Für Futures (FUT) wird anhand des Basis-Symbols der Indexpunkt-Wert ermittelt (z. B. MES=5.0, MNQ=2.0).
+    """
+    clean_sec = (sec_type or "STK").strip().upper()
+    if clean_sec != "FUT":
+        return Decimal("1.0")
+
+    clean_sym = normalize_symbol(symbol)
+    if clean_sym in DEFAULT_FUTURE_MULTIPLIERS:
+        return DEFAULT_FUTURE_MULTIPLIERS[clean_sym]
+
+    for root in sorted(DEFAULT_FUTURE_MULTIPLIERS.keys(), key=len, reverse=True):
+        if clean_sym.startswith(root):
+            return DEFAULT_FUTURE_MULTIPLIERS[root]
+
+    return Decimal("1.0")
+
 
 def symbols_match(
     symbol_a: str | None,

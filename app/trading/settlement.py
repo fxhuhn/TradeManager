@@ -19,6 +19,7 @@ import structlog
 
 from app.core.db import transaction
 from app.services.notifier import TelegramNotifier
+from app.trading.order_builder import get_contract_multiplier
 
 logger = structlog.get_logger()
 
@@ -104,6 +105,7 @@ async def settle_trade_group(
             calculation_outputs,
             settlement_input.total_commissions,
             entry_sec_type=settlement_input.entry_sec_type,
+            symbol=settlement_input.symbol,
         )
 
     return True
@@ -129,7 +131,7 @@ async def _fetch_settlement_data(
     """Lädt Executions und Target-Preise für die Trade-Gruppe aus der DB."""
     query = """
         SELECT e.qty, e.price, COALESCE(e.commission, 0.0) as commission,
-               o.bracket_role, o.action, o.target_price, o.sec_type
+               o.bracket_role, o.action, o.target_price, o.sec_type, o.symbol
         FROM executions e
         JOIN orders o ON e.order_id = o.order_id
         WHERE o.trade_group_id = ?
@@ -141,6 +143,7 @@ async def _fetch_settlement_data(
     entry_target_price: Decimal | None = None
     entry_action = "BUY"
     entry_sec_type = "STK"
+    entry_symbol = ""
 
     async with db.execute(query, (trade_group_id,)) as cursor:
         async for row in cursor:
@@ -172,8 +175,12 @@ async def _fetch_settlement_data(
                 entry_action = row["action"]
                 if "sec_type" in row.keys() and row["sec_type"]:
                     entry_sec_type = str(row["sec_type"])
+                if "symbol" in row.keys() and row["symbol"]:
+                    entry_symbol = str(row["symbol"])
             elif role in ("SL", "TP", "EXIT"):
                 exit_executions.append(ExecutionTuple(quantity=quantity, price=price))
+                if not entry_symbol and "symbol" in row.keys() and row["symbol"]:
+                    entry_symbol = str(row["symbol"])
 
     if not entry_executions:
         logger.warning(
@@ -211,6 +218,8 @@ async def _fetch_settlement_data(
         else None
     )
 
+    multiplier = get_contract_multiplier(entry_symbol, sec_type=entry_sec_type)
+
     return SettlementInput(
         entry_executions=entry_executions,
         exit_executions=exit_executions,
@@ -218,6 +227,8 @@ async def _fetch_settlement_data(
         entry_action=entry_action,
         total_commissions=total_commissions,
         entry_sec_type=entry_sec_type,
+        symbol=entry_symbol,
+        multiplier=multiplier,
     )
 
 
@@ -258,6 +269,7 @@ async def _send_settlement_notification(
     outputs: SettlementOutput,
     total_commissions: Decimal,
     entry_sec_type: str = "STK",
+    symbol: str = "",
 ) -> None:
     """Sends a Telegram notification about the successful trade settlement."""
     profit_loss_emoji = (
@@ -299,9 +311,14 @@ async def _send_settlement_notification(
         )
         slippage_str = "N/A"
 
+    symbol_text = (
+        f"<code>{symbol}</code> ({entry_action})"
+        if symbol
+        else f"<code>{entry_action}</code> Position"
+    )
     message = (
         f"✅ <b>TRADE SETTLEMENT</b> | <code>{trade_group_id}</code>\n"
-        f"├─ <b>Symbol:</b> <code>{entry_action}</code> Position\n"
+        f"├─ <b>Symbol:</b> {symbol_text}\n"
         f"├─ <b>Entry:</b> <code>{float(outputs.avg_entry_price):.2f}</code> (Target: {target_str})\n"
         f"├─ <b>Exit:</b> <code>{float(outputs.avg_exit_price):.2f}</code>\n"
         f"├─ <b>Slippage:</b> <code>{slippage_str}</code>\n"
@@ -344,6 +361,8 @@ class SettlementInput:
     entry_action: str
     total_commissions: Decimal
     entry_sec_type: str = "STK"
+    symbol: str = ""
+    multiplier: Decimal = Decimal("1.0")
 
 
 @dataclass(frozen=True)
@@ -445,7 +464,10 @@ def calculate_settlement(inputs: SettlementInput) -> SettlementOutput:
     direction = Decimal("1") if inputs.entry_action == "BUY" else Decimal("-1")
 
     gross_profit_loss = (
-        direction * (avg_exit_price - avg_entry_price) * entry_sum_quantity
+        direction
+        * (avg_exit_price - avg_entry_price)
+        * entry_sum_quantity
+        * inputs.multiplier
     )
     net_profit_loss = gross_profit_loss - inputs.total_commissions
 

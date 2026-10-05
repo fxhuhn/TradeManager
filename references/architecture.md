@@ -74,7 +74,7 @@ Aggregates and persists final trade results.
 | `avg_exit_price` | `REAL`/`TEXT` | `NOT NULL` | Calculated average VWAP exit price across execution parts (stored as stringified `Decimal`). |
 | `price_diff_slippage`| `REAL`/`TEXT` | `NOT NULL` | Difference between intended target price and executed price (stored as stringified `Decimal`). |
 | `total_commissions` | `REAL`/`TEXT` | `NOT NULL` | Sum of commissions from all linked executions (stored as stringified `Decimal`). |
-| `net_pnl` | `REAL`/`TEXT` | `NOT NULL` | Profit or Loss calculated as `(Exit Price - Entry Price) * Qty - Fees` (stored as stringified `Decimal`). |
+| `net_pnl` | `REAL`/`TEXT` | `NOT NULL` | Profit or Loss calculated as `(Exit Price - Entry Price) * Qty * Multiplier - Fees` (stored as stringified `Decimal`). |
 | `settled_at` | `TIMESTAMP` | `DEFAULT CURRENT_TIMESTAMP` | Timestamp indicating when settlement calculations finalized. |
 
 * **Constraints**:

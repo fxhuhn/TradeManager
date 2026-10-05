@@ -561,3 +561,33 @@ def test_conditioned_future_order_price_condition_directions() -> None:
     order_sell_sl = Order()
     apply_conditioned_future_order(order_sell_sl, sell_sl, "20260921", now=morning_time)
     assert order_sell_sl.conditions[0].isMore is False
+
+
+def test_get_contract_multiplier() -> None:
+    """Prüft, dass get_contract_multiplier für alle CME-Futures und Aktien korrekte Multiplikatoren liefert."""
+    from app.trading.order_builder import get_contract_multiplier
+
+    # Equity fallback
+    assert get_contract_multiplier("AAPL", "STK") == Decimal("1.0")
+    assert get_contract_multiplier("SPY", "STK") == Decimal("1.0")
+
+    # CME Micro Futures
+    assert get_contract_multiplier("MES", "FUT") == Decimal("5.0")
+    assert get_contract_multiplier("MESZ6", "FUT") == Decimal("5.0")
+    assert get_contract_multiplier("MNQ", "FUT") == Decimal("2.0")
+    assert get_contract_multiplier("MNQU6", "FUT") == Decimal("2.0")
+    assert get_contract_multiplier("M2K", "FUT") == Decimal("5.0")
+    assert get_contract_multiplier("M2KZ6", "FUT") == Decimal("5.0")
+    assert get_contract_multiplier("MYM", "FUT") == Decimal("0.5")
+    assert get_contract_multiplier("MYMZ6", "FUT") == Decimal("0.5")
+
+    # CME Standard E-mini Futures
+    assert get_contract_multiplier("ES", "FUT") == Decimal("50.0")
+    assert get_contract_multiplier("ESZ6", "FUT") == Decimal("50.0")
+    assert get_contract_multiplier("NQ", "FUT") == Decimal("20.0")
+    assert get_contract_multiplier("NQZ6", "FUT") == Decimal("20.0")
+    assert get_contract_multiplier("RTY", "FUT") == Decimal("50.0")
+    assert get_contract_multiplier("YM", "FUT") == Decimal("5.0")
+
+    # Fallback für unbekannte Futures
+    assert get_contract_multiplier("UNKNOWN", "FUT") == Decimal("1.0")

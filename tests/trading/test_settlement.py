@@ -552,3 +552,100 @@ async def test_settlement_multi_entry_db(db) -> None:
         assert row is not None
         assert abs(float(row["avg_entry_price"]) - 821.49) < 0.01
         assert abs(float(row["price_diff_slippage"]) - 0.0) < 0.001
+
+
+def test_calculate_settlement_future_multiplier_mes() -> None:
+    """Verifies that calculate_settlement scales gross PnL by the MES multiplier (5.0)."""
+    settlement_input = SettlementInput(
+        entry_executions=[
+            ExecutionTuple(quantity=Decimal("1"), price=Decimal("7747.50"))
+        ],
+        exit_executions=[
+            ExecutionTuple(quantity=Decimal("1"), price=Decimal("7800.00"))
+        ],
+        entry_target_price=None,
+        entry_action="BUY",
+        total_commissions=Decimal("1.25"),
+        entry_sec_type="FUT",
+        symbol="MESZ6",
+        multiplier=Decimal("5.0"),
+    )
+    result = calculate_settlement(settlement_input)
+    assert result.avg_entry_price == Decimal("7747.50")
+    assert result.avg_exit_price == Decimal("7800.00")
+    # (7800.00 - 7747.50) * 1 * 5.0 - 1.25 = 52.50 * 5 - 1.25 = 262.50 - 1.25 = 261.25
+    assert result.net_profit_loss == Decimal("261.25")
+
+
+def test_calculate_settlement_future_multiplier_mnq() -> None:
+    """Verifies that calculate_settlement scales gross PnL by the MNQ multiplier (2.0)."""
+    settlement_input = SettlementInput(
+        entry_executions=[
+            ExecutionTuple(quantity=Decimal("1"), price=Decimal("29418.00"))
+        ],
+        exit_executions=[
+            ExecutionTuple(quantity=Decimal("1"), price=Decimal("29420.00"))
+        ],
+        entry_target_price=None,
+        entry_action="BUY",
+        total_commissions=Decimal("2.50"),
+        entry_sec_type="FUT",
+        symbol="MNQU6",
+        multiplier=Decimal("2.0"),
+    )
+    result = calculate_settlement(settlement_input)
+    # (29420.00 - 29418.00) * 1 * 2.0 - 2.50 = 2.0 * 2 - 2.50 = 4.0 - 2.50 = 1.50
+    assert result.net_profit_loss == Decimal("1.50")
+
+
+@pytest.mark.asyncio
+async def test_settle_trade_group_future_integration(db) -> None:
+    """Verifies that settle_trade_group automatically resolves future multiplier and formats Telegram alert."""
+    from app.trading.settlement import settle_trade_group
+
+    # Insert MES future order
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role,
+                            symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, status)
+        VALUES (201, 1001, NULL, '1571_TGIM_SPY', 'U12345', 'ENTRY', 'MESZ6', 'FUT', 'CME', 'BUY', 1, 'LOC', 767.18, 'DAY', 'Filled')
+        """
+    )
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role,
+                            symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, status)
+        VALUES (202, 1002, 201, '1571_TGIM_SPY', 'U12345', 'EXIT', 'MESZ6', 'FUT', 'CME', 'SELL', 1, 'MKT', 7800.0, 'GTC', 'Filled')
+        """
+    )
+    await db.execute(
+        "INSERT INTO executions (exec_id, order_id, price, qty, commission) VALUES ('E_ENTRY', 201, 7747.50, 1, 1.25)"
+    )
+    await db.execute(
+        "INSERT INTO executions (exec_id, order_id, price, qty, commission) VALUES ('E_EXIT', 202, 7800.00, 1, 0.0)"
+    )
+    await db.commit()
+
+    mock_notifier = MagicMock()
+    mock_notifier.is_active = True
+    mock_notifier.send_message = AsyncMock(return_value=True)
+
+    success = await settle_trade_group(
+        db, "1571_TGIM_SPY", "U12345", notifier=mock_notifier
+    )
+    assert success is True
+
+    # Check database persistence
+    async with db.execute(
+        "SELECT net_pnl, total_commissions FROM trades_settlement WHERE trade_group_id = '1571_TGIM_SPY'"
+    ) as cursor:
+        row = await cursor.fetchone()
+        assert row is not None
+        assert Decimal(str(row["net_pnl"])) == Decimal("261.25")
+        assert Decimal(str(row["total_commissions"])) == Decimal("1.25")
+
+    # Check notification call
+    mock_notifier.send_message.assert_called_once()
+    sent_msg = mock_notifier.send_message.call_args[0][0]
+    assert "<code>MESZ6</code> (BUY)" in sent_msg
+    assert "+261.25 USD" in sent_msg

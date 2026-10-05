@@ -871,7 +871,7 @@ class TelegramNotifier:
         cancelled_child_orders_count: int = 0,
         strategy_name: str | None = None,
     ) -> bool:
-        """Sendet einen Notfall-Alarm bei externer Positionsschließung oder Zwangsliquidierung."""
+        """Sendet eine Benachrichtigung bei externer oder manueller Positionsschließung."""
         rows: list[TreeRow] = [
             ("Konto", f"<code>{account_id}</code>"),
             ("Trade-Gruppe", f"<code>{trade_group_id}</code>"),
@@ -889,13 +889,13 @@ class TelegramNotifier:
         rows.append(
             (
                 "Aktion",
-                "Position wurde extern geschlossen / liquidiert. Trade-Gruppe final abgerechnet.",
+                "Position wurde extern geschlossen (z. B. manuell via TWS / IBKR Mobile App). Trade-Gruppe final abgerechnet.",
             )
         )
         message = build_tree_message(
-            title="ZWANGSLIQUIDIERUNG / EXTERNE SCHLIESSUNG",
+            title="MANUELLE / EXTERNE SCHLIESSUNG",
             context=symbol,
-            emoji="🚨",
+            emoji="ℹ️",
             rows=rows,
         )
         return await self.send_message(message)

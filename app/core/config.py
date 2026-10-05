@@ -88,6 +88,8 @@ class FuturesConfig:
     bafin_cash_protection: bool = True
     margin_requirements: dict[str, Decimal] = field(default_factory=dict)
     default_margin: Decimal = Decimal("3500.0")
+    multipliers: dict[str, Decimal] = field(default_factory=dict)
+    default_multiplier: Decimal = Decimal("1.0")
 
     def is_strategy_enabled(self, strategy_name: str | None) -> bool:
         """Prüft, ob eine Strategie für die Future-Transformation freigegeben ist."""
@@ -106,6 +108,21 @@ class FuturesConfig:
             if root.startswith(key):
                 return margin
         return self.default_margin
+
+    def get_multiplier(self, symbol: str) -> Decimal:
+        """Ermittelt den Kontrakt-Multiplikator für ein Future-Symbol (z. B. MES -> 5.0, MNQ -> 2.0)."""
+        root = symbol.strip().upper()
+        if root in self.multipliers:
+            return self.multipliers[root]
+        for key, mult in self.multipliers.items():
+            if root.startswith(key):
+                return mult
+        from app.trading.order_builder import get_contract_multiplier
+
+        res = get_contract_multiplier(symbol, sec_type="FUT")
+        if res != Decimal("1.0"):
+            return res
+        return self.default_multiplier
 
 
 @dataclass(frozen=True)
@@ -339,6 +356,17 @@ def _parse_futures_config(toml_data: dict[str, object]) -> FuturesConfig:
             else:
                 margin_requirements[key_clean] = Decimal(str(val))
 
+    raw_multipliers = toml_data.get("future_multipliers")
+    multipliers: dict[str, Decimal] = {}
+    default_multiplier = Decimal("1.0")
+    if isinstance(raw_multipliers, dict):
+        for key, val in raw_multipliers.items():
+            key_clean = str(key).strip().upper()
+            if key_clean == "DEFAULT_MULTIPLIER":
+                default_multiplier = Decimal(str(val))
+            else:
+                multipliers[key_clean] = Decimal(str(val))
+
     return FuturesConfig(
         asset_mapping=asset_mapping,
         enabled_strategies=tuple(enabled_strategies),
@@ -346,6 +374,8 @@ def _parse_futures_config(toml_data: dict[str, object]) -> FuturesConfig:
         bafin_cash_protection=bafin_cash_protection,
         margin_requirements=margin_requirements,
         default_margin=default_margin,
+        multipliers=multipliers,
+        default_multiplier=default_multiplier,
     )
 
 

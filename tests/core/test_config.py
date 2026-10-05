@@ -1,6 +1,7 @@
 """Tests for TWS configuration parsing and environment variable overrides."""
 
 import os
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
@@ -340,3 +341,40 @@ def test_config_parsing_whatif_timeout_toml_and_env_overrides(tmp_path: Path) ->
     with patch.dict(os.environ, {"TWS_WHATIF_TIMEOUT_S": "25.0"}):
         config_env = load_config(tmp_path)
         assert config_env.tws.whatif_timeout_s == 25.0
+
+
+def test_config_parsing_future_multipliers(tmp_path: Path) -> None:
+    """Verifies that [future_multipliers] are parsed into FuturesConfig and get_multiplier works."""
+    config_content = """
+    [tws]
+    host = "127.0.0.1"
+    port = 7497
+    client_id = 1
+
+    [app]
+    max_retries = 3
+
+    [account]
+    default_limit_pct = 0.05
+
+    [future_multipliers]
+    MES = 5.0
+    MNQ = 2.0
+    CUSTOM = 10.0
+    default_multiplier = 1.5
+    """
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(config_content, encoding="utf-8")
+
+    with patch.dict(os.environ, {}, clear=False):
+        for key in ["TWS_HOST", "TWS_PORT", "TWS_CLIENT_ID"]:
+            os.environ.pop(key, None)
+        config = load_config(tmp_path)
+
+        assert config.futures.multipliers["MES"] == Decimal("5.0")
+        assert config.futures.multipliers["MNQ"] == Decimal("2.0")
+        assert config.futures.multipliers["CUSTOM"] == Decimal("10.0")
+        assert config.futures.default_multiplier == Decimal("1.5")
+        assert config.futures.get_multiplier("MESZ6") == Decimal("5.0")
+        assert config.futures.get_multiplier("CUSTOM1") == Decimal("10.0")
+        assert config.futures.get_multiplier("UNMAPPED") == Decimal("1.5")

@@ -569,9 +569,9 @@ async def reconcile_broker_positions(
     Gleicht Live-Positionen vom IBKR Broker mit der lokalen SQLite-Datenbank in beide Richtungen ab.
 
     1. delta_qty > 0 (Broker > DB): Unassigned-Positionen werden als synthetische Entry-Orders erfasst.
-    2. delta_qty < 0 (DB > Broker): Bei extern geschlossenen Positionen oder Zwangsliquidierungen
+    2. delta_qty < 0 (DB > Broker): Bei extern geschlossenen Positionen (z. B. manuell im Broker)
        werden verwaiste Child-Orders (SL, TP, EXIT) sofort storniert (Short-Schutz), eine
-       synthetische Exit-Order zur Abrechnung verbucht und ein Notfall-Alarm versendet.
+       synthetische Exit-Order zur Abrechnung verbucht und ein Benachrichtigungs-Alarm versendet.
     """
     raw_positions = interactive_brokers_session.positions()
     positions = list(raw_positions) if hasattr(raw_positions, "__iter__") else []
@@ -749,7 +749,7 @@ async def reconcile_broker_positions(
 
         if deficit_qty > Decimal("0.0"):
             logger.warning(
-                "Broker position deficit detected (position closed externally / liquidated). Recovering to DB.",
+                "Broker position deficit detected (position closed externally). Recovering to DB.",
                 symbol=db_symbol,
                 db_net_qty=float(db_net_qty),
                 broker_qty=float(broker_qty),
@@ -901,7 +901,7 @@ async def reconcile_broker_positions(
                         await trigger_settlement_callback(e_group, e_account)
                     except Exception as settl_err:
                         logger.error(
-                            "Error triggering settlement for recovered external liquidation",
+                            "Error triggering settlement for recovered external position close",
                             trade_group_id=e_group,
                             error=str(settl_err),
                         )
