@@ -2,7 +2,7 @@
 # Gehärtetes Multi-Stage Image für das IBKR Equities Trading System
 
 # ── Stage 1: Builder ──
-FROM python:3.12-slim-bookworm AS builder
+FROM python:3.14-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends gcc \
     && rm -rf /var/lib/apt/lists/*
@@ -16,7 +16,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
  && pip uninstall -y pip setuptools wheel
 
 # ── Stage 2: Runtime ──
-FROM python:3.12-slim-bookworm
+FROM python:3.14-slim-bookworm
 
 # Sicherheits-Upgrades + tzdata, verwundbare System-Pakete entfernen
 RUN apt-get update && apt-get dist-upgrade -y \
