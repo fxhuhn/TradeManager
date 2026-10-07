@@ -2,7 +2,7 @@
 # Gehärtetes Multi-Stage Image für das IBKR Equities Trading System
 
 # ── Stage 1: Builder ──
-FROM python:3.12-slim-bookworm AS builder
+FROM python:3.13-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends gcc \
     && rm -rf /var/lib/apt/lists/*
@@ -16,7 +16,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
  && pip uninstall -y pip setuptools wheel
 
 # ── Stage 2: Runtime ──
-FROM python:3.12-slim-bookworm
+FROM python:3.13-slim-bookworm
 
 # Sicherheits-Upgrades + tzdata, verwundbare System-Pakete entfernen
 RUN apt-get update && apt-get dist-upgrade -y \
@@ -24,10 +24,10 @@ RUN apt-get update && apt-get dist-upgrade -y \
     && apt-get purge -y --auto-remove \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
-    && rm -rf /usr/local/lib/python3.12/site-packages/pip* \
-              /usr/local/lib/python3.12/site-packages/setuptools* \
-              /usr/local/lib/python3.12/site-packages/wheel* \
-              /usr/local/lib/python3.12/site-packages/pkg_resources \
+    && rm -rf /usr/local/lib/python3.13/site-packages/pip* \
+              /usr/local/lib/python3.13/site-packages/setuptools* \
+              /usr/local/lib/python3.13/site-packages/wheel* \
+              /usr/local/lib/python3.13/site-packages/pkg_resources \
               /usr/local/bin/pip*
 
 COPY --from=builder /opt/venv /opt/venv

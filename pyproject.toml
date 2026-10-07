@@ -3,7 +3,7 @@
 
 [tool.ruff]
 # Zielversion von Python
-target-version = "py312"
+target-version = "py313"
 
 # Maximale Zeilenlänge
 line-length = 88
@@ -62,7 +62,7 @@ min_confidence = 60
 paths = ["app", "vulture_whitelist.py"]
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.13"
 strict = true
 ignore_missing_imports = true
 
