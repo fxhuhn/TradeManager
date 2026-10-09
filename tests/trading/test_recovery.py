@@ -1001,3 +1001,121 @@ async def test_reconcile_broker_positions_refuses_recovery_when_net_db_qty_is_ne
     ) as cursor:
         row = await cursor.fetchone()
         assert row["count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_reconcile_broker_positions_excludes_settled_trades(db) -> None:
+    """Verifies that reconcile_broker_positions excludes already settled trades from DB net positions."""
+    # 1. Altes, abgerechnetes Trade-Group mit historischem SELL-Exit
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, status)
+        VALUES (-100, 'TG_SETTLED_QQQ', 'U19605236', 'EXIT', 'MNQZ6', 'FUT', 'CME', 'SELL', 1, 'MKT', 'Filled')
+        """
+    )
+    await db.execute(
+        """
+        INSERT INTO executions (exec_id, order_id, price, qty, currency, executed_at)
+        VALUES ('EXEC_OLD_EXIT', -100, 31000.0, 1.0, 'USD', '2026-09-29 08:00:00')
+        """
+    )
+    await db.execute(
+        """
+        INSERT INTO trades_settlement (account_id, trade_group_id, avg_entry_price, avg_exit_price, price_diff_slippage, total_commissions, net_pnl)
+        VALUES ('U19605236', 'TG_SETTLED_QQQ', '30900.0', '31000.0', '0.0', '1.5', '200.0')
+        """
+    )
+
+    # 2. Neuer, aktiver offener Trade mit ENTRY BUY 1
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, status)
+        VALUES (1871, 'TG_ACTIVE_QQQ', 'U19605236', 'ENTRY', 'MNQZ6', 'FUT', 'CME', 'BUY', 1, 'MKT', 'Filled')
+        """
+    )
+    await db.execute(
+        """
+        INSERT INTO executions (exec_id, order_id, price, qty, currency, executed_at)
+        VALUES ('EXEC_NEW_ENTRY', 1871, 31167.5, 1.0, 'USD', '2026-10-09 15:30:00')
+        """
+    )
+    await db.commit()
+
+    # 3. Broker meldet realen Bestand von 1 Kontrakt
+    mock_pos = MagicMock()
+    mock_pos.position = 1.0
+    mock_pos.contract.secType = "FUT"
+    mock_pos.contract.exchange = "CME"
+    mock_pos.contract.symbol = "MNQ"
+    mock_pos.contract.localSymbol = "MNQZ6"
+    mock_pos.contract.currency = "USD"
+    mock_pos.account = "U19605236"
+    mock_pos.avgCost = 62336.25
+
+    mock_ib = MagicMock()
+    mock_ib.positions.return_value = [mock_pos]
+    mock_notifier = MagicMock()
+
+    await reconcile_broker_positions(
+        database_connection=db,
+        interactive_brokers_session=mock_ib,
+        notifier=mock_notifier,
+        trigger_settlement_callback=AsyncMock(),
+    )
+
+    # 4. Verifikation: Keine synthetische Recovery-Order darf angelegt worden sein
+    async with db.execute(
+        "SELECT COUNT(*) as count FROM orders WHERE trade_group_id LIKE 'UNASSIGNED_%'"
+    ) as cursor:
+        row = await cursor.fetchone()
+        assert row["count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_reconcile_broker_positions_refuses_recovery_when_net_db_qty_is_negative_for_futures(
+    db,
+) -> None:
+    """Verifies that reconcile_broker_positions blocks recovery for futures with negative net quantities in DB."""
+    # 1. Erstelle unplausiblen negativen Netto-Bestand für einen Future
+    await db.execute(
+        """
+        INSERT INTO orders (order_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, status)
+        VALUES (-200, 'TG_CORRUPT_FUT', 'U19605236', 'EXIT', 'MNQZ6', 'FUT', 'CME', 'SELL', 3, 'MKT', 'Filled')
+        """
+    )
+    await db.execute(
+        """
+        INSERT INTO executions (exec_id, order_id, price, qty, currency, executed_at)
+        VALUES ('EXEC_CORRUPT_FUT', -200, 31000.0, 3.0, 'USD', '2026-10-09 10:00:00')
+        """
+    )
+    await db.commit()
+
+    # 2. Broker meldet realen Bestand von 1 Kontrakt
+    mock_pos = MagicMock()
+    mock_pos.position = 1.0
+    mock_pos.contract.secType = "FUT"
+    mock_pos.contract.exchange = "CME"
+    mock_pos.contract.symbol = "MNQ"
+    mock_pos.contract.localSymbol = "MNQZ6"
+    mock_pos.contract.currency = "USD"
+    mock_pos.account = "U19605236"
+    mock_pos.avgCost = 62336.25
+
+    mock_ib = MagicMock()
+    mock_ib.positions.return_value = [mock_pos]
+    mock_notifier = MagicMock()
+
+    await reconcile_broker_positions(
+        database_connection=db,
+        interactive_brokers_session=mock_ib,
+        notifier=mock_notifier,
+        trigger_settlement_callback=AsyncMock(),
+    )
+
+    # 3. Verifikation: Es darf KEINE künstliche Recovery-Order angelegt werden
+    async with db.execute(
+        "SELECT COUNT(*) as count FROM orders WHERE trade_group_id LIKE 'UNASSIGNED_%'"
+    ) as cursor:
+        row = await cursor.fetchone()
+        assert row["count"] == 0

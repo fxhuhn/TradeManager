@@ -578,13 +578,15 @@ async def reconcile_broker_positions(
     if not positions:
         return
 
-    # Netto-Ausführungen in der DB berechnen (SUM(BUY) - SUM(SELL))
+    # Netto-Ausführungen offener Trades in der DB berechnen (SUM(BUY) - SUM(SELL))
     db_positions: dict[str, Decimal] = {}
     query = """
         SELECT o.symbol,
                SUM(CASE WHEN o.action = 'BUY' THEN CAST(e.qty AS REAL) ELSE -CAST(e.qty AS REAL) END) as net_qty
         FROM executions e
         JOIN orders o ON e.order_id = o.order_id
+        LEFT JOIN trades_settlement ts ON o.account_id = ts.account_id AND o.trade_group_id = ts.trade_group_id
+        WHERE ts.trade_group_id IS NULL
         GROUP BY o.symbol
     """
     async with database_connection.execute(query) as cursor:
@@ -646,11 +648,12 @@ async def reconcile_broker_positions(
 
         db_net_qty = db_positions.get(symbol, Decimal("0.0"))
 
-        if sec_type == "STK" and db_net_qty < Decimal("0.0"):
+        if db_net_qty < Decimal("0.0"):
             logger.critical(
-                "Corrupt negative net quantity detected in DB for equity position. "
+                "Corrupt negative net quantity detected in DB for position. "
                 "Refusing automatic recovery to prevent erroneous buying.",
                 symbol=symbol,
+                sec_type=sec_type,
                 db_net_qty=float(db_net_qty),
                 broker_qty=float(broker_qty),
             )
