@@ -3563,3 +3563,61 @@ async def test_loc_verification_with_futures_contract(
     assert called_contract.localSymbol == "MNQU6"
     assert called_contract.exchange == "CME"
     assert called_contract.currency == "USD"
+
+
+@pytest.mark.asyncio
+async def test_save_execution_rejects_orphan_exit_execution_when_entry_cancelled(
+    db: aiosqlite.Connection, mock_config: Config
+) -> None:
+    """Verifies that _save_execution refuses to insert an execution for an exit order whose entry was cancelled."""
+    mock_ib = MagicMock()
+    mock_notifier = MagicMock()
+    original_close = db.close
+    db.close = AsyncMock()
+
+    manager = TwsCallbacksManager(
+        db_factory=AsyncMock(return_value=db),
+        interactive_brokers=mock_ib,
+        notifier=mock_notifier,
+        config=mock_config,
+        trigger_settlement_callback=AsyncMock(),
+        handle_retriable_error_callback=AsyncMock(),
+        run_recovery_callback=AsyncMock(),
+        run_reconnect_callback=AsyncMock(),
+    )
+
+    try:
+        # 1. Trade-Gruppe mit storniertem Entry und verwaister Exit-Order
+        await db.execute(
+            """
+            INSERT INTO orders (order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, status)
+            VALUES (8801, 10001, NULL, 'TG_ORPHAN_TEST', 'U12345', 'ENTRY', 'AAPL', 'STK', 'SMART', 'BUY', 10, 'MKT', 150.0, 'DAY', 'Cancelled')
+            """
+        )
+        await db.execute(
+            """
+            INSERT INTO orders (order_id, perm_id, parent_id, trade_group_id, account_id, bracket_role, symbol, sec_type, exchange, action, quantity, order_type, target_price, tif, status)
+            VALUES (8802, 10002, 8801, 'TG_ORPHAN_TEST', 'U12345', 'EXIT', 'AAPL', 'STK', 'SMART', 'SELL', 10, 'LOC', 155.0, 'DAY', 'Submitted')
+            """
+        )
+        await db.commit()
+
+        # 2. Ausführung für Exit-Order trifft ein
+        await manager._save_execution(
+            exec_id="EXEC_ORPHAN_REJECT_1",
+            order_id=8802,
+            price=Decimal("155.0"),
+            qty=Decimal("10.0"),
+            currency="USD",
+            executed_at="2026-10-15 15:59:00",
+            symbol="AAPL",
+        )
+
+        # 3. Verifikation: Execution darf NICHT in der DB gespeichert worden sein
+        async with db.execute(
+            "SELECT COUNT(*) as count FROM executions WHERE exec_id = 'EXEC_ORPHAN_REJECT_1'"
+        ) as cursor:
+            row = await cursor.fetchone()
+            assert row["count"] == 0
+    finally:
+        db.close = original_close

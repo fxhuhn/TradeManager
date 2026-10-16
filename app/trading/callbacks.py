@@ -1158,7 +1158,8 @@ class TwsCallbacksManager:
         db = await self.db_factory()
         try:
             async with db.execute(
-                "SELECT symbol, sec_type FROM orders WHERE order_id = ?", (order_id,)
+                "SELECT symbol, sec_type, trade_group_id, bracket_role FROM orders WHERE order_id = ?",
+                (order_id,),
             ) as cursor:
                 order_row = await cursor.fetchone()
 
@@ -1177,6 +1178,23 @@ class TwsCallbacksManager:
                     fill=fill,
                 )
                 return
+
+            # Invariante: Verwaiste Child-Orders (SL, TP, EXIT) dürfen keine Fills verbuchen, wenn der Entry storniert ist
+            if order_row["bracket_role"] in ("SL", "TP", "EXIT"):
+                async with db.execute(
+                    "SELECT status FROM orders WHERE trade_group_id = ? AND bracket_role = 'ENTRY' LIMIT 1",
+                    (order_row["trade_group_id"],),
+                ) as cursor:
+                    entry_row = await cursor.fetchone()
+                if not entry_row or entry_row["status"] == "Cancelled":
+                    logger.error(
+                        "Rejected orphan exit execution: Entry order is cancelled or missing",
+                        order_id=order_id,
+                        exec_id=exec_id,
+                        trade_group_id=order_row["trade_group_id"],
+                        entry_status=entry_row["status"] if entry_row else None,
+                    )
+                    return
 
             async with transaction(db):
                 await db.execute(

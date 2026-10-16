@@ -25,6 +25,7 @@ from app.core.db import transaction
 from app.core.models import OrderRow, order_row_from_db_row, parse_positive_decimal
 from app.services.notifier import TelegramNotifier, build_tree_message
 from app.trading.order_builder import (
+    get_contract_multiplier,
     normalize_routing_exchange,
     normalize_symbol,
     symbols_match,
@@ -486,6 +487,23 @@ async def _save_missing_executions(
 ) -> None:
     """Sucht nach Fills der Order in TWS und speichert sie in der executions-Tabelle."""
     order_id = order.order_id
+
+    # Invariante: Verwaiste Child-Orders (SL, TP, EXIT) dürfen keine Fills verbuchen, wenn der Entry storniert ist
+    if order.bracket_role in ("SL", "TP", "EXIT"):
+        async with database_connection.execute(
+            "SELECT status FROM orders WHERE trade_group_id = ? AND bracket_role = 'ENTRY' LIMIT 1",
+            (order.trade_group_id,),
+        ) as cursor:
+            entry_row = await cursor.fetchone()
+        if not entry_row or entry_row["status"] == "Cancelled":
+            logger.warning(
+                "Skipping execution recovery for orphan child order: Entry order is cancelled or missing",
+                order_id=order_id,
+                trade_group_id=order.trade_group_id,
+                entry_status=entry_row["status"] if entry_row else None,
+            )
+            return
+
     found_fills = [
         fill
         for fill in interactive_brokers.fills()
@@ -579,15 +597,36 @@ async def reconcile_broker_positions(
         return
 
     # Netto-Ausführungen offener Trades in der DB berechnen (SUM(BUY) - SUM(SELL))
+    # Isoliert auf Trade-Gruppen-Ebene: Verwaiste Executions von Trade-Gruppen mit storniertem Entry werden ignoriert.
     db_positions: dict[str, Decimal] = {}
     query = """
-        SELECT o.symbol,
-               SUM(CASE WHEN o.action = 'BUY' THEN CAST(e.qty AS REAL) ELSE -CAST(e.qty AS REAL) END) as net_qty
-        FROM executions e
-        JOIN orders o ON e.order_id = o.order_id
-        LEFT JOIN trades_settlement ts ON o.account_id = ts.account_id AND o.trade_group_id = ts.trade_group_id
-        WHERE ts.trade_group_id IS NULL
-        GROUP BY o.symbol
+        WITH group_executions AS (
+            SELECT
+                o.symbol,
+                o.trade_group_id,
+                SUM(CASE WHEN o.action = 'BUY' THEN CAST(e.qty AS REAL) ELSE -CAST(e.qty AS REAL) END) AS group_net,
+                EXISTS (
+                    SELECT 1 FROM orders o_entry
+                    WHERE o_entry.trade_group_id = o.trade_group_id
+                      AND o_entry.bracket_role = 'ENTRY'
+                      AND o_entry.status = 'Cancelled'
+                ) AS is_entry_cancelled
+            FROM executions e
+            JOIN orders o ON e.order_id = o.order_id
+            LEFT JOIN trades_settlement ts ON o.account_id = ts.account_id AND o.trade_group_id = ts.trade_group_id
+            WHERE ts.trade_group_id IS NULL
+            GROUP BY o.symbol, o.trade_group_id
+        )
+        SELECT
+            symbol,
+            SUM(
+                CASE
+                    WHEN is_entry_cancelled = 1 THEN 0.0
+                    ELSE group_net
+                END
+            ) AS net_qty
+        FROM group_executions
+        GROUP BY symbol
     """
     async with database_connection.execute(query) as cursor:
         async for row in cursor:
@@ -644,7 +683,12 @@ async def reconcile_broker_positions(
             continue
 
         account_id = pos.account
-        avg_cost = Decimal(str(round(float(pos.avgCost), 4)))
+        raw_avg_cost = Decimal(str(round(float(pos.avgCost), 4)))
+        multiplier = get_contract_multiplier(symbol, sec_type=sec_type)
+        if sec_type == "FUT" and multiplier > Decimal("0.0"):
+            avg_cost = round(raw_avg_cost / multiplier, 4)
+        else:
+            avg_cost = raw_avg_cost
 
         db_net_qty = db_positions.get(symbol, Decimal("0.0"))
 
