@@ -15,10 +15,16 @@ __pycache__/
 # Testing & Quality Tools
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.hypothesis/
+.cache/
 .coverage
 coverage.xml
 htmlcov/
 tests/
+bandit-report.json
+bandit-results.sarif
+*.sarif
 
 # Sensitive Files & Local Configs
 config.toml

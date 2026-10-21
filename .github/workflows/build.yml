@@ -19,6 +19,7 @@ jobs:
     env:
       REPO_LOWER: ''
       IMAGE_TAG: ''
+      TRIVY_CACHE_DIR: /tmp/trivy-cache
 
     steps:
       - name: Checkout repository
@@ -59,7 +60,7 @@ jobs:
           tags: ${{ env.IMAGE_TAG }}
           labels: ${{ steps.meta.outputs.labels }}
           pull: true
-          no-cache: true
+          cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
           sbom: false
@@ -73,6 +74,7 @@ jobs:
           ignore-unfixed: true
           scanners: 'vuln'
           severity: 'CRITICAL,HIGH'
+          cache-dir: '/tmp/trivy-cache'
 
       - name: Generate Trivy SARIF report for GitHub Security tab
         if: always()
@@ -86,6 +88,7 @@ jobs:
           limit-severities-for-sarif: true
           scanners: 'vuln'
           severity: 'CRITICAL,HIGH'
+          cache-dir: '/tmp/trivy-cache'
 
       - name: Ensure Trivy SARIF validity
         if: always()
