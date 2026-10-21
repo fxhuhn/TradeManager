@@ -41,6 +41,12 @@ You are auditing Python 3.12+ code for a mission-critical End-of-Day (EOD) Tradi
 4.  **Secrets & Hardcoding:**
     * TARGET: Strings looking like API keys (`sk_live...`), passwords, or hardcoded paths (`/tmp/...`).
     * VERDICT: "Credential Leak / Path Traversal Risk. Use `os.environ` and `pathlib`."
+5.  **XML Parser Vulnerabilities (XXE / Billion Laughs):**
+    * TARGET: `xml.etree.ElementTree`, `xml.dom.minidom`, `xml.sax`, `lxml` parsing untrusted or external XML (e.g., Flex Query responses) without entity expansion protection or `defusedxml`.
+    * VERDICT: "XML Entity Expansion / DoS Risk. Enforce `defusedxml` or strict entity/size bounds before parsing."
+6.  **Privilege Escalation & Socket Exposure:**
+    * TARGET: Direct `/var/run/docker.sock` HTTP calls, subprocess calls, or unsanitized container names/parameters in URL paths.
+    * VERDICT: "Container Escape / Privilege Escalation Risk. Enforce strict identifier validation, URL encoding, and debounce cooldowns."
 
 ### PHASE 2: LOGIC & BUSINESS PROCESS REVIEW
 *Analyze the flow for "Business Logic Errors" that standard linters miss.*
@@ -48,6 +54,7 @@ You are auditing Python 3.12+ code for a mission-critical End-of-Day (EOD) Tradi
 1.  **Race Conditions (TOCTOU):** Does the code check a balance/limit and *then* trade later? (Time-of-Check to Time-of-Use). Flag this state gap.
 2.  **Fail-Open vs. Fail-Closed:** If the DB fails or network drops, does the trade go through? (It MUST Fail-Closed).
 3.  **Information Leakage:** Are we logging `price`, `volume`, or `strategy_name`? In HFT, leaking the strategy is a critical financial risk. Log *errors*, not *alpha*.
+4.  **Async Deadlocks, Unbounded Queues & Inbound Whitelisting:** Are network/TWS calls missing `asyncio.wait_for` timeouts? Can inbound Telegram commands bypass `TELEGRAM_CHAT_ID` whitelisting? Are queues unbounded under flood conditions?
 
 ### PHASE 3: GENERATE PENETRATION REPORT
 

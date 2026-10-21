@@ -436,14 +436,14 @@ def match_flex_statement(
             if fee_record.trade_id and fee_record.trade_id in trade.exec_ids:
                 matched_trade_group = trade.trade_group_id
                 break
-            if fee_record.order_reference:
-                try:
-                    ref_int = int(fee_record.order_reference)
-                    if ref_int in trade.order_ids or ref_int in trade.perm_ids:
-                        matched_trade_group = trade.trade_group_id
-                        break
-                except ValueError:
-                    pass
+            if (
+                fee_record.order_reference
+                and fee_record.order_reference.lstrip("-").isdigit()
+            ):
+                ref_int = int(fee_record.order_reference)
+                if ref_int in trade.order_ids or ref_int in trade.perm_ids:
+                    matched_trade_group = trade.trade_group_id
+                    break
 
         # Falls keine direkte ID gematcht wurde, Fallback über Symbol und Datum
         if not matched_trade_group and fee_record.symbol:

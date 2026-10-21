@@ -398,6 +398,8 @@ def _parse_flex_query_config(
             "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService",
         )
     )
+    if not base_url.startswith("https://"):
+        raise ValueError(f"FlexQuery base_url must use https:// scheme: {base_url!r}")
     max_retries = _to_int(flex_data.get("max_retries"), 10)
     retry_delay_s = _to_float(flex_data.get("retry_delay_s"), 3.0)
     sync_time_utc = str(flex_data.get("sync_time_utc", "23:30"))

@@ -193,10 +193,8 @@ async def run_db_backup(db_path: Path) -> None:
             backup_file.unlink()
 
         async with aiosqlite.connect(str(db_path)) as connection:
-            # SICHERHEITSHINWEIS: VACUUM INTO unterstützt keine parametrisierten Abfragen.
-            # Der Pfad wird aus kontrollierten Eingaben (Dateiname + Zeitstempel) erstellt.
             backup_path_string = str(backup_file.resolve())
-            await connection.execute(f"VACUUM INTO '{backup_path_string}'")
+            await connection.execute("VACUUM INTO ?", (backup_path_string,))
 
         logger.info("Backup successfully created", path=str(backup_file))
 

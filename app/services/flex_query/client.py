@@ -107,10 +107,19 @@ class FlexWebServiceClient:
                         f"HTTP {response.status} von IBKR Flex Service: {text[:200]}"
                     )
                 content = str(await response.text())
-        except aiohttp.ClientError as err:
+                if len(content) > 50 * 1024 * 1024:
+                    raise FlexQueryServiceError(
+                        "Flex-XML-Antwort überschreitet das Größenlimit von 50 MB."
+                    )
+        except aiohttp.ClientError as client_error:
+            sanitized_error = (
+                str(client_error).replace(active_token, "***REDACTED***")
+                if active_token
+                else str(client_error)
+            )
             raise FlexQueryServiceError(
-                f"Netzwerkfehler bei SendRequest: {err}"
-            ) from err
+                f"Netzwerkfehler bei SendRequest: {sanitized_error}"
+            ) from client_error
         finally:
             if is_internal:
                 await session.close()
@@ -121,45 +130,51 @@ class FlexWebServiceClient:
         """Parst die SendRequest-XML-Antwort."""
         try:
             root = DefusedET.fromstring(xml_content)
-        except Exception as err:
+        except Exception as xml_error:
             raise FlexQueryServiceError(
                 f"Antwort ist kein valides XML: {xml_content[:200]}"
-            ) from err
+            ) from xml_error
 
-        status_elem = root.find("Status")
+        status_element = root.find("Status")
         status_text = (
-            status_elem.text if status_elem is not None and status_elem.text else ""
+            status_element.text
+            if status_element is not None and status_element.text
+            else ""
         )
 
         if status_text == "Success":
-            ref_elem = root.find("ReferenceCode")
-            if ref_elem is not None and ref_elem.text:
-                return str(ref_elem.text).strip()
+            reference_element = root.find("ReferenceCode")
+            if reference_element is not None and reference_element.text:
+                return str(reference_element.text).strip()
             raise FlexQueryServiceError(
                 "Erfolgreiche Antwort enthielt keinen ReferenceCode."
             )
 
         # Fehlerbehandlung
-        err_code_elem = root.find("ErrorCode")
-        err_msg_elem = root.find("ErrorMessage")
-        err_code = (
-            err_code_elem.text
-            if err_code_elem is not None and err_code_elem is not None
+        error_code_element = root.find("ErrorCode")
+        error_message_element = root.find("ErrorMessage")
+        error_code = (
+            error_code_element.text
+            if error_code_element is not None and error_code_element.text
             else ""
         )
-        err_msg = (
-            err_msg_elem.text if err_msg_elem is not None and err_msg_elem.text else ""
+        error_message = (
+            error_message_element.text
+            if error_message_element is not None and error_message_element.text
+            else ""
         )
 
-        if err_code in ("1018", "1017", "1015"):
-            raise FlexQueryAuthError(f"IBKR Flex Auth-Fehler ({err_code}): {err_msg}")
-        if err_code == "1016":
+        if error_code in ("1018", "1017", "1015"):
+            raise FlexQueryAuthError(
+                f"IBKR Flex Auth-Fehler ({error_code}): {error_message}"
+            )
+        if error_code == "1016":
             raise FlexQueryRateLimitError(
-                f"IBKR Flex Rate-Limit ({err_code}): {err_msg}"
+                f"IBKR Flex Rate-Limit ({error_code}): {error_message}"
             )
 
         raise FlexQueryServiceError(
-            f"IBKR Flex Service Fehler ({err_code}): {err_msg} (Status: {status_text})"
+            f"IBKR Flex Service Fehler ({error_code}): {error_message} (Status: {status_text})"
         )
 
     async def fetch_statement_xml(
@@ -201,10 +216,19 @@ class FlexWebServiceClient:
                                 f"HTTP {response.status} bei GetStatement: {text[:200]}"
                             )
                         content = str(await response.text())
-                except aiohttp.ClientError as err:
+                        if len(content) > 50 * 1024 * 1024:
+                            raise FlexQueryServiceError(
+                                "Flex-XML-Antwort überschreitet das Größenlimit von 50 MB."
+                            )
+                except aiohttp.ClientError as client_error:
+                    sanitized_error = (
+                        str(client_error).replace(active_token, "***REDACTED***")
+                        if active_token
+                        else str(client_error)
+                    )
                     raise FlexQueryServiceError(
-                        f"Netzwerkfehler bei GetStatement: {err}"
-                    ) from err
+                        f"Netzwerkfehler bei GetStatement: {sanitized_error}"
+                    ) from client_error
 
                 # Prüfen, ob noch generiert wird (1019) oder ob es das finale XML ist
                 is_pending, err_msg = self._check_pending_or_error(content)

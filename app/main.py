@@ -869,7 +869,7 @@ async def _initialize_and_start_orchestrator(
     Returns:
         TradingSystemOrchestrator: Die initialisierte und gestartete Orchestrator-Instanz.
     """
-    queue: asyncio.Queue[str] = asyncio.Queue()
+    queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1000)
     orchestrator = TradingSystemOrchestrator(
         root_directory_path=root_directory_path,
         database_path=database_path,

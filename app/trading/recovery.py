@@ -13,7 +13,7 @@ import asyncio
 import inspect
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 import aiosqlite
@@ -600,39 +600,32 @@ async def reconcile_broker_positions(
     # Isoliert auf Trade-Gruppen-Ebene: Verwaiste Executions von Trade-Gruppen mit storniertem Entry werden ignoriert.
     db_positions: dict[str, Decimal] = {}
     query = """
-        WITH group_executions AS (
-            SELECT
-                o.symbol,
-                o.trade_group_id,
-                SUM(CASE WHEN o.action = 'BUY' THEN CAST(e.qty AS REAL) ELSE -CAST(e.qty AS REAL) END) AS group_net,
-                EXISTS (
-                    SELECT 1 FROM orders o_entry
-                    WHERE o_entry.trade_group_id = o.trade_group_id
-                      AND o_entry.bracket_role = 'ENTRY'
-                      AND o_entry.status = 'Cancelled'
-                ) AS is_entry_cancelled
-            FROM executions e
-            JOIN orders o ON e.order_id = o.order_id
-            LEFT JOIN trades_settlement ts ON o.account_id = ts.account_id AND o.trade_group_id = ts.trade_group_id
-            WHERE ts.trade_group_id IS NULL
-            GROUP BY o.symbol, o.trade_group_id
-        )
         SELECT
-            symbol,
-            SUM(
-                CASE
-                    WHEN is_entry_cancelled = 1 THEN 0.0
-                    ELSE group_net
-                END
-            ) AS net_qty
-        FROM group_executions
-        GROUP BY symbol
+            o.symbol,
+            o.action,
+            e.qty,
+            EXISTS (
+                SELECT 1 FROM orders o_entry
+                WHERE o_entry.trade_group_id = o.trade_group_id
+                  AND o_entry.bracket_role = 'ENTRY'
+                  AND o_entry.status = 'Cancelled'
+            ) AS is_entry_cancelled
+        FROM executions e
+        JOIN orders o ON e.order_id = o.order_id
+        LEFT JOIN trades_settlement ts ON o.account_id = ts.account_id AND o.trade_group_id = ts.trade_group_id
+        WHERE ts.trade_group_id IS NULL
     """
     async with database_connection.execute(query) as cursor:
         async for row in cursor:
+            if row[3] == 1:
+                continue
             symbol = normalize_symbol(str(row[0]))
-            net_qty = Decimal(str(row[1])) if row[1] is not None else Decimal("0.0")
-            db_positions[symbol] = net_qty
+            action = str(row[1]).strip().upper()
+            execution_qty = (
+                Decimal(str(row[2])) if row[2] is not None else Decimal("0.0")
+            )
+            signed_qty = execution_qty if action == "BUY" else -execution_qty
+            db_positions[symbol] = db_positions.get(symbol, Decimal("0.0")) + signed_qty
 
     broker_positions_map: dict[str, tuple[Decimal, Any]] = {}
     for pos in positions:
@@ -683,10 +676,14 @@ async def reconcile_broker_positions(
             continue
 
         account_id = pos.account
-        raw_avg_cost = Decimal(str(round(float(pos.avgCost), 4)))
+        raw_avg_cost = Decimal(str(pos.avgCost)).quantize(
+            Decimal("0.0001"), rounding=ROUND_HALF_UP
+        )
         multiplier = get_contract_multiplier(symbol, sec_type=sec_type)
         if sec_type == "FUT" and multiplier > Decimal("0.0"):
-            avg_cost = round(raw_avg_cost / multiplier, 4)
+            avg_cost = (raw_avg_cost / multiplier).quantize(
+                Decimal("0.0001"), rounding=ROUND_HALF_UP
+            )
         else:
             avg_cost = raw_avg_cost
 
@@ -706,7 +703,7 @@ async def reconcile_broker_positions(
         delta_qty = broker_qty - db_net_qty
 
         if delta_qty > Decimal("0.0"):
-            logger.info(
+            logger.debug(
                 "Unassigned broker position discrepancy detected. Recovering to DB.",
                 symbol=symbol,
                 sec_type=sec_type,

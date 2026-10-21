@@ -76,7 +76,7 @@ async def save_account_metrics(
                 str(metrics.buying_power),
             ),
         )
-    logger.info(
+    logger.debug(
         "Account metrics snapshot persisted",
         account_id=account_id,
         net_liquidation=str(metrics.net_liquidation),

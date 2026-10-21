@@ -5,9 +5,11 @@ UNIX Domain Socket (/var/run/docker.sock), um Container wie IBKR Gateway
 kontrolliert neu zu starten.
 """
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
+from urllib.parse import quote
 
 import aiohttp
 import structlog
@@ -16,6 +18,17 @@ logger = structlog.get_logger()
 
 DEFAULT_DOCKER_SOCKET_PATH: Final[str] = "/var/run/docker.sock"
 DEFAULT_RESTART_TIMEOUT_SECONDS: Final[int] = 10
+_CONTAINER_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+)
+
+
+def _validate_and_encode_container_name(container_name: str) -> str | None:
+    """Validiert den Container-Namen gegen Path-Traversal/Injection und kodiert ihn URL-sicher."""
+    stripped_name = container_name.strip()
+    if not _CONTAINER_NAME_PATTERN.match(stripped_name):
+        return None
+    return quote(stripped_name, safe="")
 
 
 @dataclass(frozen=True)
@@ -76,6 +89,15 @@ class DockerContainerManager:
         Returns:
             tuple[bool, str]: (Erfolg, Status- oder Fehlermeldung).
         """
+        encoded_name = _validate_and_encode_container_name(container_name)
+        if encoded_name is None:
+            message = f"Ungültiger Container-Name: '{container_name}'."
+            logger.error(
+                "Invalid container name rejected for restart",
+                container=container_name,
+            )
+            return False, message
+
         if not self.is_available():
             message = (
                 f"Docker-Socket nicht verfügbar unter '{self._docker_socket_path}'. "
@@ -88,9 +110,7 @@ class DockerContainerManager:
             )
             return False, message
 
-        endpoint_url = (
-            f"http://localhost/containers/{container_name}/restart?t={timeout_seconds}"
-        )
+        endpoint_url = f"http://localhost/containers/{encoded_name}/restart?t={int(timeout_seconds)}"
         logger.info(
             "Requesting container restart via Docker API",
             container=container_name,
@@ -172,6 +192,15 @@ class DockerContainerManager:
         Returns:
             ContainerStatusReport: Strukturierter Bericht über Zustand und Health.
         """
+        encoded_name = _validate_and_encode_container_name(container_name)
+        if encoded_name is None:
+            return ContainerStatusReport(
+                name_or_id=container_name,
+                exists=False,
+                status="invalid_name",
+                error_message=f"Ungültiger Container-Name: '{container_name}'.",
+            )
+
         if not self.is_available():
             message = (
                 f"Docker-Socket nicht verfügbar unter '{self._docker_socket_path}'."
@@ -183,7 +212,7 @@ class DockerContainerManager:
                 error_message=message,
             )
 
-        endpoint_url = f"http://localhost/containers/{container_name}/json"
+        endpoint_url = f"http://localhost/containers/{encoded_name}/json"
         try:
             connector = aiohttp.UnixConnector(path=self._docker_socket_path)
             async with aiohttp.ClientSession(

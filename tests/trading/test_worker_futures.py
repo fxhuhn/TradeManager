@@ -53,11 +53,16 @@ async def test_worker_process_bounce_bandit_futures_bracket(
 
     mock_ib.client.getReqId.side_effect = mock_get_req_id
 
-    # Account values für Cushion-Check
+    # Account values für Cushion-Check & BaFin Cash-Deckung
     cushion_val = MagicMock()
+    cushion_val.account = "DU123456"
     cushion_val.tag = "Cushion"
     cushion_val.value = "0.75"
-    mock_ib.accountValues.return_value = [cushion_val]
+    cash_val = MagicMock()
+    cash_val.account = "DU123456"
+    cash_val.tag = "TotalCashValue"
+    cash_val.value = "50000.0"
+    mock_ib.accountValues.return_value = [cushion_val, cash_val]
 
     # Pre-Trade Simulation What-If
     mock_order_state = MagicMock()

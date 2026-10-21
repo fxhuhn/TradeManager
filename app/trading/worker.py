@@ -492,8 +492,8 @@ def _get_whatif_timeout_s(config: Config) -> float:
         timeout_value = getattr(getattr(config, "tws", None), "whatif_timeout_s", 10.0)
         if isinstance(timeout_value, int | float):
             return float(timeout_value)
-    except Exception:
-        pass
+    except Exception as config_error:
+        logger.debug("Fallback to default whatif_timeout_s", error=str(config_error))
     return 10.0
 
 
@@ -709,7 +709,11 @@ async def _run_whatif_with_error_capture(
     if has_error_event:
         try:
             interactive_brokers.errorEvent.connect(_on_whatif_error)
-        except Exception:
+        except Exception as connect_error:
+            logger.debug(
+                "Could not connect What-If errorEvent listener",
+                error=str(connect_error),
+            )
             has_error_event = False
 
     try:
@@ -739,8 +743,11 @@ async def _run_whatif_with_error_capture(
         if has_error_event:
             try:
                 interactive_brokers.errorEvent.disconnect(_on_whatif_error)
-            except Exception:
-                pass
+            except Exception as disconnect_error:
+                logger.debug(
+                    "Could not disconnect What-If errorEvent listener",
+                    error=str(disconnect_error),
+                )
 
 
 async def _handle_whatif_simulation_failure(
@@ -947,7 +954,11 @@ async def _verify_margin_and_cushion(
                 and str(raw_margin_before).replace(".", "", 1).isdigit()
                 else Decimal("0.0")
             )
-        except Exception:
+        except Exception as margin_parse_error:
+            logger.debug(
+                "Fallback to 0.0 for initMarginBefore",
+                error=str(margin_parse_error),
+            )
             init_margin_before = Decimal("0.0")
         equity_with_loan = Decimal(str(order_state.equityWithLoanAfter or "0.0"))
 
@@ -965,11 +976,12 @@ async def _verify_margin_and_cushion(
                     interactive_brokers, entry_order.account_id, "TotalCashBalance"
                 )
 
-            if total_cash is not None and margin_delta > total_cash:
+            effective_cash = total_cash if total_cash is not None else Decimal("0.0")
+            if total_cash is None or margin_delta > effective_cash:
                 logger.error(
                     "Futures order blocked by BaFin cash protection: required margin exceeds available cash.",
                     required_margin=float(margin_delta),
-                    total_cash=float(total_cash),
+                    total_cash=float(effective_cash),
                     symbol=entry_order.symbol,
                     trade_group_id=entry_order.trade_group_id,
                 )
@@ -983,7 +995,7 @@ async def _verify_margin_and_cushion(
                     symbol=entry_order.symbol,
                     account_id=entry_order.account_id,
                     init_margin_after=margin_delta,
-                    limit_value=total_cash,
+                    limit_value=effective_cash,
                     cushion_percentage=cushion_percentage,
                 )
                 return False, entry_order
@@ -1371,6 +1383,7 @@ async def _place_and_verify_order(
             notifier,
             interactive_brokers=interactive_brokers,
             config=config,
+            ib_order=ib_order,
         )
 
     return True
@@ -1547,8 +1560,9 @@ async def _retry_order_after_reauthorization(
     tws_order_id: int,
     config: Config,
     notifier: TelegramNotifier,
+    ib_order: Order | None = None,
 ) -> bool:
-    """Attempts reauthorization wait loop and re-places order if successful."""
+    """Attempts reauthorization wait loop, re-verifies margin for ENTRY orders, and re-places order."""
     contract = make_contract_for_order(order_row)
     simulated_order = build_order(order_row)
     simulated_order.whatIf = True
@@ -1562,12 +1576,24 @@ async def _retry_order_after_reauthorization(
         notifier=notifier,
     )
     if authorized:
+        if order_row.bracket_role == "ENTRY":
+            margin_ok, _ = await _verify_margin_and_cushion(
+                db=db,
+                interactive_brokers=interactive_brokers,
+                entry_order=order_row,
+                config=config,
+                notifier=notifier,
+            )
+            if not margin_ok:
+                return False
+
         logger.info(
             "Re-transmitting order after successful reauthorization",
             order_id=tws_order_id,
             symbol=order_row.symbol,
         )
-        retry_order = build_order(order_row)
+        retry_order = ib_order if ib_order is not None else build_order(order_row)
+        retry_order.whatIf = False
         retry_trade = interactive_brokers.placeOrder(contract, retry_order)
         await _wait_for_order_submission(retry_trade)
         return retry_trade.orderStatus.status not in (
@@ -1587,6 +1613,7 @@ async def _handle_order_rejection(
     notifier: TelegramNotifier,
     interactive_brokers: IB | None = None,
     config: Config | None = None,
+    ib_order: Order | None = None,
 ) -> bool:
     """Behandelt Fehlermeldungen bei der Order-Übertragung."""
     rejection = await _poll_for_rejection_error(trade, order_row, tws_order_id)
@@ -1616,6 +1643,7 @@ async def _handle_order_rejection(
             tws_order_id=tws_order_id,
             config=config,
             notifier=notifier,
+            ib_order=ib_order,
         )
 
     async with transaction(db):

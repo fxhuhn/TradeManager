@@ -286,8 +286,7 @@ async def _send_settlement_notification(
         )
     )
 
-    if is_valid_target:
-        assert entry_target_price is not None
+    if is_valid_target and entry_target_price is not None:
         target_str = f"{float(entry_target_price):.2f}"
         if outputs.price_diff_slippage > Decimal("0.0"):
             pct = (outputs.price_diff_slippage / outputs.avg_entry_price) * Decimal(

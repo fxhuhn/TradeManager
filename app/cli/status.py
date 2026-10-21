@@ -15,6 +15,9 @@ from decimal import Decimal
 from pathlib import Path
 
 import aiosqlite
+import structlog
+
+logger = structlog.get_logger()
 
 
 @dataclass(frozen=True)
@@ -71,7 +74,10 @@ def _extract_recent_log_issues(log_path: Path, max_issues: int = 5) -> list[str]
                 if len(issues) >= max_issues:
                     break
         issues.reverse()
-    except Exception:
+    except OSError as log_read_error:
+        logger.debug(
+            "Could not read log file for status report", error=str(log_read_error)
+        )
         return []
 
     return issues
@@ -154,18 +160,29 @@ async def generate_system_status_report(
 
             # 3. Heutige Settlements aggregieren
             settlement_query = """
-                SELECT COUNT(*) AS count,
-                       COALESCE(SUM(CAST(net_pnl AS REAL)), 0.0) AS total_pnl,
-                       COALESCE(SUM(CAST(total_commissions AS REAL)), 0.0) AS total_fees
+                SELECT net_pnl, total_commissions
                 FROM trades_settlement
                 WHERE date(settled_at) = date('now', 'localtime')
             """
             async with db.execute(settlement_query) as cursor:
-                settlement_row = await cursor.fetchone()
-                if settlement_row:
-                    today_settled_count = int(settlement_row["count"])
-                    today_net_pnl = Decimal(str(settlement_row["total_pnl"]))
-                    today_total_commissions = Decimal(str(settlement_row["total_fees"]))
+                settlement_rows = list(await cursor.fetchall())
+                today_settled_count = len(settlement_rows)
+                today_net_pnl = sum(
+                    (
+                        Decimal(str(row["net_pnl"]))
+                        for row in settlement_rows
+                        if row["net_pnl"] is not None
+                    ),
+                    start=Decimal("0.00"),
+                )
+                today_total_commissions = sum(
+                    (
+                        Decimal(str(row["total_commissions"]))
+                        for row in settlement_rows
+                        if row["total_commissions"] is not None
+                    ),
+                    start=Decimal("0.00"),
+                )
 
             # 4. Aktuelle Kontowerte und Margin abrufen
             account_metrics_report: AccountMetricsReport | None = None
@@ -198,7 +215,11 @@ async def generate_system_status_report(
                             buying_power=Decimal(str(metrics_row["buying_power"])),
                             updated_at=str(metrics_row["updated_at"]),
                         )
-            except Exception:
+            except Exception as metrics_error:
+                logger.debug(
+                    "Could not load account_metrics for status report",
+                    error=str(metrics_error),
+                )
                 account_metrics_report = None
 
         return SystemStatusReport(
@@ -213,7 +234,11 @@ async def generate_system_status_report(
             account_metrics=account_metrics_report,
             recent_log_issues=recent_log_issues,
         )
-    except Exception:
+    except Exception as db_error:
+        logger.warning(
+            "Database inaccessible while generating system status report",
+            error=str(db_error),
+        )
         return SystemStatusReport(
             db_accessible=False,
             recent_archive_files=recent_files,

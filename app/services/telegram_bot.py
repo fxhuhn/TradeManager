@@ -101,9 +101,16 @@ class TelegramCommandListener:
                 self._is_running = False
                 break
             except Exception as exception:
+                sanitized_error = (
+                    str(exception).replace(
+                        self._config.telegram.bot_token, "***REDACTED***"
+                    )
+                    if self._config.telegram.bot_token
+                    else str(exception)
+                )
                 logger.warning(
                     "Error in Telegram command polling loop",
-                    error=str(exception),
+                    error=sanitized_error,
                     backoff_seconds=error_backoff_seconds,
                 )
                 await asyncio.sleep(error_backoff_seconds)
@@ -166,8 +173,15 @@ class TelegramCommandListener:
                     )
                     return False
         except Exception as exception:
+            sanitized_error = (
+                str(exception).replace(
+                    self._config.telegram.bot_token, "***REDACTED***"
+                )
+                if self._config.telegram.bot_token
+                else str(exception)
+            )
             logger.warning(
-                "Error registering Telegram bot commands", error=str(exception)
+                "Error registering Telegram bot commands", error=sanitized_error
             )
             return False
 
@@ -350,15 +364,24 @@ class TelegramCommandListener:
                     result_msg, reply_markup=DEFAULT_BOT_KEYBOARD
                 )
         except Exception as exception:
+            sanitized_error = str(exception)
+            if self._config.flex_query.token:
+                sanitized_error = sanitized_error.replace(
+                    self._config.flex_query.token, "***REDACTED***"
+                )
+            if self._config.telegram.bot_token:
+                sanitized_error = sanitized_error.replace(
+                    self._config.telegram.bot_token, "***REDACTED***"
+                )
             logger.error(
                 "Error executing flex sync callback",
-                error=str(exception),
+                error=sanitized_error,
             )
             await self._notifier.send_message(
                 build_tree_message(
                     title="Flex-Sync fehlgeschlagen",
                     emoji="❌",
-                    rows=[("Fehler", str(exception)[:200])],
+                    rows=[("Fehler", sanitized_error[:200])],
                 ),
                 reply_markup=DEFAULT_BOT_KEYBOARD,
             )

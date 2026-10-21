@@ -2387,11 +2387,18 @@ async def test_handle_order_rejection_reauthorization_wait_flow(
     mock_trade.log = [mock_entry]
 
     mock_ib = MagicMock()
+    mock_ib.accountValues.return_value = []
+    mock_order_state = MagicMock()
+    mock_order_state.initMarginAfter = "100.0"
+    mock_order_state.equityWithLoanAfter = "10000.0"
+    mock_ib.whatIfOrderAsync = AsyncMock(return_value=mock_order_state)
     retry_trade = MagicMock()
     retry_trade.orderStatus.status = "Submitted"
     mock_ib.placeOrder.return_value = retry_trade
 
     mock_notifier = MagicMock()
+    mock_notifier.send_margin_utilization_warning = AsyncMock()
+    mock_notifier.send_high_margin_usage_warning = AsyncMock()
 
     with (
         patch("app.trading.worker.asyncio.sleep", AsyncMock()),

@@ -675,18 +675,27 @@ class TwsCallbacksManager:
 
             if mapped_status == "Filled":
                 await self._handle_filled_status(order_id, avg_fill_price)
+                self._orders_with_warning_399.discard(order_id)
+                self._notified_cancelled_order_ids.discard(order_id)
+                self._order_locks.pop(order_id, None)
             elif mapped_status == "Cancelled":
                 await self._handle_cancelled_status(
                     order_id=order_id,
                     event_symbol=event_symbol,
                     reason=reason,
                 )
+                self._orders_with_warning_399.discard(order_id)
+                self._order_locks.pop(order_id, None)
+                if len(self._notified_cancelled_order_ids) > 1000:
+                    self._notified_cancelled_order_ids.clear()
             elif mapped_status == "Error":
                 await self._handle_error_status(
                     order_id=order_id,
                     event_symbol=event_symbol,
                     reason=reason,
                 )
+                self._orders_with_warning_399.discard(order_id)
+                self._order_locks.pop(order_id, None)
         except Exception as unhandled:
             logger.exception(
                 "CRITICAL: Unhandled exception in _process_status_change",
@@ -975,7 +984,12 @@ class TwsCallbacksManager:
             async with db.execute(query, (order_id, order_id)) as cursor:
                 exec_row = await cursor.fetchone()
                 return bool(exec_row and exec_row["exec_count"] > 0)
-        except Exception:
+        except Exception as db_error:
+            logger.warning(
+                "Error checking sibling executions in database",
+                order_id=order_id,
+                error=str(db_error),
+            )
             return False
 
     @staticmethod
@@ -1008,7 +1022,12 @@ class TwsCallbacksManager:
             async with db.execute(query_executions, (trade_group_id,)) as cursor:
                 exec_row = await cursor.fetchone()
                 return bool(exec_row and exec_row["exec_count"] > 0)
-        except Exception:
+        except Exception as db_error:
+            logger.warning(
+                "Error checking entry executions in database",
+                trade_group_id=trade_group_id,
+                error=str(db_error),
+            )
             return False
 
     async def _has_filled_sibling_in_group(
@@ -1671,15 +1690,18 @@ class TwsCallbacksManager:
         bars = None
         for attempt in range(1, 4):
             try:
-                bars = await self.interactive_brokers.reqHistoricalDataAsync(
-                    contract=contract,
-                    endDateTime="",
-                    durationStr="1 D",
-                    barSizeSetting="1 day",
-                    whatToShow="TRADES",
-                    useRTH=True,
-                    formatDate=1,
-                    keepUpToDate=False,
+                bars = await asyncio.wait_for(
+                    self.interactive_brokers.reqHistoricalDataAsync(
+                        contract=contract,
+                        endDateTime="",
+                        durationStr="1 D",
+                        barSizeSetting="1 day",
+                        whatToShow="TRADES",
+                        useRTH=True,
+                        formatDate=1,
+                        keepUpToDate=False,
+                    ),
+                    timeout=15.0,
                 )
                 if bars:
                     break

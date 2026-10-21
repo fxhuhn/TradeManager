@@ -5,6 +5,7 @@ mit der lokalen Transaktions- und Positionsdatenbank.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass
 from decimal import Decimal
@@ -250,9 +251,11 @@ class FlexReconciliationService:
 
                 # Falls keine EXIT-Order existiert, synthetische EXIT-Order anlegen
                 if exit_order_id is None:
-                    exit_order_id = -1 * int(
-                        abs(hash(f"FLEX_EXIT_{trade_group_id}_{trade.account_id}"))
-                        % 100000000
+                    idempotency_digest = hashlib.sha256(
+                        f"FLEX_EXIT_{trade_group_id}_{trade.account_id}".encode()
+                    ).hexdigest()
+                    exit_order_id = -1 * (
+                        int(idempotency_digest[:12], 16) % 1_000_000_000 + 1
                     )
                     await self._db.execute(
                         """

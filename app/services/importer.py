@@ -48,9 +48,10 @@ class AccountBalanceMetrics:
 
 @dataclass
 class BatchCashBudget:
-    """Verfolgt das verbleibende freie Futures-Cash während eines CSV-Import-Batches."""
+    """Verfolgt das verbleibende freie Futures-Cash und kumuliertes Equity-Kapital während eines CSV-Import-Batches."""
 
     available_futures_cash: Decimal
+    allocated_equity_funds: Decimal = Decimal("0.0")
 
 
 async def csv_directory_watcher(
@@ -206,7 +207,9 @@ async def run_csv_import(
                 error=str(exception),
             )
 
-    batch_cash_budget: BatchCashBudget | None = None
+    batch_cash_budget: BatchCashBudget = BatchCashBudget(
+        available_futures_cash=Decimal("0.0")
+    )
     if config.futures.bafin_cash_protection:
         try:
             primary_account = resolve_account_id(interactive_brokers, "")
@@ -226,15 +229,16 @@ async def run_csv_import(
 
             avail_cash = max(Decimal("0.0"), total_cash - existing_futures_margin)
             batch_cash_budget = BatchCashBudget(available_futures_cash=avail_cash)
-            logger.info(
+            logger.debug(
                 "Initialized batch cash budget for futures",
                 total_cash=float(total_cash),
                 existing_futures_margin=float(existing_futures_margin),
                 available_futures_cash=float(avail_cash),
             )
         except Exception as budget_error:
-            logger.warning(
-                "Could not initialize batch futures cash budget. Falling back.",
+            batch_cash_budget = BatchCashBudget(available_futures_cash=Decimal("0.0"))
+            logger.error(
+                "Could not initialize batch futures cash budget. Failing closed with 0.0 available futures cash.",
                 error=str(budget_error),
             )
 
@@ -544,8 +548,7 @@ async def _process_and_upsert_group(
     target_future_symbol = config.futures.asset_mapping.get(source_symbol)
     is_future_transformed = bool(is_future_strategy and target_future_symbol)
 
-    if is_future_transformed:
-        assert target_future_symbol is not None
+    if is_future_transformed and target_future_symbol is not None:
         try:
             active_contract = await resolve_active_future_contract(
                 interactive_brokers,
@@ -579,7 +582,7 @@ async def _process_and_upsert_group(
             )
             return False
 
-        logger.info(
+        logger.debug(
             "Transforming equity order to future contract",
             trade_group_id=trade_group_id,
             strategy=strategy,
@@ -624,10 +627,7 @@ async def _process_and_upsert_group(
                 logger.warning(
                     "Future trade group skipped due to BaFin cash protection: Insufficient qualifying cash.",
                     trade_group_id=trade_group_id,
-                    strategy=strategy,
                     future_symbol=future_symbol,
-                    available_cash=float(batch_cash_budget.available_futures_cash),
-                    required_margin=float(required_margin),
                 )
                 await notifier.send_importer_info(
                     file_name=trade_group_id,
@@ -643,7 +643,7 @@ async def _process_and_upsert_group(
                 return False
 
             batch_cash_budget.available_futures_cash -= required_margin
-            logger.info(
+            logger.debug(
                 "Allocated cash for future order",
                 trade_group_id=trade_group_id,
                 future_symbol=future_symbol,
@@ -663,10 +663,22 @@ async def _process_and_upsert_group(
                 str(config.strategy_limits[strategy_name])
             )
 
+        effective_available_funds = balance_metrics.available_funds_value
+        effective_total_cash = balance_metrics.total_cash_value
+        if batch_cash_budget is not None:
+            effective_available_funds = max(
+                Decimal("0.0"),
+                effective_available_funds - batch_cash_budget.allocated_equity_funds,
+            )
+            effective_total_cash = max(
+                Decimal("0.0"),
+                effective_total_cash - batch_cash_budget.allocated_equity_funds,
+            )
+
         maximum_capital_allocation = determine_maximum_capital_allocation(
             net_liquidation_value=balance_metrics.net_liquidation_value,
-            available_funds_value=balance_metrics.available_funds_value,
-            total_cash_value=balance_metrics.total_cash_value,
+            available_funds_value=effective_available_funds,
+            total_cash_value=effective_total_cash,
             margin_multiplier_factor=Decimal(
                 str(config.account.margin_multiplier_factor)
             ),
@@ -674,7 +686,7 @@ async def _process_and_upsert_group(
             allocation_limit_percentage=strategy_limit_percentage,
         )
 
-        logger.info(
+        logger.debug(
             "Capital sizing calculated",
             trade_group_id=trade_group_id,
             strategy=strategy_name,
@@ -705,7 +717,7 @@ async def _process_and_upsert_group(
         )
 
         if target_quantity < entry_leg.quantity:
-            logger.info(
+            logger.debug(
                 "Capital sizing downscaled quantity",
                 trade_group_id=trade_group_id,
                 original_qty=entry_leg.quantity,
@@ -728,10 +740,6 @@ async def _process_and_upsert_group(
             logger.warning(
                 "Sizing resulted in Qty <= 0. Skipping group.",
                 trade_group_id=trade_group_id,
-                max_allocation=float(maximum_capital_allocation),
-                target_price=float(entry_leg.target_price)
-                if entry_leg.target_price
-                else 0.0,
             )
             await notifier.send_importer_info(
                 file_name=trade_group_id,
@@ -741,6 +749,11 @@ async def _process_and_upsert_group(
                 title="SIZING-FEHLER",
             )
             return False
+
+        if batch_cash_budget is not None and entry_leg.target_price is not None:
+            batch_cash_budget.allocated_equity_funds += (
+                Decimal(str(target_quantity)) * entry_leg.target_price
+            )
 
     if not entry_leg:
         # 1. Prüfen, ob die Trade-Gruppe bereits final abgewickelt (settled) ist
@@ -1057,7 +1070,12 @@ def _extract_account_cache_values(
         try:
             raw_value = getattr(account_value, "value", "")
             extracted[tag] = Decimal(str(raw_value))
-        except (ValueError, ArithmeticError):
+        except (ValueError, ArithmeticError) as parse_error:
+            logger.debug(
+                "Skipping non-numeric account cache value",
+                tag=tag,
+                error=str(parse_error),
+            )
             continue
     return extracted
 
@@ -1146,7 +1164,10 @@ async def fetch_account_balance_metrics(
     retrieved_values: dict[str, Decimal] = dict(cache_values)
 
     try:
-        summary_values = await interactive_brokers.accountSummaryAsync(account_id)
+        summary_values = await asyncio.wait_for(
+            interactive_brokers.accountSummaryAsync(account_id),
+            timeout=10.0,
+        )
         if summary_values:
             for account_value in summary_values:
                 if account_value.tag not in all_relevant_tags:

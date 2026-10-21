@@ -409,7 +409,12 @@ class TelegramNotifier:
                     session, url, payload, text, reply_markup, request_timeout
                 )
         except Exception as exception:
-            logger.error("Error sending Telegram alert", error=str(exception))
+            sanitized_error = (
+                str(exception).replace(self.token, "***REDACTED***")
+                if self.token
+                else str(exception)
+            )
+            logger.error("Error sending Telegram alert", error=sanitized_error)
             return False
 
     async def _dispatch_post_message(
@@ -575,8 +580,13 @@ class TelegramNotifier:
                         return True
                     return False
         except Exception as exception:
+            sanitized_error = (
+                str(exception).replace(self.token, "***REDACTED***")
+                if self.token
+                else str(exception)
+            )
             logger.warning(
-                "Failed to answer Telegram callback query", error=str(exception)
+                "Failed to answer Telegram callback query", error=sanitized_error
             )
             return False
 
